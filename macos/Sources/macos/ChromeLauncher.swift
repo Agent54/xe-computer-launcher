@@ -30,6 +30,7 @@ extension ExternalState {
         "--flag-switches-begin",
         "--enable-features=AppShimNotificationAttribution,DesktopPWAsAdditionalWindowingControls,DesktopPWAsLinkCapturingWithScopeExtensions,DesktopPWAsSubApps,IsolatedWebAppDevMode,IsolatedWebApps,OverscrollEffectOnNonRootScrollers,UseAdHocSigningForWebAppShims,PwaNavigationCapturing,UnframedIwa,WebAppBorderless,WebAppPredictableAppUpdating",
         "--disable-features=CADisplayLinkInBrowser,AutomationControlled",
+        "--disable-blink-features=AutomationControlled",
         "--flag-switches-end"
     ]
     // DO NOT DELETE:
@@ -106,6 +107,11 @@ extension ExternalState {
             appendLog("launcher", "Chrome started with debug pipe (\(chrome.name), pid=\(_browserPid), isRunning=\(chromeRunning))")
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
+            // Remove navigator.webdriver flag on all current and future targets
+            // Note: --disable-blink-features=AutomationControlled handles this now,
+            // but keeping the CDP approach commented out in case it's needed later.
+            // removeWebdriverFlag()
+
             // Check if app shim needs provisioning (in parallel)
             let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
             let shimApp = shimDir.appendingPathComponent(shimAppName)
@@ -119,6 +125,157 @@ extension ExternalState {
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
             return error.localizedDescription
+        }
+    }
+
+    // MARK: - CDP Pipe Communication
+
+    /// Monotonically increasing CDP message ID.
+    nonisolated(unsafe) private static var _cdpNextId: Int = 0
+    private static let _cdpIdLock = NSLock()
+    private static func nextCDPId() -> Int {
+        _cdpIdLock.lock()
+        defer { _cdpIdLock.unlock() }
+        _cdpNextId += 1
+        return _cdpNextId
+    }
+
+    /// Leftover data from previous CDP reads (events that arrived between commands).
+    nonisolated(unsafe) private static var _cdpReadBuffer = Data()
+
+    /// Send a CDP command over the debugging pipe with a timeout.
+    /// The pipe protocol uses \0 as message delimiter.
+    /// If `sessionId` is provided, the command is routed to that target session.
+    @discardableResult
+    private func sendCDP(method: String, params: [String: Any] = [:], sessionId: String? = nil, timeout: TimeInterval = 5.0) -> [String: Any]? {
+        guard let writeHandle = cdpWriteHandle, let readHandle = cdpReadHandle else {
+            appendLog("launcher", "CDP: pipe not available")
+            return nil
+        }
+        let id = Self.nextCDPId()
+        var msg: [String: Any] = ["id": id, "method": method]
+        if !params.isEmpty { msg["params"] = params }
+        if let sid = sessionId { msg["sessionId"] = sid }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: msg),
+              var payload = String(data: jsonData, encoding: .utf8) else {
+            appendLog("launcher", "CDP: failed to serialize \(method)")
+            return nil
+        }
+        payload.append("\0")
+        writeHandle.write(payload.data(using: .utf8)!)
+
+        let deadline = Date().addingTimeInterval(timeout)
+        let fd = readHandle.fileDescriptor
+
+        // Check buffered data first, then poll for new data with timeout
+        while Date() < deadline {
+            // Process any complete messages in the buffer
+            while let zeroIdx = Self._cdpReadBuffer.firstIndex(of: 0) {
+                let messageData = Self._cdpReadBuffer[Self._cdpReadBuffer.startIndex..<zeroIdx]
+                Self._cdpReadBuffer = Data(Self._cdpReadBuffer[Self._cdpReadBuffer.index(after: zeroIdx)...])
+
+                guard let response = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
+                    continue
+                }
+                if let responseId = response["id"] as? Int, responseId == id {
+                    return response
+                }
+                // Event — skip
+            }
+
+            // Use poll() to wait for data with a timeout
+            let remainingMs = Int32(max(deadline.timeIntervalSinceNow * 1000, 1))
+            var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pollResult = poll(&pollFd, 1, min(remainingMs, 500))
+            if pollResult > 0 {
+                var buf = [UInt8](repeating: 0, count: 65536)
+                let n = read(fd, &buf, buf.count)
+                if n <= 0 { return nil } // pipe closed or error
+                Self._cdpReadBuffer.append(contentsOf: buf[0..<n])
+            } else if pollResult < 0 {
+                return nil // error
+            }
+            // pollResult == 0 means timeout on this iteration, loop will check deadline
+        }
+
+        appendLog("launcher", "CDP: timeout waiting for response to \(method) (id=\(id))")
+        return nil
+    }
+
+    /// Use CDP to inject a script removing navigator.webdriver on all targets.
+    /// We discover targets, attach to each page/iframe, enable Page domain,
+    /// and add the override script. Also sets up auto-attach for future targets.
+    private func removeWebdriverFlag() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.chromeRunning else { return }
+
+            let script = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+
+            // Enable auto-attach so we get sessions for all new targets automatically
+            let autoAttachResp = self.sendCDP(method: "Target.setAutoAttach", params: [
+                "autoAttach": true,
+                "waitForDebuggerOnStart": false,
+                "flatten": true
+            ])
+            self.appendLog("launcher", "CDP Target.setAutoAttach: \(autoAttachResp?["error"] ?? "ok")")
+
+            // Discover existing targets
+            guard let getTargetsResp = self.sendCDP(method: "Target.getTargets"),
+                  let result = getTargetsResp["result"] as? [String: Any],
+                  let targetInfos = result["targetInfos"] as? [[String: Any]] else {
+                self.appendLog("launcher", "CDP: failed to get targets")
+                return
+            }
+
+            self.appendLog("launcher", "CDP: found \(targetInfos.count) targets")
+
+            for info in targetInfos {
+                let type = info["type"] as? String ?? ""
+                let targetId = info["targetId"] as? String ?? ""
+                let url = info["url"] as? String ?? ""
+                self.appendLog("launcher", "CDP target: type=\(type) id=\(targetId) url=\(url)")
+
+                // Skip browser target
+                guard type != "browser" else { continue }
+
+                guard let attachResp = self.sendCDP(method: "Target.attachToTarget", params: [
+                    "targetId": targetId,
+                    "flatten": true
+                ]),
+                let attachResult = attachResp["result"] as? [String: Any],
+                let sessionId = attachResult["sessionId"] as? String else {
+                    self.appendLog("launcher", "CDP: failed to attach to \(targetId)")
+                    continue
+                }
+
+                // Try Page domain (works for page/iframe targets)
+                let pageEnableResp = self.sendCDP(method: "Page.enable", sessionId: sessionId)
+                let pageEnabled = (pageEnableResp?["error"] == nil)
+
+                if pageEnabled {
+                    // Add the webdriver override script for new documents
+                    let addResp = self.sendCDP(method: "Page.addScriptToEvaluateOnNewDocument", params: [
+                        "source": script,
+                        "worldName": "",
+                        "runImmediately": true
+                    ], sessionId: sessionId)
+                    self.appendLog("launcher", "CDP Page.addScript on \(type)/\(targetId): \(addResp?["error"] ?? "ok")")
+
+                    // Reload page targets so the injected script runs before page JS
+                    if ["app", "page", "webview"].contains(type) {
+                        self.sendCDP(method: "Page.reload", sessionId: sessionId)
+                        self.appendLog("launcher", "CDP Page.reload on \(type)/\(targetId)")
+                    }
+                }
+
+                // Always try Runtime.evaluate to apply immediately (works on all target types)
+                let evalResp = self.sendCDP(method: "Runtime.evaluate", params: [
+                    "expression": script,
+                    "allowUnsafeEvalBlockedByCSP": true
+                ], sessionId: sessionId)
+                self.appendLog("launcher", "CDP Runtime.evaluate on \(type)/\(targetId): \(evalResp?["error"] ?? "ok")")
+            }
         }
     }
 

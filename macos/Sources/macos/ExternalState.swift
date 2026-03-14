@@ -430,6 +430,15 @@ final class ExternalState: @unchecked Sendable {
         appendLog("launcher", "Darc started via NSWorkspace (isRunning=\(running), pid=\(pid))")
         print("[ExternalState] Darc started, isRunning=\(running)")
 
+        // Bring the Darc app to the foreground (silently — ignore if app terminated)
+        if let app = darcApp, !app.isTerminated {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                if let ref = self?.darcApp, !ref.isTerminated {
+                    ref.activate()
+                }
+            }
+        }
+
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {
             startAppShimLogStream(pid: pid)

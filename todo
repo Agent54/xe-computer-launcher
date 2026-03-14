@@ -20,3 +20,11 @@ social feed with screenshots of software and agent reports on progress what is r
 out of launcher running detection and message in darc.
 
 website updates
+
+enable-mac-pwas-notification-attribution etc
+--custom-devtools-frontend
+
+// NOTE: "--app-id=olcppkbdbkjjkmaedekgaajkgipnodan" will kind of work in single command but show warning on start window
+
+mouse-trap
+capslock
