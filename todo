@@ -1,3 +1,5 @@
+# TODO
+
 - limactl
 - bootstrap profile
 - profile switcher
@@ -28,3 +30,60 @@ enable-mac-pwas-notification-attribution etc
 
 mouse-trap
 capslock
+
+agent setup/skills:
+    pouch
+    svelte
+    clooudflare
+    controlled frames/iwa
+
+invisible char sec scan all repos!!!!
+
+point and click/ talk interactions for agent interactions
+
+
+Best practice is: don’t have the GUI app own a long-lived daemon tree.
+
+On macOS, the clean architecture is usually:
+
+The .app runs as the logged-in user.
+launchd owns any long-lived background service.
+The app talks to that service over XPC.
+Short-lived subprocesses are fine under the daemon, but independent long-lived helpers should usually be separate launchd jobs or XPC services, not ad hoc children.
+A good rule of thumb:
+
+If it needs UI or user-session access: LoginItem or LaunchAgent, running as that user.
+If it needs system-wide background work: LaunchDaemon.
+If it just needs isolation/modularity: private XPC service.
+If it needs root/admin power: privileged helper or LaunchDaemon, with the UI app staying unprivileged.
+For the daemon and its children specifically:
+
+Let launchd start the daemon. Don’t have your app fork a daemon and leave it around.
+Don’t “daemonize” the daemon yourself with double-fork patterns; Apple explicitly recommends launchd-managed processes instead.
+Keep one well-defined parent service and treat child processes as workers.
+Children should be short-lived where possible and should inherit clear responsibility only.
+If a child is important enough that it needs restart policy, crash handling, or independent lifecycle, promote it to its own XPC service or its own launchd job.
+Make the daemon as stateless as practical so restart is cheap.
+On identity/user model:
+
+A LaunchDaemon is normally the system-style background service choice.
+If you truly need a dedicated Unix account, that’s a more “service product” design than a normal app design.
+It can be done with a launchd job configured for a specific account, but it’s usually not the nicest choice for app software because TCC/privacy, filesystem ownership, Keychain, updates, and user-session integration get harder fast.
+So for most app developers, the best answer is not “dedicated app user,” but:
+
+app as user
+background service under launchd
+IPC via XPC
+least privilege per component
+Apple docs backing this up:
+
+Service Management
+XPC
+Creating Launch Daemons and Agents
+Creating XPC Services
+Designing Daemons and Services
+If you want, I can sketch the best concrete setup for one of these:
+
+GUI app + background sync service
+GUI app + root privileged helper
+GUI app + dedicated service-account daemon

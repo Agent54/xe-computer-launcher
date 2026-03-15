@@ -27,6 +27,7 @@ extension ExternalState {
         "--silent-launch",
         "--no-default-browser-check",
         "--no-first-run",
+        // TODO: support "--proxy-server=http://127.0.0.1:8080",
         "--flag-switches-begin",
         "--enable-features=AppShimNotificationAttribution,DesktopPWAsAdditionalWindowingControls,DesktopPWAsLinkCapturingWithScopeExtensions,DesktopPWAsSubApps,IsolatedWebAppDevMode,IsolatedWebApps,OverscrollEffectOnNonRootScrollers,UseAdHocSigningForWebAppShims,PwaNavigationCapturing,UnframedIwa,WebAppBorderless,WebAppPredictableAppUpdating",
         "--disable-features=CADisplayLinkInBrowser,AutomationControlled",
