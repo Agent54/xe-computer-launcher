@@ -107,7 +107,7 @@ dmg: notarize
 	@rm -f "$(BUILD_DIR)/$(DMG_NAME)"
 	@create-dmg \
 		--volname "$(APP_NAME)" \
-		--window-pos 460 320 \
+		--window-pos 510 370 \
 		--window-size 600 400 \
 		--icon-size 100 \
 		--icon "$(APP_NAME).app" 150 160 \
