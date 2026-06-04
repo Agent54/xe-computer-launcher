@@ -1,6 +1,6 @@
 # XE-Darc Launcher
 
-XE-Darc launcher is the entrypoint for the XE-Dark system.
+XE-Darc launcher is the entrypoint for the XE-Darc system.
 
 ## Requirements
 
