@@ -420,9 +420,11 @@ extension ExternalState {
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         do { try proc.run() } catch { return [] }
-        proc.waitUntilExit()
 
+        // Read before waiting: ps output can exceed the 64KB pipe buffer
+        // (large process tables), which deadlocks waitUntilExit().
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
         guard let output = String(data: data, encoding: .utf8) else {
             appendLog("launcher", "findZombieProcesses: failed to decode ps output")
             return []
