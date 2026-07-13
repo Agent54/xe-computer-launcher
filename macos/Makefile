@@ -20,7 +20,7 @@ NOTARY_PROFILE ?= notarytool-profile
 
 .PHONY: all clean build bundle run release release-sign check notarize dmg
 
-all: bundle
+all: release
 
 zip-helpers:
 	@echo "Zipping helpers..."
@@ -108,11 +108,10 @@ dmg: notarize
 	@create-dmg \
 		--volname "$(APP_NAME)" \
 		--window-pos 510 370 \
-		--window-size 600 400 \
+		--window-size 360 320 \
 		--icon-size 100 \
-		--icon "$(APP_NAME).app" 150 160 \
+		--icon "$(APP_NAME).app" 180 140 \
 		--hide-extension "$(APP_NAME).app" \
-		--app-drop-link 450 160 \
 		--codesign "$(DEVELOPER_ID)" \
 		"$(BUILD_DIR)/$(DMG_NAME)" \
 		"$(APP_BUNDLE)"

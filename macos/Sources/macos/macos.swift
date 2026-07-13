@@ -25,6 +25,7 @@ struct MacOSApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var didFinishNormalStartup = false
     private var statusItem: NSStatusItem?
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
@@ -56,6 +57,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bindCapslockItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch { [weak self] in
+            self?.finishNormalStartup()
+        }
+        guard !isWaitingForRelaunch else { return }
+
+        finishNormalStartup()
+    }
+
+    private func finishNormalStartup() {
+        guard !didFinishNormalStartup else { return }
+        didFinishNormalStartup = true
+
         setupMainMenu()
         setupStatusItem()
         renderMenuLabels()
