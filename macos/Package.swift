@@ -17,6 +17,7 @@ let package = Package(
                 "Info.plist",
                 "Entitlements.plist",
                 "Resources/app.icns",
+                "Resources/status-icon.png",
                 "Resources/vms",
                 "sandbox"
             ],

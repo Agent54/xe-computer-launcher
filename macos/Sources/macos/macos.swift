@@ -57,9 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bindCapslockItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch { [weak self] in
+        let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
             self?.finishNormalStartup()
-        }
+        })
         guard !isWaitingForRelaunch else { return }
 
         finishNormalStartup()
@@ -72,8 +72,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupMainMenu()
         setupStatusItem()
         renderMenuLabels()
-        // Do expensive init off main thread
-        DispatchQueue.global(qos: .userInitiated).async {
+
+        // Permission onboarding must not depend on whether downloadable assets
+        // or an existing Darc app shim are already present.
+        Task { @MainActor [weak self] in
+            _ = await AccessibilityPermission.requestIfNeeded()
+            self?.startBackgroundInitialization()
+        }
+    }
+
+    private func startBackgroundInitialization() {
+        // Do expensive init off main thread.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             let state = ExternalState.shared
             state.updateAll()
 
@@ -133,12 +144,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let button = statusItem?.button {
             if let resourceURL = Bundle.main.resourceURL,
-               let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("app.icns")) {
+               let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("status-icon.png")) {
                 icon.size = NSSize(width: 18, height: 18)
-                icon.isTemplate = false
+                icon.isTemplate = true
                 button.image = icon
             } else {
-                button.image = NSImage(systemSymbolName: "app.fill", accessibilityDescription: "Menu")
+                button.image = NSImage(
+                    systemSymbolName: "desktopcomputer",
+                    accessibilityDescription: "Xe Computer"
+                )
                 button.image?.size = NSSize(width: 18, height: 18)
             }
         }

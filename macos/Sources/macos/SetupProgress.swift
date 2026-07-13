@@ -34,6 +34,38 @@ nonisolated(unsafe) private var _statusLabel: NSTextField?
 nonisolated(unsafe) private var _cancelButton: NSButton?
 private let _cancellation = CancellationToken()
 
+private var setupAppDisplayName: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Computer"
+}
+
+enum SetupProgressPlacement {
+    case centered
+    case topTrailing
+}
+
+@MainActor
+private func positionSetupPanel(_ panel: NSPanel, placement: SetupProgressPlacement) {
+    switch placement {
+    case .centered:
+        panel.level = .floating
+        panel.center()
+    case .topTrailing:
+        // Keep system permission prompts above this companion window and leave
+        // the center of the screen unobstructed.
+        panel.level = .normal
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            panel.center()
+            return
+        }
+        let margin: CGFloat = 24
+        let visibleFrame = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(
+            x: visibleFrame.maxX - panel.frame.width - margin,
+            y: visibleFrame.maxY - panel.frame.height - margin
+        ))
+    }
+}
+
 /// The shared cancellation token for the current setup. Check `isCancelled` from any thread.
 var setupCancellation: CancellationToken { _cancellation }
 
@@ -62,7 +94,18 @@ private func loadAppIcon() -> NSImage? {
 
 /// Show the setup progress window. Call from main thread.
 @MainActor
-func showSetupProgress(message: String) {
+func showSetupProgress(
+    message: String,
+    placement: SetupProgressPlacement = .centered,
+    allowsCancellation: Bool = true
+) {
+    if let panel = _setupWindow {
+        positionSetupPanel(panel, placement: placement)
+        _cancelButton?.isHidden = !allowsCancellation
+        panel.orderFrontRegardless()
+        return
+    }
+
     // Size window to fit the path
     let pathFont = NSFont.systemFont(ofSize: 11)
     let pathTextWidth = (message as NSString).size(withAttributes: [.font: pathFont]).width + 100
@@ -79,8 +122,7 @@ func showSetupProgress(message: String) {
     panel.isMovableByWindowBackground = true
     panel.backgroundColor = .clear
     panel.isOpaque = false
-    panel.level = .floating
-    panel.center()
+    positionSetupPanel(panel, placement: placement)
     panel.isReleasedWhenClosed = false
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     panel.hidesOnDeactivate = false
@@ -117,8 +159,8 @@ func showSetupProgress(message: String) {
     iconView.imageScaling = .scaleProportionallyUpOrDown
     vfx.addSubview(iconView)
 
-    // "Setting up Darc" title centered below icon
-    let title = NSTextField(labelWithString: "Setting up Darc")
+    // App setup title centered below icon
+    let title = NSTextField(labelWithString: "Setting up \(setupAppDisplayName)")
     title.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
     title.font = .systemFont(ofSize: 15, weight: .semibold)
     title.textColor = .white
@@ -168,6 +210,7 @@ func showSetupProgress(message: String) {
     cancelButton.isBordered = true
     cancelButton.contentTintColor = NSColor.white.withAlphaComponent(0.8)
     cancelButton.refusesFirstResponder = true
+    cancelButton.isHidden = !allowsCancellation
     vfx.addSubview(cancelButton)
     _cancelButton = cancelButton
 
@@ -176,16 +219,16 @@ func showSetupProgress(message: String) {
         NSApp.applicationIconImage = icon
     }
     // Set the app name BEFORE showing in Dock (macOS captures process name at activation)
-    ProcessInfo.processInfo.processName = "Darc"
-    // Set up a minimal main menu so the menu bar shows "Darc" instead of "bin"
+    ProcessInfo.processInfo.processName = setupAppDisplayName
+    // Set up a minimal main menu so the menu bar shows the app name instead of "bin"
     if NSApp.mainMenu == nil || NSApp.mainMenu?.items.isEmpty == true {
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu(title: "Darc")
-        appMenu.addItem(withTitle: "About Darc", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: setupAppDisplayName)
+        appMenu.addItem(withTitle: "About \(setupAppDisplayName)", action: nil, keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Darc", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit \(setupAppDisplayName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         NSApp.mainMenu = mainMenu
     }
@@ -200,7 +243,22 @@ func showSetupProgress(message: String) {
 @MainActor
 func updateSetupProgress(status: String? = nil, progress: Double? = nil) {
     if let status { _statusLabel?.stringValue = status }
-    if let progress { _progressBar?.doubleValue = progress }
+    if let progress {
+        _progressBar?.stopAnimation(nil)
+        _progressBar?.isIndeterminate = false
+        _progressBar?.doubleValue = progress
+    }
+}
+
+/// Toggle the setup bar between determinate work and an open-ended wait.
+@MainActor
+func setSetupProgressIndeterminate(_ isIndeterminate: Bool) {
+    _progressBar?.isIndeterminate = isIndeterminate
+    if isIndeterminate {
+        _progressBar?.startAnimation(nil)
+    } else {
+        _progressBar?.stopAnimation(nil)
+    }
 }
 
 /// Possible user responses from the error dialog.

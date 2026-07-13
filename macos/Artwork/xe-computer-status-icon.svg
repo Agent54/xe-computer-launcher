@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 72">
+  <defs>
+    <mask id="xe-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="72" height="72">
+      <rect width="72" height="72" fill="black"/>
+      <rect x="4" y="8" width="64" height="56" rx="12" fill="white"/>
+      <path d="M16 24 L30 48 M30 24 L16 48"
+            fill="none"
+            stroke="black"
+            stroke-width="6"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+      <path d="M35 37 H58 V34 C58 28.5 54.5 25 49 25 C43.5 25 39 29 39 34 V42 C39 47.5 43 50 49 50 H57.5"
+            fill="none"
+            stroke="black"
+            stroke-width="6"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <rect x="4" y="8" width="64" height="56" rx="12" fill="black" mask="url(#xe-cutout)"/>
+</svg>

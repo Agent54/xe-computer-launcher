@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 
 final class ExternalState: @unchecked Sendable {
-    static let appSupportIdentifier = "dev.xe.darc"
+    static let appSupportIdentifier = "dev.xe.xecomputer"
 
     static var appDataURL: URL {
         let fileManager = FileManager.default

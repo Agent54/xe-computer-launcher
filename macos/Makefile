@@ -2,8 +2,8 @@
 -include .env
 export
 
-APP_NAME = Darc Launcher
-BUNDLE_ID = dev.xe.darc
+APP_NAME = Xe Computer
+BUNDLE_ID = dev.xe.xecomputer
 BUILD_DIR = .build
 APP_BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
 CONTENTS = $(APP_BUNDLE)/Contents

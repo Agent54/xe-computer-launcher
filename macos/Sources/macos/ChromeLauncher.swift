@@ -319,27 +319,9 @@ extension ExternalState {
     /// Uses the macOS Accessibility API (AXUIElement) directly — requires only Accessibility permission,
     /// not the separate "control Finder" Automation permission that AppleScript triggers.
     private func closeFinderWindowsContaining(_ substrings: [String]) {
-        // Check/request Accessibility permission (shows system prompt if not trusted)
-        let promptKey = "AXTrustedCheckOptionPrompt" as CFString
-        if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
-            // Show progress window with permission message while waiting
-            DispatchQueue.main.async {
-                showSetupProgress(message: "")
-                updateSetupProgress(
-                    status: "Please grant Accessibility permission for managing window-to-desktop assignment and modifying app permissions to install sub-apps.",
-                    progress: 100
-                )
-            }
-            appendLog("launcher", "Waiting for Accessibility permission...")
-            for _ in 0..<120 {
-                Thread.sleep(forTimeInterval: 0.5)
-                if AXIsProcessTrusted() { break }
-            }
-            DispatchQueue.main.async { closeSetupProgress() }
-            if !AXIsProcessTrusted() {
-                appendLog("launcher", "Accessibility permission not granted, cannot close Finder windows")
-                return
-            }
+        guard AXIsProcessTrusted() else {
+            appendLog("launcher", "Accessibility permission not granted, cannot close Finder windows")
+            return
         }
 
         // Find the Finder process
