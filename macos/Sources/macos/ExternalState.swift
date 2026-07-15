@@ -352,10 +352,38 @@ final class ExternalState: @unchecked Sendable {
         )
     }
 
+    var isColimaInstalled: Bool {
+        resolveExecutable(name: "colima") != nil
+    }
+
+    var isHomebrewInstalled: Bool {
+        resolveExecutable(name: "brew") != nil
+    }
+
     func installColima() -> String? {
-        guard resolveExecutable(name: "brew") != nil else { return "homebrew_missing" }
-        let result = runCommand("brew", arguments: ["install", "colima"])
-        return result.exitCode == 0 ? nil : (result.error.isEmpty ? "Failed to install colima" : result.error)
+        guard !isColimaInstalled else { return nil }
+        guard let brewPath = resolveExecutable(name: "brew") else {
+            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Computer, or install Colima manually."
+        }
+
+        appendLog("launcher", "Colima not found; installing it with Homebrew")
+        let result = runCommand(brewPath, arguments: ["install", "colima"])
+        result.output.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
+        result.error.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
+
+        guard result.exitCode == 0 else {
+            let detail = (result.error.isEmpty ? result.output : result.error)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = detail.isEmpty ? "" : "\n\nHomebrew reported:\n\(String(detail.suffix(1200)))"
+            return "Homebrew could not install Colima. Run `brew install colima` in Terminal or install Colima manually.\(suffix)"
+        }
+
+        guard isColimaInstalled else {
+            return "Homebrew finished without an error, but Colima could not be found. Run `brew install colima` in Terminal or install Colima manually."
+        }
+
+        appendLog("launcher", "Colima installed successfully with Homebrew")
+        return nil
     }
 
     func launchBrowserStack() -> String? {

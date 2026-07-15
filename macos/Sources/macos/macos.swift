@@ -55,6 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var appVMStopItem: NSMenuItem?
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
+    private var hideDockIconItem: NSMenuItem?
+    private var openAppDataFolderItem: NSMenuItem?
+    private var openAppDataFolderSeparator: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
@@ -68,6 +71,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finishNormalStartup() {
         guard !didFinishNormalStartup else { return }
         didFinishNormalStartup = true
+
+        // The DMG installer runs as an accessory app. Only normal launcher
+        // startup owns a Dock icon, according to the user's saved preference.
+        let state = ExternalState.shared
+        state.updateSettings()
+        configureApplicationIdentity()
+        applyDockIconPreference()
 
         setupMainMenu()
         setupStatusItem()
@@ -87,6 +97,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             let state = ExternalState.shared
             state.updateAll()
+
+            if !state.isColimaInstalled {
+                var installationError: String?
+
+                if state.isHomebrewInstalled {
+                    let progressReady = DispatchSemaphore(value: 0)
+                    Task { @MainActor in
+                        showSetupProgress(message: "Installing a required VM dependency", allowsCancellation: false)
+                        updateSetupProgress(status: "Installing Colima with Homebrew…")
+                        setSetupProgressIndeterminate(true)
+                        progressReady.signal()
+                    }
+                    progressReady.wait()
+
+                    installationError = state.installColima()
+
+                    let progressClosed = DispatchSemaphore(value: 0)
+                    Task { @MainActor in
+                        closeSetupProgress()
+                        progressClosed.signal()
+                    }
+                    progressClosed.wait()
+                } else {
+                    installationError = state.installColima()
+                }
+
+                if let installationError {
+                    let alertClosed = DispatchSemaphore(value: 0)
+                    Task { @MainActor in
+                        self.showColimaInstallationError(installationError)
+                        alertClosed.signal()
+                    }
+                    alertClosed.wait()
+                } else {
+                    state.refreshRuntimeStateFromSystemTruth(force: true)
+                }
+            }
 
             // Check for zombie Helium/Darc processes before launching
             let zombies = state.findZombieProcesses()
@@ -180,12 +227,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: ""))
+
+        let appDataSeparator = NSMenuItem.separator()
+        appDataSeparator.isHidden = true
+        menu.addItem(appDataSeparator)
+        openAppDataFolderSeparator = appDataSeparator
+
+        let appDataItem = NSMenuItem(title: "Open App Data Folder", action: #selector(openAppDataFolderAction), keyEquivalent: "")
+        appDataItem.isHidden = true
+        menu.addItem(appDataItem)
+        openAppDataFolderItem = appDataItem
+
         menu.addItem(.separator())
 
         runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
         bindCapslockItem = NSMenuItem(title: "Bind to Capslock", action: #selector(bindCapslockAction), keyEquivalent: "")
+        hideDockIconItem = NSMenuItem(title: "Hide Dock Icon", action: #selector(hideDockIconAction), keyEquivalent: "")
         if let runAtStartupItem { menu.addItem(runAtStartupItem) }
         if let bindCapslockItem { menu.addItem(bindCapslockItem) }
+        if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
@@ -477,6 +537,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         renderMenuLabels()
+        let optionHeld = NSEvent.modifierFlags.contains(.option)
+        lastOptionKeyState = optionHeld
+        updateOptionOnlyMenuItems(optionHeld: optionHeld)
         // Refresh state in background, then start polling while menu is open
         DispatchQueue.global(qos: .utility).async { [weak self] in
             ExternalState.shared.refreshRuntimeStateFromSystemTruth()
@@ -489,14 +552,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Use a polling timer instead.
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, let chromeSubmenu = self.chromeSubmenu else { return }
+                guard let self else { return }
                 let optionHeld = NSEvent.modifierFlags.contains(.option)
                 if optionHeld != self.lastOptionKeyState {
                     self.lastOptionKeyState = optionHeld
-                    self.refreshChromeMenuOptions(in: chromeSubmenu)
-                    self.darcOverrideItem?.isHidden = !optionHeld
-                    self.darcOverrideSeparator?.isHidden = !optionHeld
-                    chromeSubmenu.update()
+                    if let chromeSubmenu = self.chromeSubmenu {
+                        self.refreshChromeMenuOptions(in: chromeSubmenu)
+                        chromeSubmenu.update()
+                    }
+                    self.updateOptionOnlyMenuItems(optionHeld: optionHeld)
                 }
             }
         }
@@ -516,6 +580,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         optionKeyTimer = nil
         lastOptionKeyState = false
         chromeVariantsScanned = false
+        updateOptionOnlyMenuItems(optionHeld: false)
+    }
+
+    private func updateOptionOnlyMenuItems(optionHeld: Bool) {
+        darcOverrideItem?.isHidden = !optionHeld
+        darcOverrideSeparator?.isHidden = !optionHeld
+        openAppDataFolderItem?.isHidden = !optionHeld
+        openAppDataFolderSeparator?.isHidden = !optionHeld
+        statusItem?.menu?.update()
     }
 
     // MARK: - Render (reads cached state only, no I/O)
@@ -586,6 +659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
+        hideDockIconItem?.state = state.boolSetting("hide_dock_icon", default: false) ? .on : .off
 
         // Force menu to notice title changes
         statusItem?.menu?.update()
@@ -628,6 +702,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func darcRestoreWindowPositionsAction() {
         DispatchQueue.global(qos: .userInitiated).async {
             ExternalState.shared.restoreDarcWindowPositions()
+        }
+    }
+
+    @objc private func openAppDataFolderAction() {
+        let url = ExternalState.appDataURL
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(url)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "App Data Folder Could Not Be Opened"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
         }
     }
 
@@ -811,6 +899,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         renderMenuLabels()
     }
 
+    @objc private func hideDockIconAction() {
+        let state = ExternalState.shared
+        let isHidden = state.boolSetting("hide_dock_icon", default: false)
+        state.setBoolSetting("hide_dock_icon", !isHidden)
+        applyDockIconPreference()
+        renderMenuLabels()
+    }
+
+    private func configureApplicationIdentity() {
+        let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? "Xe Computer"
+        ProcessInfo.processInfo.processName = displayName
+
+        if let resourceURL = Bundle.main.resourceURL,
+           let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("app.icns")) {
+            NSApp.applicationIconImage = icon
+        }
+    }
+
+    private func applyDockIconPreference() {
+        let shouldHide = ExternalState.shared.boolSetting("hide_dock_icon", default: false)
+        NSApp.setActivationPolicy(shouldHide ? .accessory : .regular)
+    }
+
     @objc private func aboutAction() { NSApp.orderFrontStandardAboutPanel(nil) }
     @objc private func quitAction() {
         // Save running state before stopping so it can be restored on next launch
@@ -822,6 +934,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Zombie process alert
+
+    private func showColimaInstallationError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Colima Installation Required"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
 
     private func showZombieAlert(_ zombies: [ExternalState.ZombieProcess]) {
         guard !zombies.isEmpty else { return }

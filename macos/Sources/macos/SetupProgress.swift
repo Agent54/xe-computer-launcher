@@ -214,26 +214,9 @@ func showSetupProgress(
     vfx.addSubview(cancelButton)
     _cancelButton = cancelButton
 
-    // Set the app icon for Dock display
-    if let icon = loadAppIcon() {
-        NSApp.applicationIconImage = icon
-    }
-    // Set the app name BEFORE showing in Dock (macOS captures process name at activation)
-    ProcessInfo.processInfo.processName = setupAppDisplayName
-    // Set up a minimal main menu so the menu bar shows the app name instead of "bin"
-    if NSApp.mainMenu == nil || NSApp.mainMenu?.items.isEmpty == true {
-        let mainMenu = NSMenu()
-        let appMenuItem = NSMenuItem()
-        mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu(title: setupAppDisplayName)
-        appMenu.addItem(withTitle: "About \(setupAppDisplayName)", action: nil, keyEquivalent: "")
-        appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit \(setupAppDisplayName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenuItem.submenu = appMenu
-        NSApp.mainMenu = mainMenu
-    }
-    // Now show Dock icon after process name and menu are configured
-    NSApp.setActivationPolicy(.regular)
+    // Dock visibility belongs to the running launcher, not to setup windows.
+    // In particular, showing setup during the DMG installation flow must never
+    // create a temporary Dock icon or override the user's launcher preference.
     panel.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     _setupWindow = panel
@@ -344,8 +327,6 @@ func closeSetupProgress() {
     _titleLabel = nil
     _statusLabel = nil
     _cancelButton = nil
-    // Restore accessory (no Dock icon) mode
-    NSApp.setActivationPolicy(.accessory)
 }
 
 // Clickable label that opens the folder path in Finder on click
@@ -374,7 +355,6 @@ private class SetupCancelHelper: NSObject {
         _statusLabel?.stringValue = "Cancelling..."
         _setupWindow?.close()
         _setupWindow = nil
-        NSApp.setActivationPolicy(.accessory)
     }
 }
 
