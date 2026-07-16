@@ -96,54 +96,29 @@ log "found source app at $SOURCE_APP"
 log "opening the app from the disk image through Launch Services"
 open "$SOURCE_APP"
 
-log "approving the Gatekeeper first-open confirmation when shown"
-osascript <<'APPLESCRIPT'
+if xattr -p com.apple.quarantine "$SOURCE_APP" >/dev/null 2>&1; then
+    log "approving the Gatekeeper first-open confirmation"
+    osascript <<'APPLESCRIPT'
 tell application "System Events"
     set deadline to (current date) + 30
     repeat
-        set candidateProcesses to application processes whose visible is true
-        repeat with uiProcess in candidateProcesses
-            repeat with uiWindow in windows of uiProcess
-                set sawAppName to false
-                set sawDownloadMessage to false
-                set openButton to missing value
-                try
-                    set windowText to name of uiWindow as text
-                    if windowText contains "Xe Computer" then set sawAppName to true
-                    if windowText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                end try
-                try
-                    set uiElements to entire contents of uiWindow
-                    repeat with uiElement in uiElements
-                        try
-                            if class of uiElement is button and name of uiElement is "Open" then
-                                set openButton to uiElement
-                            end if
-                        end try
-                        try
-                            set elementText to value of uiElement as text
-                            if elementText contains "Xe Computer" then set sawAppName to true
-                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                        end try
-                        try
-                            set elementText to name of uiElement as text
-                            if elementText contains "Xe Computer" then set sawAppName to true
-                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                        end try
-                    end repeat
-                end try
-                if sawAppName and sawDownloadMessage and openButton is not missing value then
-                    click openButton
+        if exists application process "CoreServicesUIAgent" then
+            tell application process "CoreServicesUIAgent"
+                if (count of windows) > 0 then
+                    set frontmost to true
+                    key code 36
                     return
                 end if
-            end repeat
-        end repeat
-
+            end tell
+        end if
         if (current date) > deadline then error "Timed out waiting for the Gatekeeper confirmation for the disk-image copy"
         delay 0.25
     end repeat
 end tell
 APPLESCRIPT
+else
+    log "source app is not quarantined; no Gatekeeper confirmation is expected"
+fi
 
 log "approving the real installer alert"
 osascript <<'APPLESCRIPT'
@@ -154,8 +129,9 @@ tell application "System Events"
         set matches to every application process whose bundle identifier is "dev.xe.xecomputer"
         repeat with appProcess in matches
             tell appProcess
-                if exists button "Install in Applications" of window 1 then
-                    click button "Install in Applications" of window 1
+                if (count of windows) > 0 then
+                    set frontmost to true
+                    key code 36
                     return
                 end if
             end tell
@@ -165,54 +141,36 @@ tell application "System Events"
 end tell
 APPLESCRIPT
 
-log "approving a Gatekeeper confirmation for the installed copy when shown"
-osascript <<'APPLESCRIPT'
+log "waiting for the installed bundle to be created"
+deadline=$((SECONDS + 30))
+while (( SECONDS < deadline )) && [[ ! -d "$INSTALLED_APP" ]]; do
+    sleep 0.25
+done
+[[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
+
+if xattr -p com.apple.quarantine "$INSTALLED_APP" >/dev/null 2>&1; then
+    log "approving the Gatekeeper confirmation for the quarantined installed copy"
+    osascript <<'APPLESCRIPT'
 tell application "System Events"
     set deadline to (current date) + 30
     repeat
-        set candidateProcesses to application processes whose visible is true
-        repeat with uiProcess in candidateProcesses
-            repeat with uiWindow in windows of uiProcess
-                set sawAppName to false
-                set sawDownloadMessage to false
-                set openButton to missing value
-                try
-                    set windowText to name of uiWindow as text
-                    if windowText contains "Xe Computer" then set sawAppName to true
-                    if windowText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                end try
-                try
-                    set uiElements to entire contents of uiWindow
-                    repeat with uiElement in uiElements
-                        try
-                            if class of uiElement is button and name of uiElement is "Open" then
-                                set openButton to uiElement
-                            end if
-                        end try
-                        try
-                            set elementText to value of uiElement as text
-                            if elementText contains "Xe Computer" then set sawAppName to true
-                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                        end try
-                        try
-                            set elementText to name of uiElement as text
-                            if elementText contains "Xe Computer" then set sawAppName to true
-                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
-                        end try
-                    end repeat
-                end try
-                if sawAppName and sawDownloadMessage and openButton is not missing value then
-                    click openButton
+        if exists application process "CoreServicesUIAgent" then
+            tell application process "CoreServicesUIAgent"
+                if (count of windows) > 0 then
+                    set frontmost to true
+                    key code 36
                     return
                 end if
-            end repeat
-        end repeat
-
+            end tell
+        end if
         if (current date) > deadline then error "Timed out waiting for the Gatekeeper confirmation for the installed copy"
         delay 0.25
     end repeat
 end tell
 APPLESCRIPT
+else
+    log "installed copy is not quarantined; no second Gatekeeper confirmation is expected"
+fi
 
 log "waiting for installation and relaunch"
 deadline=$((SECONDS + 90))
@@ -223,7 +181,6 @@ while (( SECONDS < deadline )); do
     sleep 1
 done
 
-[[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
 pgrep -f '/Applications/Xe Computer.app/Contents/MacOS/bin' >/dev/null \
     || fail "installed app did not relaunch from /Applications"
 

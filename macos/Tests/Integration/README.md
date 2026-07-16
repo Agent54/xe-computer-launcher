@@ -78,9 +78,9 @@ DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
 
 The test opens the DMG through Launch Services, waits for Finder's normal
 `/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
-app through Launch Services, approves the narrowly matched Gatekeeper
-**downloaded from the Internet** confirmation by inspecting the frontmost
-system dialog's nested accessibility hierarchy when it appears, clicks
+app through Launch Services, approves the quarantined app's Gatekeeper
+**downloaded from the Internet** confirmation with its default **Open** action
+when quarantine requires it, chooses the installer alert's default
 **Install in Applications**, approves the same system confirmation for the
 newly installed copy if macOS shows it again, and verifies:
 
