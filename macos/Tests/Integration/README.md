@@ -30,7 +30,8 @@ that as an already-clean permission state and continues.
 4. Open **System Settings → Privacy & Security → Accessibility** and enable the
    program that launches the script. For a manual run this is normally
    Terminal, iTerm, or the terminal application used by the VM. For CI, enable
-   the runner application or its UI-test launcher.
+   the runner application or its UI-test launcher. After enabling it, completely
+   quit and reopen that program so its new TCC authorization takes effect.
 5. On the first manual run, macOS may also ask whether that program may control
    **System Events**. Approve it. This grants the Apple Events permission used
    to click the install alert.
@@ -47,6 +48,10 @@ Accessibility and Automation grants belong to the process that invokes
 `osascript`. If the test is invoked over SSH, granting Terminal locally does
 not grant the SSH session the same permissions. Prefer a logged-in launch agent
 or another GUI-session runner whose executable has been approved in advance.
+The raw error may say `osascript is not allowed assistive access`; for a normal
+interactive run, approve the terminal application responsible for launching
+`/usr/bin/osascript`, then restart that terminal. The test checks this before
+performing any destructive cleanup.
 
 ## Build and run
 
@@ -74,8 +79,10 @@ DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
 The test opens the DMG through Launch Services, waits for Finder's normal
 `/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
 app through Launch Services, approves the narrowly matched Gatekeeper
-**downloaded from the Internet** confirmation when it appears, clicks
-**Install in Applications**, and verifies:
+**downloaded from the Internet** confirmation by inspecting the frontmost
+system dialog's nested accessibility hierarchy when it appears, clicks
+**Install in Applications**, approves the same system confirmation for the
+newly installed copy if macOS shows it again, and verifies:
 
 - installation as `/Applications/Xe Computer.app`;
 - relaunch from `/Applications`, not the mounted disk image;

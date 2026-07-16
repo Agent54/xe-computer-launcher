@@ -39,6 +39,11 @@ trap cleanup_mount EXIT
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
 command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
 
+assistive_access="$(osascript -e 'tell application "System Events" to get UI elements enabled' 2>/dev/null || true)"
+if [[ "$assistive_access" != "true" ]]; then
+    fail "UI automation lacks Accessibility access. In System Settings > Privacy & Security > Accessibility, enable the terminal or GUI-session runner that launches this test, then quit and reopen that program before retrying. SSH sessions do not inherit Terminal's grant."
+fi
+
 log "stopping existing app processes"
 pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
 
@@ -96,22 +101,45 @@ osascript <<'APPLESCRIPT'
 tell application "System Events"
     set deadline to (current date) + 30
     repeat
-        repeat with uiProcess in application processes
+        set candidateProcesses to application processes whose visible is true
+        repeat with uiProcess in candidateProcesses
             repeat with uiWindow in windows of uiProcess
+                set sawAppName to false
+                set sawDownloadMessage to false
+                set openButton to missing value
                 try
-                    set messageText to (value of every static text of uiWindow) as text
-                    if messageText contains "Xe Computer" and messageText contains "downloaded from the Internet" then
-                        if exists button "Open" of uiWindow then
-                            click button "Open" of uiWindow
-                            return
-                        end if
-                    end if
+                    set windowText to name of uiWindow as text
+                    if windowText contains "Xe Computer" then set sawAppName to true
+                    if windowText contains "downloaded from the Internet" then set sawDownloadMessage to true
                 end try
+                try
+                    set uiElements to entire contents of uiWindow
+                    repeat with uiElement in uiElements
+                        try
+                            if class of uiElement is button and name of uiElement is "Open" then
+                                set openButton to uiElement
+                            end if
+                        end try
+                        try
+                            set elementText to value of uiElement as text
+                            if elementText contains "Xe Computer" then set sawAppName to true
+                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
+                        end try
+                        try
+                            set elementText to name of uiElement as text
+                            if elementText contains "Xe Computer" then set sawAppName to true
+                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
+                        end try
+                    end repeat
+                end try
+                if sawAppName and sawDownloadMessage and openButton is not missing value then
+                    click openButton
+                    return
+                end if
             end repeat
         end repeat
 
-        if (count of (application processes whose bundle identifier is "dev.xe.xecomputer")) > 0 then return
-        if (current date) > deadline then return
+        if (current date) > deadline then error "Timed out waiting for the Gatekeeper confirmation for the disk-image copy"
         delay 0.25
     end repeat
 end tell
@@ -132,6 +160,55 @@ tell application "System Events"
                 end if
             end tell
         end repeat
+        delay 0.25
+    end repeat
+end tell
+APPLESCRIPT
+
+log "approving a Gatekeeper confirmation for the installed copy when shown"
+osascript <<'APPLESCRIPT'
+tell application "System Events"
+    set deadline to (current date) + 30
+    repeat
+        set candidateProcesses to application processes whose visible is true
+        repeat with uiProcess in candidateProcesses
+            repeat with uiWindow in windows of uiProcess
+                set sawAppName to false
+                set sawDownloadMessage to false
+                set openButton to missing value
+                try
+                    set windowText to name of uiWindow as text
+                    if windowText contains "Xe Computer" then set sawAppName to true
+                    if windowText contains "downloaded from the Internet" then set sawDownloadMessage to true
+                end try
+                try
+                    set uiElements to entire contents of uiWindow
+                    repeat with uiElement in uiElements
+                        try
+                            if class of uiElement is button and name of uiElement is "Open" then
+                                set openButton to uiElement
+                            end if
+                        end try
+                        try
+                            set elementText to value of uiElement as text
+                            if elementText contains "Xe Computer" then set sawAppName to true
+                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
+                        end try
+                        try
+                            set elementText to name of uiElement as text
+                            if elementText contains "Xe Computer" then set sawAppName to true
+                            if elementText contains "downloaded from the Internet" then set sawDownloadMessage to true
+                        end try
+                    end repeat
+                end try
+                if sawAppName and sawDownloadMessage and openButton is not missing value then
+                    click openButton
+                    return
+                end if
+            end repeat
+        end repeat
+
+        if (current date) > deadline then error "Timed out waiting for the Gatekeeper confirmation for the installed copy"
         delay 0.25
     end repeat
 end tell
