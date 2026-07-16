@@ -73,7 +73,9 @@ DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
 
 The test opens the DMG through Launch Services, waits for Finder's normal
 `/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
-app through Launch Services, clicks **Install in Applications**, and verifies:
+app through Launch Services, approves the narrowly matched Gatekeeper
+**downloaded from the Internet** confirmation when it appears, clicks
+**Install in Applications**, and verifies:
 
 - installation as `/Applications/Xe Computer.app`;
 - relaunch from `/Applications`, not the mounted disk image;

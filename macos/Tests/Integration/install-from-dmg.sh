@@ -91,6 +91,32 @@ log "found source app at $SOURCE_APP"
 log "opening the app from the disk image through Launch Services"
 open "$SOURCE_APP"
 
+log "approving the Gatekeeper first-open confirmation when shown"
+osascript <<'APPLESCRIPT'
+tell application "System Events"
+    set deadline to (current date) + 30
+    repeat
+        repeat with uiProcess in application processes
+            repeat with uiWindow in windows of uiProcess
+                try
+                    set messageText to (value of every static text of uiWindow) as text
+                    if messageText contains "Xe Computer" and messageText contains "downloaded from the Internet" then
+                        if exists button "Open" of uiWindow then
+                            click button "Open" of uiWindow
+                            return
+                        end if
+                    end if
+                end try
+            end repeat
+        end repeat
+
+        if (count of (application processes whose bundle identifier is "dev.xe.xecomputer")) > 0 then return
+        if (current date) > deadline then return
+        delay 0.25
+    end repeat
+end tell
+APPLESCRIPT
+
 log "approving the real installer alert"
 osascript <<'APPLESCRIPT'
 tell application "System Events"
