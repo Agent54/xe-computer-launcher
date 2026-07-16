@@ -69,8 +69,16 @@ MOUNT_POINT="$(mktemp -d /tmp/xe-computer-installer.XXXXXX)"
 log "mounting $DMG_PATH"
 hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly >/dev/null
 
-SOURCE_APP="$MOUNT_POINT/Xenon Computer.app"
-[[ -d "$SOURCE_APP" ]] || fail "DMG does not contain Xenon Computer.app"
+SOURCE_APP=""
+while IFS= read -r -d '' candidate; do
+    candidate_bundle_id="$(defaults read "$candidate/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+    if [[ "$candidate_bundle_id" == "$BUNDLE_ID" ]]; then
+        SOURCE_APP="$candidate"
+        break
+    fi
+done < <(find "$MOUNT_POINT" -maxdepth 2 -type d -name '*.app' -print0)
+[[ -n "$SOURCE_APP" ]] || fail "DMG does not contain an app with bundle identifier $BUNDLE_ID"
+log "found source app at $SOURCE_APP"
 
 log "registering the source bundle and resetting app privacy permissions"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

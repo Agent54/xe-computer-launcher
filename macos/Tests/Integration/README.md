@@ -72,8 +72,8 @@ DMG_PATH="$HOME/Downloads/Xenon Computer.dmg" \
   macos/Tests/Integration/install-from-dmg.sh
 ```
 
-The test mounts the DMG read-only, launches its `Xenon Computer.app`, clicks
-**Install in Applications**, and verifies:
+The test mounts the DMG read-only, locates `Xe Computer.app` by its bundle
+identifier, launches it, clicks **Install in Applications**, and verifies:
 
 - installation as `/Applications/Xe Computer.app`;
 - relaunch from `/Applications`, not the mounted disk image;
