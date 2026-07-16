@@ -18,6 +18,9 @@ Run this only in a disposable test account or VM. At startup the test:
 - runs `brew uninstall --force colima` when Colima is installed.
 
 The launched app installs Colima again as part of the behavior under test.
+The permission reset occurs after mounting and registering the DMG's app with
+Launch Services, so it also works on a fresh VM where the bundle identifier has
+never previously been installed.
 
 ## One-time machine setup
 

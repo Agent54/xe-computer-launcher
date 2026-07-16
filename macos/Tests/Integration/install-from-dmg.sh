@@ -43,9 +43,6 @@ log "stopping existing app processes"
 pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
 pkill -f '/Xenon Computer.app/Contents/MacOS/bin' 2>/dev/null || true
 
-log "resetting app privacy permissions"
-tccutil reset All "$BUNDLE_ID" >/dev/null
-
 log "removing existing installed app"
 if [[ -e "$INSTALLED_APP" ]]; then
     sudo rm -rf "$INSTALLED_APP"
@@ -74,6 +71,12 @@ hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly >/dev/
 
 SOURCE_APP="$MOUNT_POINT/Xenon Computer.app"
 [[ -d "$SOURCE_APP" ]] || fail "DMG does not contain Xenon Computer.app"
+
+log "registering the source bundle and resetting app privacy permissions"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[[ -x "$LSREGISTER" ]] || fail "Launch Services registration tool was not found"
+"$LSREGISTER" -f "$SOURCE_APP"
+tccutil reset All "$BUNDLE_ID" >/dev/null
 
 log "checking the distributed app before launch"
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
