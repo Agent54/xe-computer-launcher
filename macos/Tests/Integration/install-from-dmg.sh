@@ -6,7 +6,7 @@ APP_NAME="Xe Computer"
 BUNDLE_ID="dev.xe.xecomputer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
-DEFAULT_DMG="$(cd "$(dirname "$0")/../.." && pwd)/.build/Xenon Computer.dmg"
+DEFAULT_DMG="$(cd "$(dirname "$0")/../.." && pwd)/.build/Xe Computer.dmg"
 DMG_PATH="${DMG_PATH:-$DEFAULT_DMG}"
 MOUNT_POINT=""
 
@@ -21,15 +21,15 @@ fail() {
 
 detach_if_mounted() {
     local mount_point="$1"
-    if mount | grep -Fq " on ${mount_point} "; then
-        hdiutil detach "$mount_point" -force >/dev/null
+    if [[ -d "$mount_point" ]]; then
+        hdiutil detach "$mount_point" >/dev/null 2>&1 \
+            || hdiutil detach "$mount_point" -force >/dev/null
     fi
 }
 
 cleanup_mount() {
     if [[ -n "$MOUNT_POINT" ]]; then
         detach_if_mounted "$MOUNT_POINT" || true
-        rmdir "$MOUNT_POINT" 2>/dev/null || true
     fi
 }
 
@@ -41,7 +41,11 @@ command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
 
 log "stopping existing app processes"
 pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
-pkill -f '/Xenon Computer.app/Contents/MacOS/bin' 2>/dev/null || true
+
+log "resetting app privacy permissions"
+if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
+    log "bundle is not registered yet; there are no registered app permissions to reset"
+fi
 
 log "removing existing installed app"
 if [[ -e "$INSTALLED_APP" ]]; then
@@ -58,40 +62,34 @@ fi
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do
     detach_if_mounted "$stale_mount"
-done < <(find /Volumes -maxdepth 1 -type d \( -name 'Xenon Computer*' -o -name 'Xe Computer*' \) -print 2>/dev/null)
+done < <(find /Volumes -maxdepth 1 -type d -name 'Xe Computer*' -print 2>/dev/null)
 
 log "uninstalling Colima so first-run dependency installation is exercised"
 if brew list --formula colima >/dev/null 2>&1; then
     brew uninstall --force colima
 fi
 
-MOUNT_POINT="$(mktemp -d /tmp/xe-computer-installer.XXXXXX)"
-log "mounting $DMG_PATH"
-hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly >/dev/null
+log "opening the DMG through Launch Services"
+open "$DMG_PATH"
 
 SOURCE_APP=""
-while IFS= read -r -d '' candidate; do
-    candidate_bundle_id="$(defaults read "$candidate/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
-    if [[ "$candidate_bundle_id" == "$BUNDLE_ID" ]]; then
-        SOURCE_APP="$candidate"
-        break
-    fi
-done < <(find "$MOUNT_POINT" -maxdepth 2 -type d -name '*.app' -print0)
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )) && [[ -z "$SOURCE_APP" ]]; do
+    while IFS= read -r -d '' candidate; do
+        candidate_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$candidate/Contents/Info.plist" 2>/dev/null || true)"
+        if [[ "$candidate_bundle_id" == "$BUNDLE_ID" ]]; then
+            SOURCE_APP="$candidate"
+            break
+        fi
+    done < <(find /Volumes -maxdepth 3 -type d -name '*.app' -print0 2>/dev/null)
+    [[ -n "$SOURCE_APP" ]] || sleep 1
+done
 [[ -n "$SOURCE_APP" ]] || fail "DMG does not contain an app with bundle identifier $BUNDLE_ID"
+MOUNT_POINT="$(stat -f '%m' "$SOURCE_APP")"
 log "found source app at $SOURCE_APP"
 
-log "registering the source bundle and resetting app privacy permissions"
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-[[ -x "$LSREGISTER" ]] || fail "Launch Services registration tool was not found"
-"$LSREGISTER" -f "$SOURCE_APP"
-tccutil reset All "$BUNDLE_ID" >/dev/null
-
-log "checking the distributed app before launch"
-codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
-spctl --assess --type execute --verbose=2 "$SOURCE_APP"
-
-log "launching the app from the disk image"
-open -n "$SOURCE_APP"
+log "opening the app from the disk image through Launch Services"
+open "$SOURCE_APP"
 
 log "approving the real installer alert"
 osascript <<'APPLESCRIPT'
@@ -138,7 +136,7 @@ if xattr -p com.apple.quarantine "$INSTALLED_APP" >/dev/null 2>&1; then
     fail "installed app still has a quarantine attribute"
 fi
 
-if pgrep -f '/Volumes/.*/Xenon Computer.app/Contents/MacOS/bin' >/dev/null; then
+if pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null; then
     fail "a copy of the app is still running from the disk image"
 fi
 

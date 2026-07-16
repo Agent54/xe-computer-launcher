@@ -14,13 +14,12 @@ Run this only in a disposable test account or VM. At startup the test:
 - removes `/Applications/Xe Computer.app`;
 - moves `~/Library/Application Support/dev.xe.xecomputer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
-- detaches stale Xe/Xenon Computer disk-image mounts; and
+- detaches stale Xe Computer disk-image mounts; and
 - runs `brew uninstall --force colima` when Colima is installed.
 
-The launched app installs Colima again as part of the behavior under test.
-The permission reset occurs after mounting and registering the DMG's app with
-Launch Services, so it also works on a fresh VM where the bundle identifier has
-never previously been installed.
+The launched app installs Colima again as part of the behavior under test. On a
+fresh VM, `tccutil` may report that the bundle is not registered; the test treats
+that as an already-clean permission state and continues.
 
 ## One-time machine setup
 
@@ -68,12 +67,13 @@ macos/Tests/Integration/install-from-dmg.sh
 To test a DMG from another location, including a downloaded CI artifact:
 
 ```sh
-DMG_PATH="$HOME/Downloads/Xenon Computer.dmg" \
+DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
   macos/Tests/Integration/install-from-dmg.sh
 ```
 
-The test mounts the DMG read-only, locates `Xe Computer.app` by its bundle
-identifier, launches it, clicks **Install in Applications**, and verifies:
+The test opens the DMG through Launch Services, waits for Finder's normal
+`/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
+app through Launch Services, clicks **Install in Applications**, and verifies:
 
 - installation as `/Applications/Xe Computer.app`;
 - relaunch from `/Applications`, not the mounted disk image;
