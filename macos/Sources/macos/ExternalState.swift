@@ -116,7 +116,9 @@ final class ExternalState: @unchecked Sendable {
     var _browserPid: pid_t = 0
     private var darcApp: NSRunningApplication?
     /// Public read-only access to the Darc NSRunningApplication reference for activation.
-    var darcAppRef: NSRunningApplication? { darcApp }
+    var darcAppRef: NSRunningApplication? {
+        darcRunning ? darcApp : nil
+    }
 
     /// Check if a named subprocess is currently running
     func isSubprocessRunning(_ name: String) -> Bool {
@@ -127,7 +129,62 @@ final class ExternalState: @unchecked Sendable {
     var darcRunning: Bool {
         if let app = darcApp, !app.isTerminated { return true }
         darcApp = nil
-        return false
+
+        // The app shim is intentionally launched through Launch Services, so it
+        // is not necessarily a child of this process. In particular, Chrome can
+        // launch it while initially provisioning the IWA, before startDarc() has
+        // received an NSRunningApplication reference. Rediscover that independent
+        // application from the managed shim's path or bundle identifier.
+        guard let app = findRunningDarcApplication() else { return false }
+        darcApp = app
+        return true
+    }
+
+    private func darcShimAppURL() -> URL {
+        let profileName = selectedProfileName()
+        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
+        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+        return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+    }
+
+    private func findRunningDarcApplication() -> NSRunningApplication? {
+        let appURL = darcShimAppURL()
+        let executableURL = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader")
+        let expectedAppPath = appURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let expectedExecutablePath = executableURL.standardizedFileURL.resolvingSymlinksInPath().path
+
+        func isExactManagedShim(_ app: NSRunningApplication) -> Bool {
+            guard !app.isTerminated else { return false }
+            if let bundlePath = app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+               bundlePath == expectedAppPath {
+                return true
+            }
+            if let executablePath = app.executableURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+               executablePath == expectedExecutablePath {
+                return true
+            }
+            return false
+        }
+
+        let runningApplications = NSWorkspace.shared.runningApplications
+        if let exactMatch = runningApplications.first(where: isExactManagedShim) {
+            return exactMatch
+        }
+
+        // Launch Services can retain the shim's pre-move bundle URL for an app
+        // that Chrome launched before provisioning moved it into our app-data
+        // directory. Its generated bundle identifier remains stable, though.
+        guard let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier else {
+            return nil
+        }
+        let identifierMatches = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { !$0.isTerminated }
+
+        if let exactMatch = identifierMatches.first(where: isExactManagedShim) {
+            return exactMatch
+        }
+        return identifierMatches.count == 1 ? identifierMatches[0] : nil
     }
     var chromeRunning: Bool {
         // Check posix_spawn'd browser pid
@@ -418,10 +475,7 @@ final class ExternalState: @unchecked Sendable {
     func startDarc() -> String? {
         if !chromeRunning, let err = startChrome() { return err }
 
-        let profileName = selectedProfileName()
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
-        let appURL = Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+        let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
             let msg = "Darc loader not found at \(loader)"

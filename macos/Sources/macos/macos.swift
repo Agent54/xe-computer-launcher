@@ -167,6 +167,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        // Return the status-item menu itself so the Dock and menu bar expose the
+        // same live items, submenus, state indicators, and actions.
+        renderMenuLabels()
+        return statusItem?.menu
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         stopStateRefreshLoop()
     }
