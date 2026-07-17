@@ -43,12 +43,12 @@
 ;; --- Application Support data ---
 ;; Allow reading and writing profiles, VMs, and settings
 ;; Using HOME parameter for portability
-(allow file-read* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.xecomputer")))
-(allow file-write* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.xecomputer")))
+(allow file-read* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
+(allow file-write* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
 
 ;; Allow executing Helium.app (Chrome) from the app data directory
-(allow process-exec (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.xecomputer")))
-(allow file-map-executable (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.xecomputer")))
+(allow process-exec (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
+(allow file-map-executable (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
 
 ;; --- Colima/Lima data directories ---
 ;; Colima stores VM state, config, and sockets in ~/.colima and ~/.lima

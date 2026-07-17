@@ -10,9 +10,9 @@ script; they should not duplicate its test steps.
 Run this only in a disposable test account or VM. At startup the test:
 
 - quits running Xe Computer copies;
-- resets TCC permissions for `dev.xe.xecomputer`;
+- resets TCC permissions for `dev.xe.computer`;
 - removes `/Applications/Xe Computer.app`;
-- moves `~/Library/Application Support/dev.xe.xecomputer` into `~/.Trash`
+- moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
 - detaches stale Xe Computer disk-image mounts; and
 - runs `brew uninstall --force colima` when Colima is installed.

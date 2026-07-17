@@ -3,7 +3,7 @@
 set -euo pipefail
 
 APP_NAME="Xe Computer"
-BUNDLE_ID="dev.xe.xecomputer"
+BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

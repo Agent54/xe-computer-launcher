@@ -9,7 +9,7 @@
         <string>bin</string>
 
         <key>CFBundleIdentifier</key>
-        <string>dev.xe.xecomputer</string>
+        <string>dev.xe.computer</string>
 
         <key>CFBundleInfoDictionaryVersion</key>
         <string>6.0</string>
