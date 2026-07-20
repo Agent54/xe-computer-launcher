@@ -17,6 +17,7 @@ ENTITLEMENTS = Sources/macos/Entitlements.plist
 # APPLE_ID ?=
 # TEAM_ID ?=
 NOTARY_PROFILE ?= notarytool-profile
+NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
 
 .PHONY: all clean build bundle run release release-sign check notarize dmg
 
@@ -94,7 +95,7 @@ notarize: check
 	@ditto -c -k --keepParent "$(APP_BUNDLE)" "$(BUILD_DIR)/$(APP_NAME)-notarize.zip"
 	@echo "Submitting to Apple for notarization..."
 	@xcrun notarytool submit "$(BUILD_DIR)/$(APP_NAME)-notarize.zip" \
-		--keychain-profile "$(NOTARY_PROFILE)" \
+		--keychain-profile "$(NOTARY_PROFILE)" $(NOTARY_KEYCHAIN_ARG) \
 		--wait
 	@echo "Stapling notarization ticket..."
 	@xcrun stapler staple "$(APP_BUNDLE)"
