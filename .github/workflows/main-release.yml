@@ -14,12 +14,15 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
     timeout-minutes: 60
     env:
-      DEVELOPER_ID: ${{ vars.MACOS_DEVELOPER_ID }}
       NOTARY_PROFILE: notarytool-profile
-      NOTARY_KEYCHAIN: ${{ runner.temp }}/app-signing-${{ github.run_id }}-${{ github.run_attempt }}.keychain-db
-      ORIGINAL_KEYCHAINS: ${{ runner.temp }}/original-keychains-${{ github.run_id }}-${{ github.run_attempt }}.txt
 
     steps:
+      - name: Configure temporary paths
+        shell: bash
+        run: |
+          echo "NOTARY_KEYCHAIN=$RUNNER_TEMP/app-signing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.keychain-db" >> "$GITHUB_ENV"
+          echo "ORIGINAL_KEYCHAINS=$RUNNER_TEMP/original-keychains-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" >> "$GITHUB_ENV"
+
       - name: Check out main
         uses: actions/checkout@v4
         with:
@@ -97,10 +100,21 @@ jobs:
           security list-keychains \
             -d user \
             -s "$NOTARY_KEYCHAIN" "${original_keychains[@]}"
-          security find-identity \
-            -v \
-            -p codesigning \
-            "$NOTARY_KEYCHAIN"
+          developer_id="$(
+            security find-identity \
+              -v \
+              -p codesigning \
+              "$NOTARY_KEYCHAIN" |
+              awk -F '"' '/Developer ID Application:/ { print $2; exit }'
+          )"
+
+          if [[ -z "$developer_id" ]]; then
+            echo "::error::The imported P12 does not contain a Developer ID Application identity."
+            exit 1
+          fi
+
+          echo "DEVELOPER_ID=$developer_id" >> "$GITHUB_ENV"
+          echo "Using signing identity: $developer_id"
 
       - name: Configure notarization
         env:
