@@ -28,6 +28,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reset launcher integration environment
+        run: bash macos/Tests/Integration/cleanup.sh
+
       - name: Calculate next patch version
         id: version
         shell: bash
@@ -148,6 +151,8 @@ jobs:
         run: make
 
       - name: Run full launcher integration test
+        env:
+          DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Create version tag and GitHub release

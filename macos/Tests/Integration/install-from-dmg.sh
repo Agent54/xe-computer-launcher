@@ -5,16 +5,9 @@ set -euo pipefail
 APP_NAME="Xe Computer"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
-APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/.build/Xe Computer.dmg"
-LOCAL_DMG="$SCRIPT_DIR/Xe.Computer.dmg"
-if [[ -f "$LOCAL_DMG" ]]; then
-    DEFAULT_DMG="$LOCAL_DMG"
-else
-    DEFAULT_DMG="$REPOSITORY_DMG"
-fi
-DMG_PATH="${DMG_PATH:-$DEFAULT_DMG}"
+DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
 MOUNT_POINT=""
 
 log() {
@@ -230,35 +223,6 @@ if [[ "$assistive_access" != "true" ]]; then
     fail "UI automation lacks Accessibility access (or macOS blocked its Automation request). In System Settings > Privacy & Security > Accessibility, enable the GUI-session runner that launches this test, then quit and reopen it before retrying. The current test runner must be trusted; Terminal's grant does not transfer to ChatGPT/Codex, and SSH sessions do not inherit it."
 fi
 
-log "stopping existing app processes"
-pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
-
-log "detaching stale installer disk images"
-while IFS= read -r stale_mount; do
-    detach_disk_image "$stale_mount"
-done < <(find /Volumes -maxdepth 1 -type d -name 'Xe Computer*' -print 2>/dev/null)
-
-# An interrupted first-open confirmation can leave the image attached to a
-# /dev/disk node with no mounted volume. `open` then returns successfully but
-# never creates /Volumes/Xe Computer, so clean up matching device attachments
-# as well as normal mount points.
-while IFS= read -r stale_device; do
-    detach_disk_image "$stale_device"
-done < <(
-    hdiutil info | awk -v target="$DMG_PATH" '
-        /^image-path[[:space:]]*:/ {
-            image_path = $0
-            sub(/^[^:]*:[[:space:]]*/, "", image_path)
-            matches_target = (image_path == target)
-            next
-        }
-        matches_target && /^\/dev\/disk[0-9]+[[:space:]]/ {
-            print $1
-            matches_target = 0
-        }
-    '
-)
-
 log "opening the DMG through Launch Services"
 open "$DMG_PATH"
 
@@ -280,39 +244,11 @@ volume_name="${volume_relative_path%%/*}"
 MOUNT_POINT="/Volumes/${volume_name}"
 log "found source app at $SOURCE_APP"
 
-# The same signature and Gatekeeper requirements are asserted again on the
-# installed copy below. Check the source before deleting an existing install,
-# app data, or Colima so a broken release artifact cannot damage test state.
 log "verifying source signature and Gatekeeper assessment"
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP" \
     || fail "source app has an invalid code signature: $SOURCE_APP"
 spctl --assess --type execute --verbose=2 "$SOURCE_APP" \
     || fail "Gatekeeper rejected the source app: $SOURCE_APP"
-
-log "resetting app privacy permissions"
-if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
-    log "bundle is not registered yet; there are no registered app permissions to reset"
-fi
-
-log "removing existing installed app"
-if [[ -e "$INSTALLED_APP" ]]; then
-    trashed_app="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-app-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_app"
-    log "moving existing installed app to $trashed_app"
-    mv "$INSTALLED_APP" "$trashed_app"
-fi
-
-if [[ -e "$APP_DATA" ]]; then
-    trash_dir="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trash_dir"
-    log "moving existing app data to $trash_dir"
-    mv "$APP_DATA" "$trash_dir"
-fi
-
-log "uninstalling Colima so first-run dependency installation is exercised"
-if brew list --formula colima >/dev/null 2>&1; then
-    brew uninstall --force colima
-fi
 
 log "opening the app from the disk image through Launch Services"
 open "$SOURCE_APP"

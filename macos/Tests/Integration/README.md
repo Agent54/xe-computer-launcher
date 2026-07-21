@@ -1,13 +1,14 @@
 # macOS installer integration test
 
-`install-from-dmg.sh` performs the real interactive DMG installation. The same
-script is intended to run inside a local UTM macOS guest and directly on a
-macOS CI runner. UTM and CI should only provision the machine and invoke this
-script; they should not duplicate its test steps.
+`cleanup.sh` resets the test machine, and `install-from-dmg.sh` performs the
+real interactive DMG installation. The same scripts are intended to run inside
+a local UTM macOS guest and directly on a macOS CI runner. UTM and CI should
+only provision the machine and invoke these scripts; they should not duplicate
+their behavior.
 
 ## Destructive changes
 
-Run this only in a disposable test account or VM. At startup the test:
+Run this only in a disposable test account or VM. `cleanup.sh`:
 
 - quits running Xe Computer copies;
 - resets TCC permissions for `dev.xe.computer`;
@@ -39,7 +40,7 @@ that as an already-clean permission state and continues.
    dedicated local test account can cache credentials before running; a CI
    account should provide non-interactive sudo.
 
-The test deliberately resets Xe Computer's own permissions on every run. After
+The cleanup deliberately resets Xe Computer's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System
 Settings so first-run setup can continue and reinstall Colima. This interaction
 is part of the integration test, not a persistent one-time machine grant.
@@ -51,7 +52,7 @@ or another GUI-session runner whose executable has been approved in advance.
 The raw error may say `osascript is not allowed assistive access`; for a normal
 interactive run, approve the terminal application responsible for launching
 `/usr/bin/osascript`, then restart that terminal. The test checks this before
-performing any destructive cleanup.
+performing UI automation.
 
 ## Build and run
 
@@ -63,9 +64,10 @@ Create it using the normal release configuration:
 make -C macos release
 ```
 
-Run the test from the repository root:
+Reset the machine and run the test from the repository root:
 
 ```sh
+bash macos/Tests/Integration/cleanup.sh
 macos/Tests/Integration/install-from-dmg.sh
 ```
 
@@ -100,10 +102,15 @@ start/reset UTM and trigger the guest runner, but must not implement installer
 steps itself.
 
 For GitHub Actions, the workflow should similarly contain only checkout,
-artifact/build preparation, and one invocation:
+cleanup, artifact/build preparation, and the test invocation:
 
 ```yaml
+- name: Reset installer integration environment
+  run: bash macos/Tests/Integration/cleanup.sh
+
 - name: Run installer integration test
+  env:
+    DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
   run: macos/Tests/Integration/install-from-dmg.sh
 ```
 
