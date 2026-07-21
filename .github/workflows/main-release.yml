@@ -4,7 +4,7 @@ name: Build, Test, and Release Launcher
 on:
   push:
     branches:
-      - temp
+      - main
 
 permissions:
   contents: write
