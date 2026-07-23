@@ -56,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
+    private var newProfileItem: NSMenuItem?
+    private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
 
@@ -168,10 +170,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        // Return the status-item menu itself so the Dock and menu bar expose the
-        // same live items, submenus, state indicators, and actions.
         renderMenuLabels()
-        return statusItem?.menu
+        updateOptionOnlyMenuItems(optionHeld: NSEvent.modifierFlags.contains(.option))
+
+        // The Dock appends its own native Quit command. Return a snapshot of
+        // the status menu without our duplicate Quit item.
+        guard let statusMenu = statusItem?.menu,
+              let dockMenu = statusMenu.copy() as? NSMenu else {
+            return nil
+        }
+        dockMenu.delegate = nil
+        if let quitItem = dockMenu.items.first(where: { $0.action == #selector(quitAction) }) {
+            dockMenu.removeItem(quitItem)
+        }
+        return dockMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -223,7 +235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let newProfileItem = NSMenuItem(title: "New Profile...", action: #selector(newProfileAction), keyEquivalent: "")
         newProfileItem.target = self
+        newProfileItem.isHidden = true
         menu.addItem(newProfileItem)
+        self.newProfileItem = newProfileItem
 
         menu.addItem(.separator())
         legacyVMItem = buildSubmenu(parent: menu, title: "Legacy VM", startSelector: #selector(legacyVMStartAction), stopSelector: #selector(legacyVMStopAction), startRef: &legacyVMStartItem, stopRef: &legacyVMStopItem)
@@ -233,7 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: ""))
+        let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
+        systemLogsItem.isHidden = true
+        menu.addItem(systemLogsItem)
+        self.systemLogsItem = systemLogsItem
 
         let appDataSeparator = NSMenuItem.separator()
         appDataSeparator.isHidden = true
@@ -593,6 +610,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateOptionOnlyMenuItems(optionHeld: Bool) {
         darcOverrideItem?.isHidden = !optionHeld
         darcOverrideSeparator?.isHidden = !optionHeld
+        newProfileItem?.isHidden = !optionHeld
+        systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
         statusItem?.menu?.update()
@@ -910,8 +929,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let state = ExternalState.shared
         let isHidden = state.boolSetting("hide_dock_icon", default: false)
         state.setBoolSetting("hide_dock_icon", !isHidden)
-        applyDockIconPreference()
         renderMenuLabels()
+
+        // A Dock-menu action runs inside the Dock's menu tracking loop.
+        // Changing activation policy synchronously can leave a stale inactive
+        // tile behind, so apply it after the menu action has completed.
+        DispatchQueue.main.async { [weak self] in
+            self?.applyDockIconPreference()
+        }
     }
 
     private func configureApplicationIdentity() {
@@ -930,7 +955,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(shouldHide ? .accessory : .regular)
     }
 
-    @objc private func aboutAction() { NSApp.orderFrontStandardAboutPanel(nil) }
+    @objc private func aboutAction() {
+        let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "Unknown"
+        let options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationVersion: releaseVersion
+        ]
+
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
+
+        // The standard About panel is untitled. Promote the key window on the
+        // next run-loop turn, after status-menu tracking has finished.
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+        }
+    }
     @objc private func quitAction() {
         // Save running state before stopping so it can be restored on next launch
         let state = ExternalState.shared

@@ -1,10 +1,11 @@
 # macOS installer integration test
 
-`cleanup.sh` resets the test machine, and `install-from-dmg.sh` performs the
-real interactive DMG installation. The same scripts are intended to run inside
-a local UTM macOS guest and directly on a macOS CI runner. UTM and CI should
-only provision the machine and invoke these scripts; they should not duplicate
-their behavior.
+`cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
+interactive DMG installation, and `about-version.sh` then verifies that the
+About dialog opens in front and displays the installed release version. The
+same scripts are intended to run inside a local UTM macOS guest and directly on
+a macOS CI runner. UTM and CI should only provision the machine and invoke
+these scripts; they should not duplicate their behavior.
 
 ## Destructive changes
 
@@ -69,6 +70,7 @@ Reset the machine and run the test from the repository root:
 ```sh
 bash macos/Tests/Integration/cleanup.sh
 macos/Tests/Integration/install-from-dmg.sh
+macos/Tests/Integration/about-version.sh
 ```
 
 To test a DMG from another location, including a downloaded CI artifact:
@@ -94,6 +96,11 @@ newly installed copy if macOS shows it again, and verifies:
 - removal of the installed bundle's quarantine attribute; and
 - first-run reinstallation of Colima through Homebrew.
 
+For Accessibility onboarding, the installer test uses Xe Computer's native
+permission prompt's **Open System Settings** button before enabling the app in
+the Privacy & Security pane. It does not open that pane independently and leave
+the permission prompt behind.
+
 ## UTM and GitHub Actions
 
 For UTM, copy or mount the repository and DMG into the logged-in guest, then
@@ -112,6 +119,9 @@ cleanup, artifact/build preparation, and the test invocation:
   env:
     DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
   run: macos/Tests/Integration/install-from-dmg.sh
+
+- name: Verify version in About dialog
+  run: macos/Tests/Integration/about-version.sh
 ```
 
 The runner still needs the Accessibility, Automation, Homebrew, sudo, signing,

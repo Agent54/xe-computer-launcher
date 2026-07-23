@@ -22,18 +22,38 @@ fail() {
 # Apple Events can wait forever when the process running this test has not yet
 # been granted Automation or Accessibility access. Keep every UI operation
 # bounded so the test reports the real setup problem instead of deadlocking.
-osascript_with_timeout() {
+run_with_timeout() {
     local timeout_seconds="$1"
     shift
+    local command_pid
+    local watchdog_pid
+    local command_status
 
-    perl -e '
-        use strict;
-        use warnings;
-        my $timeout = shift @ARGV;
-        $SIG{ALRM} = sub { die "__INSTALLER_UI_TIMEOUT__\n" };
-        alarm $timeout;
-        exec @ARGV or die "exec @ARGV failed: $!\n";
-    ' "$timeout_seconds" "$@"
+    "$@" <&0 &
+    command_pid=$!
+    (
+        sleep "$timeout_seconds"
+        if kill -0 "$command_pid" 2>/dev/null; then
+            kill -TERM "$command_pid" 2>/dev/null || true
+        fi
+    ) &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+        command_status=0
+    else
+        command_status=$?
+    fi
+
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+
+    if [[ "$command_status" -eq 143 ]]; then
+        printf '[installer-integration] ERROR: UI command timed out after %s seconds\n' \
+            "$timeout_seconds" >&2
+        return 124
+    fi
+    return "$command_status"
 }
 
 # Find a button anywhere in a process window. NSAlert buttons are commonly in
@@ -46,7 +66,7 @@ press_ui_button() {
     local context_text="$3"
     local timeout_seconds="$4"
 
-    osascript_with_timeout "$((timeout_seconds + 10))" osascript - \
+    run_with_timeout "$((timeout_seconds + 10))" osascript - \
         "$process_bundle_id" "$button_name" "$context_text" "$timeout_seconds" <<'APPLESCRIPT'
 on run argv
     set wantedBundleID to item 1 of argv
@@ -128,7 +148,7 @@ grant_accessibility_permission() {
     local app_name="$1"
     local timeout_seconds="$2"
 
-    osascript_with_timeout "$((timeout_seconds + 10))" osascript - \
+    run_with_timeout "$((timeout_seconds + 10))" osascript - \
         "$app_name" "$timeout_seconds" <<'APPLESCRIPT'
 on run argv
     set appName to item 1 of argv
@@ -217,9 +237,9 @@ trap cleanup_mount EXIT
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
 command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
 
-assistive_access="$(osascript_with_timeout 8 osascript \
-    -e 'tell application "System Events" to get UI elements enabled' 2>/dev/null || true)"
-if [[ "$assistive_access" != "true" ]]; then
+if ! run_with_timeout 8 osascript \
+    -e 'tell application "System Events" to tell first application process whose frontmost is true to get count of menu bars' \
+    >/dev/null 2>&1; then
     fail "UI automation lacks Accessibility access (or macOS blocked its Automation request). In System Settings > Privacy & Security > Accessibility, enable the GUI-session runner that launches this test, then quit and reopen it before retrying. The current test runner must be trusted; Terminal's grant does not transfer to ChatGPT/Codex, and SSH sessions do not inherit it."
 fi
 
@@ -277,8 +297,8 @@ else
     log "no Gatekeeper confirmation appeared for the installed copy"
 fi
 
-log "opening the Accessibility privacy pane"
-open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+log "opening the Accessibility privacy pane through the app permission prompt"
+press_ui_button "" "Open System Settings" "" 60
 
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90

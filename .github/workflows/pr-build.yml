@@ -95,4 +95,6 @@ jobs:
 
       - name: Run full launcher integration test
         run: macos/Tests/Integration/install-from-dmg.sh
-        
+
+      - name: Verify version in About dialog
+        run: macos/Tests/Integration/about-version.sh
