@@ -96,10 +96,10 @@ newly installed copy if macOS shows it again, and verifies:
 - removal of the installed bundle's quarantine attribute; and
 - first-run reinstallation of Colima through Homebrew.
 
-For Accessibility onboarding, the installer test uses Xe Computer's native
-permission prompt's **Open System Settings** button before enabling the app in
-the Privacy & Security pane. It does not open that pane independently and leave
-the permission prompt behind.
+For Accessibility onboarding, the installer test uses Xe Computer's
+**Open System Settings** button before enabling the app in the Privacy &
+Security pane. It does not invoke the protected system trust prompt—which
+cannot be driven through Accessibility automation—or leave a prompt behind.
 
 ## UTM and GitHub Actions
 

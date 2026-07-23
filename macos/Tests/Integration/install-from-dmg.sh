@@ -39,7 +39,7 @@ run_with_timeout() {
     ) &
     watchdog_pid=$!
 
-    if wait "$command_pid"; then
+    if wait "$command_pid" 2>/dev/null; then
         command_status=0
     else
         command_status=$?
@@ -139,6 +139,44 @@ on run argv
             delay 0.25
         end repeat
         error "Timed out waiting for button “" & wantedButtonName & "”"
+    end tell
+end run
+APPLESCRIPT
+}
+
+# Press a direct button in an app-owned window without recursively traversing
+# the accessibility tree. This is used for Xe Computer's own onboarding alert.
+press_app_button() {
+    local app_name="$1"
+    local button_name="$2"
+    local timeout_seconds="$3"
+
+    run_with_timeout "$((timeout_seconds + 10))" osascript - \
+        "$app_name" "$button_name" "$timeout_seconds" <<'APPLESCRIPT'
+on run argv
+    set appName to item 1 of argv
+    set wantedButtonName to item 2 of argv
+    set timeoutSeconds to item 3 of argv as integer
+
+    tell application "System Events"
+        repeat with attemptNumber from 1 to (timeoutSeconds * 4)
+            if exists application process appName then
+                tell application process appName
+                    repeat with uiWindow in windows
+                        repeat with uiButton in buttons of uiWindow
+                            try
+                                if name of uiButton as text is wantedButtonName then
+                                    perform action "AXPress" of uiButton
+                                    return appName
+                                end if
+                            end try
+                        end repeat
+                    end repeat
+                end tell
+            end if
+            delay 0.25
+        end repeat
+        error "Timed out waiting for " & appName & " button “" & wantedButtonName & "”"
     end tell
 end run
 APPLESCRIPT
@@ -298,7 +336,7 @@ else
 fi
 
 log "opening the Accessibility privacy pane through the app permission prompt"
-press_ui_button "" "Open System Settings" "" 60
+press_app_button "$APP_NAME" "Open System Settings" 60
 
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90

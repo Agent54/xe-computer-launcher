@@ -32,7 +32,7 @@ run_with_timeout() {
     ) &
     watchdog_pid=$!
 
-    if wait "$command_pid"; then
+    if wait "$command_pid" 2>/dev/null; then
         command_status=0
     else
         command_status=$?
