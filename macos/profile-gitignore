@@ -1,0 +1,105 @@
+# profiles/default/optimization_guide_model_store
+# profiles/default/Variations*
+# profiles/default/ShaderCache/*
+# profiles/default/segmentation_platform/*
+# profiles/default/GrShaderCache/*
+# profiles/default/Graphite*
+# profiles/default/Last*
+# profiles/default/first_party*
+# profiles/default/ActorSafetyLists
+# profiles/default/AmountExtractionHeuristicRegexes
+# profiles/default/CertificateRevocation
+# profiles/default/component_crx_cache
+# profiles/default/Crowd\ Deny
+# profiles/default/extensions_crx_cache
+# profiles/default/FileTypePolicies
+# profiles/default/FirstPartySetsPreloaded
+# profiles/default/GraphiteDawnCache
+# profiles/default/GrShaderCache
+# profiles/default/MEIPreload
+# profiles/default/NativeMessagingHosts
+# profiles/default/OnDeviceHeadSuggestModel
+# profiles/default/optimization_guide_model_store
+# profiles/default/OptimizationHints
+# profiles/default/OriginTrials
+# profiles/default/PKIMetadata
+# profiles/default/PrivacySandboxAttestationsPreloaded
+# profiles/default/RecoveryImproved
+# profiles/default/Safe Browsing
+# profiles/default/SafetyTips
+# profiles/default/segmentation_platform
+# profiles/default/ShaderCache
+# profiles/default/SSLErrorAssistant
+# profiles/default/Subresource\ Filter
+# profiles/default/TpcdMetadata
+# profiles/default/TrustTokenKeyCommitments
+# profiles/default/WasmTtsEngine
+# profiles/default/WidevineCdm
+# profiles/default/VariationsSeedV2
+# profiles/default/VariationsSafeSeedV2
+# profiles/default/Variations
+# profiles/default/first_party*
+# profiles/default/System\ Profile
+# profiles/default/BrowserMetrics*
+# profiles/default/Singleton*
+# profiles/default/ZxcvbnData
+# profiles/default/RunningChromeVersion
+
+# profiles/default/Default/ClientCertificates
+# profiles/default/Default/shared*
+# profiles/default/Default/chrome*
+# profiles/default/Default/Autofill*
+# profiles/default/Default/Budget*
+# profiles/default/Default/DawnGraphiteCache
+# profiles/default/Default/BrowsingTopicsState
+# profiles/default/Default/DIPS
+# profiles/default/Default/Network*
+# profiles/default/Default/Reporting*
+# profiles/default/Default/Sync*
+# profiles/default/Default/TransportSecurity
+# profiles/default/Default/WebStorage/QuotaManager
+# profiles/default/Default/commerce*
+# profiles/default/Default/discount*
+# profiles/default/Default/shared*
+# profiles/default/Default/Site\ Characteristics*
+# profiles/default/Default/Search*
+# profiles/default/Default/Session*
+# profiles/default/Default/PersistentOriginTrials
+# profiles/default/Default/Shared*
+# profiles/default/Default/Cookies*
+# profiles/default/Default/DawnWebGPUCache
+# profiles/default/Default/Favicons*
+# profiles/default/Default/Site*
+# profiles/default/Default/Local\ Storage
+# profiles/default/Default/optimization_guide_hint_cache_store
+# profiles/default/Default/parcel_tracking_db
+# profiles/default/Default/PersistentOriginTrials
+# profiles/default/Default/Search\ Logos
+# profiles/default/Default/Segmentation*
+# profiles/default/Default/Service\ Worker
+# profiles/default/Default/blob_storage
+# profiles/default/Default/Download*
+# profiles/default/Default/Extension\ Rules
+# profiles/default/Default/Extension\ State
+# profiles/default/Default/Extension\ Scripts
+# profiles/default/Default/Local\ Extension\ Settings/ghbmnnjooekpmoecnnnilnnbdlolhkhi
+# profiles/default/Default/Extensions/ghbmnnjooekpmoecnnnilnnbdlolhkhi
+# profiles/default/Default/Extensions/nmmhkkegccagdldgiimedpiccmgmieda
+# profiles/default/Default/Download*
+# profiles/default/Default/Service*
+# profiles/default/Default/GPUCache
+# profiles/default/Default/parcel_tracking*
+# profiles/default/Default/optimization*
+# profiles/default/Default/Segmentation*
+# profiles/default/Default/GCM*
+# profiles/default/Default/Feature*
+
+
+# profiles/default/ShaderCache
+# profiles/default/GrShaderCache
+# profiles/default/GraphiteDawnCache
+# profiles/default/FirstPartySetsPreloaded
+# profiles/default/first_party_sets*
+# profiles/default/SSLErrorAssistant
+# profiles/default/OnDeviceHeadSuggestModel
+# profiles/default/FileTypePolicies

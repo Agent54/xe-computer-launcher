@@ -12,7 +12,7 @@ enum Sandbox {
             return false
         }
         
-        let profileURL = sandboxDir.appendingPathComponent("darc-launcher.sb")
+        let profileURL = sandboxDir.appendingPathComponent("xe-computer.sb")
         
         guard FileManager.default.fileExists(atPath: profileURL.path) else {
             print("[Sandbox] ERROR: profile not found at \(profileURL.path)")

@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 
 final class ExternalState: @unchecked Sendable {
-    static let appSupportIdentifier = "dev.xe.darc"
+    static let appSupportIdentifier = "dev.xe.computer"
 
     static var appDataURL: URL {
         let fileManager = FileManager.default
@@ -116,7 +116,9 @@ final class ExternalState: @unchecked Sendable {
     var _browserPid: pid_t = 0
     private var darcApp: NSRunningApplication?
     /// Public read-only access to the Darc NSRunningApplication reference for activation.
-    var darcAppRef: NSRunningApplication? { darcApp }
+    var darcAppRef: NSRunningApplication? {
+        darcRunning ? darcApp : nil
+    }
 
     /// Check if a named subprocess is currently running
     func isSubprocessRunning(_ name: String) -> Bool {
@@ -127,7 +129,62 @@ final class ExternalState: @unchecked Sendable {
     var darcRunning: Bool {
         if let app = darcApp, !app.isTerminated { return true }
         darcApp = nil
-        return false
+
+        // The app shim is intentionally launched through Launch Services, so it
+        // is not necessarily a child of this process. In particular, Chrome can
+        // launch it while initially provisioning the IWA, before startDarc() has
+        // received an NSRunningApplication reference. Rediscover that independent
+        // application from the managed shim's path or bundle identifier.
+        guard let app = findRunningDarcApplication() else { return false }
+        darcApp = app
+        return true
+    }
+
+    private func darcShimAppURL() -> URL {
+        let profileName = selectedProfileName()
+        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
+        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+        return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+    }
+
+    private func findRunningDarcApplication() -> NSRunningApplication? {
+        let appURL = darcShimAppURL()
+        let executableURL = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader")
+        let expectedAppPath = appURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let expectedExecutablePath = executableURL.standardizedFileURL.resolvingSymlinksInPath().path
+
+        func isExactManagedShim(_ app: NSRunningApplication) -> Bool {
+            guard !app.isTerminated else { return false }
+            if let bundlePath = app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+               bundlePath == expectedAppPath {
+                return true
+            }
+            if let executablePath = app.executableURL?.standardizedFileURL.resolvingSymlinksInPath().path,
+               executablePath == expectedExecutablePath {
+                return true
+            }
+            return false
+        }
+
+        let runningApplications = NSWorkspace.shared.runningApplications
+        if let exactMatch = runningApplications.first(where: isExactManagedShim) {
+            return exactMatch
+        }
+
+        // Launch Services can retain the shim's pre-move bundle URL for an app
+        // that Chrome launched before provisioning moved it into our app-data
+        // directory. Its generated bundle identifier remains stable, though.
+        guard let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier else {
+            return nil
+        }
+        let identifierMatches = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { !$0.isTerminated }
+
+        if let exactMatch = identifierMatches.first(where: isExactManagedShim) {
+            return exactMatch
+        }
+        return identifierMatches.count == 1 ? identifierMatches[0] : nil
     }
     var chromeRunning: Bool {
         // Check posix_spawn'd browser pid
@@ -352,10 +409,38 @@ final class ExternalState: @unchecked Sendable {
         )
     }
 
+    var isColimaInstalled: Bool {
+        resolveExecutable(name: "colima") != nil
+    }
+
+    var isHomebrewInstalled: Bool {
+        resolveExecutable(name: "brew") != nil
+    }
+
     func installColima() -> String? {
-        guard resolveExecutable(name: "brew") != nil else { return "homebrew_missing" }
-        let result = runCommand("brew", arguments: ["install", "colima"])
-        return result.exitCode == 0 ? nil : (result.error.isEmpty ? "Failed to install colima" : result.error)
+        guard !isColimaInstalled else { return nil }
+        guard let brewPath = resolveExecutable(name: "brew") else {
+            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Computer, or install Colima manually."
+        }
+
+        appendLog("launcher", "Colima not found; installing it with Homebrew")
+        let result = runCommand(brewPath, arguments: ["install", "colima"])
+        result.output.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
+        result.error.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
+
+        guard result.exitCode == 0 else {
+            let detail = (result.error.isEmpty ? result.output : result.error)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = detail.isEmpty ? "" : "\n\nHomebrew reported:\n\(String(detail.suffix(1200)))"
+            return "Homebrew could not install Colima. Run `brew install colima` in Terminal or install Colima manually.\(suffix)"
+        }
+
+        guard isColimaInstalled else {
+            return "Homebrew finished without an error, but Colima could not be found. Run `brew install colima` in Terminal or install Colima manually."
+        }
+
+        appendLog("launcher", "Colima installed successfully with Homebrew")
+        return nil
     }
 
     func launchBrowserStack() -> String? {
@@ -390,10 +475,7 @@ final class ExternalState: @unchecked Sendable {
     func startDarc() -> String? {
         if !chromeRunning, let err = startChrome() { return err }
 
-        let profileName = selectedProfileName()
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
-        let appURL = Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+        let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
             let msg = "Darc loader not found at \(loader)"
@@ -429,6 +511,15 @@ final class ExternalState: @unchecked Sendable {
         let pid = darcApp?.processIdentifier ?? -1
         appendLog("launcher", "Darc started via NSWorkspace (isRunning=\(running), pid=\(pid))")
         print("[ExternalState] Darc started, isRunning=\(running)")
+
+        // Bring the Darc app to the foreground (silently — ignore if app terminated)
+        if let app = darcApp, !app.isTerminated {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                if let ref = self?.darcApp, !ref.isTerminated {
+                    ref.activate()
+                }
+            }
+        }
 
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {

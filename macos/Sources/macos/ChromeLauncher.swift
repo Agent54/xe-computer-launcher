@@ -27,9 +27,11 @@ extension ExternalState {
         "--silent-launch",
         "--no-default-browser-check",
         "--no-first-run",
+        // TODO: support "--proxy-server=http://127.0.0.1:8080",
         "--flag-switches-begin",
         "--enable-features=AppShimNotificationAttribution,DesktopPWAsAdditionalWindowingControls,DesktopPWAsLinkCapturingWithScopeExtensions,DesktopPWAsSubApps,IsolatedWebAppDevMode,IsolatedWebApps,OverscrollEffectOnNonRootScrollers,UseAdHocSigningForWebAppShims,PwaNavigationCapturing,UnframedIwa,WebAppBorderless,WebAppPredictableAppUpdating",
         "--disable-features=CADisplayLinkInBrowser,AutomationControlled",
+        "--disable-blink-features=AutomationControlled",
         "--flag-switches-end"
     ]
     // DO NOT DELETE:
@@ -62,7 +64,12 @@ extension ExternalState {
             "--user-data-dir=\(profileDir.path)",
             "--remote-debugging-pipe"
         ] + Self.chromeFlags
-        if boolSetting("chrome_headless", default: false) { args.append("--headless=new") }
+        if boolSetting("chrome_headless", default: false) {
+            args.append("--headless=new")
+            // Override User-Agent globally (including workers) to remove "HeadlessChrome"
+            let majorVersion = chrome.version ?? 145
+            args.append("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/\(majorVersion).0.0.0 Safari/537.36")
+        }
 
         // Install the IWA: use override URL if set for this profile, otherwise use local file.
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
@@ -106,6 +113,11 @@ extension ExternalState {
             appendLog("launcher", "Chrome started with debug pipe (\(chrome.name), pid=\(_browserPid), isRunning=\(chromeRunning))")
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
+            // Apply anti-detection patches when running in headless mode
+            if boolSetting("chrome_headless", default: false) {
+                preventDetection()
+            }
+
             // Check if app shim needs provisioning (in parallel)
             let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
             let shimApp = shimDir.appendingPathComponent(shimAppName)
@@ -120,6 +132,76 @@ extension ExternalState {
             print("[ExternalState] \(msg)")
             return error.localizedDescription
         }
+    }
+
+    // MARK: - CDP Pipe Communication
+
+    /// Monotonically increasing CDP message ID.
+    nonisolated(unsafe) private static var _cdpNextId: Int = 0
+    private static let _cdpIdLock = NSLock()
+    private static func nextCDPId() -> Int {
+        _cdpIdLock.lock()
+        defer { _cdpIdLock.unlock() }
+        _cdpNextId += 1
+        return _cdpNextId
+    }
+
+    /// Leftover data from previous CDP reads (events that arrived between commands).
+    nonisolated(unsafe) private static var _cdpReadBuffer = Data()
+
+    /// Send a CDP command over the debugging pipe with a timeout.
+    /// The pipe protocol uses \0 as message delimiter.
+    /// If `sessionId` is provided, the command is routed to that target session.
+    @discardableResult
+    func sendCDP(method: String, params: [String: Any] = [:], sessionId: String? = nil, timeout: TimeInterval = 5.0) -> [String: Any]? {
+        guard let writeHandle = cdpWriteHandle, let readHandle = cdpReadHandle else {
+            appendLog("launcher", "CDP: pipe not available")
+            return nil
+        }
+        let id = Self.nextCDPId()
+        var msg: [String: Any] = ["id": id, "method": method]
+        if !params.isEmpty { msg["params"] = params }
+        if let sid = sessionId { msg["sessionId"] = sid }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: msg),
+              var payload = String(data: jsonData, encoding: .utf8) else {
+            appendLog("launcher", "CDP: failed to serialize \(method)")
+            return nil
+        }
+        payload.append("\0")
+        writeHandle.write(payload.data(using: .utf8)!)
+
+        let deadline = Date().addingTimeInterval(timeout)
+        let fd = readHandle.fileDescriptor
+
+        while Date() < deadline {
+            while let zeroIdx = Self._cdpReadBuffer.firstIndex(of: 0) {
+                let messageData = Self._cdpReadBuffer[Self._cdpReadBuffer.startIndex..<zeroIdx]
+                Self._cdpReadBuffer = Data(Self._cdpReadBuffer[Self._cdpReadBuffer.index(after: zeroIdx)...])
+
+                guard let response = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
+                    continue
+                }
+                if let responseId = response["id"] as? Int, responseId == id {
+                    return response
+                }
+            }
+
+            let remainingMs = Int32(max(deadline.timeIntervalSinceNow * 1000, 1))
+            var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pollResult = poll(&pollFd, 1, min(remainingMs, 500))
+            if pollResult > 0 {
+                var buf = [UInt8](repeating: 0, count: 65536)
+                let n = read(fd, &buf, buf.count)
+                if n <= 0 { return nil }
+                Self._cdpReadBuffer.append(contentsOf: buf[0..<n])
+            } else if pollResult < 0 {
+                return nil
+            }
+        }
+
+        appendLog("launcher", "CDP: timeout waiting for response to \(method) (id=\(id))")
+        return nil
     }
 
     func stopChrome() {
@@ -237,27 +319,9 @@ extension ExternalState {
     /// Uses the macOS Accessibility API (AXUIElement) directly — requires only Accessibility permission,
     /// not the separate "control Finder" Automation permission that AppleScript triggers.
     private func closeFinderWindowsContaining(_ substrings: [String]) {
-        // Check/request Accessibility permission (shows system prompt if not trusted)
-        let promptKey = "AXTrustedCheckOptionPrompt" as CFString
-        if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
-            // Show progress window with permission message while waiting
-            DispatchQueue.main.async {
-                showSetupProgress(message: "")
-                updateSetupProgress(
-                    status: "Please grant Accessibility permission for managing window-to-desktop assignment and modifying app permissions to install sub-apps.",
-                    progress: 100
-                )
-            }
-            appendLog("launcher", "Waiting for Accessibility permission...")
-            for _ in 0..<120 {
-                Thread.sleep(forTimeInterval: 0.5)
-                if AXIsProcessTrusted() { break }
-            }
-            DispatchQueue.main.async { closeSetupProgress() }
-            if !AXIsProcessTrusted() {
-                appendLog("launcher", "Accessibility permission not granted, cannot close Finder windows")
-                return
-            }
+        guard AXIsProcessTrusted() else {
+            appendLog("launcher", "Accessibility permission not granted, cannot close Finder windows")
+            return
         }
 
         // Find the Finder process

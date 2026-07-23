@@ -1,0 +1,208 @@
+name: Build, Test, and Release Launcher
+
+
+on:
+  push:
+    branches:
+      - int
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, macOS, ARM64, xe-mac]
+    timeout-minutes: 60
+    env:
+      NOTARY_PROFILE: notarytool-profile
+
+    steps:
+      - name: Configure temporary paths
+        shell: bash
+        run: |
+          echo "NOTARY_KEYCHAIN=$RUNNER_TEMP/app-signing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.keychain-db" >> "$GITHUB_ENV"
+          echo "ORIGINAL_KEYCHAINS=$RUNNER_TEMP/original-keychains-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" >> "$GITHUB_ENV"
+
+      - name: Check out release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reset launcher integration environment
+        run: bash macos/Tests/Integration/cleanup.sh
+
+      - name: Calculate next patch version
+        id: version
+        shell: bash
+        run: |
+          latest_version=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              latest_version="$candidate"
+              break
+            fi
+          done < <(git tag --sort=-version:refname)
+
+          if [[ -z "$latest_version" ]]; then
+            latest_version="0.0.0"
+          fi
+
+          IFS=. read -r major minor patch <<< "$latest_version"
+          version="$major.$minor.$((patch + 1))"
+
+          if [[ "$GITHUB_REF_NAME" == "int" ]]; then
+            release_tag="$version-int.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+            prerelease="true"
+          else
+            release_tag="$version"
+            prerelease="false"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Building Xe Computer $version for release $release_tag"
+
+          plutil -replace CFBundleShortVersionString \
+            -string "$version" \
+            macos/Sources/macos/Info.plist
+          plutil -replace CFBundleVersion \
+            -string "$GITHUB_RUN_NUMBER" \
+            macos/Sources/macos/Info.plist
+
+      - name: Install Developer ID certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        shell: bash
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+
+          security list-keychains -d user |
+            sed -E 's/^[[:space:]]*"(.*)"$/\1/' > "$ORIGINAL_KEYCHAINS"
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" |
+            base64 --decode -o "$certificate_path"
+
+          security create-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$NOTARY_KEYCHAIN"
+          security set-keychain-settings \
+            -lut 21600 \
+            "$NOTARY_KEYCHAIN"
+          security unlock-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$NOTARY_KEYCHAIN"
+          security import "$certificate_path" \
+            -P "$P12_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$NOTARY_KEYCHAIN"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$NOTARY_KEYCHAIN"
+
+          original_keychains=()
+          while IFS= read -r keychain; do
+            [[ -n "$keychain" ]] && original_keychains+=("$keychain")
+          done < "$ORIGINAL_KEYCHAINS"
+          security list-keychains \
+            -d user \
+            -s "$NOTARY_KEYCHAIN" "${original_keychains[@]}"
+          developer_id="$(
+            security find-identity \
+              -v \
+              -p codesigning \
+              "$NOTARY_KEYCHAIN" |
+              awk -F '"' '/Developer ID Application:/ { print $2; exit }'
+          )"
+
+          if [[ -z "$developer_id" ]]; then
+            echo "::error::The imported P12 does not contain a Developer ID Application identity."
+            exit 1
+          fi
+
+          echo "DEVELOPER_ID=$developer_id" >> "$GITHUB_ENV"
+          echo "Using signing identity: $developer_id"
+
+      - name: Configure notarization
+        env:
+          NOTARY_KEY_BASE64: ${{ secrets.NOTARY_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          notary_key_path="$RUNNER_TEMP/AuthKey.p8"
+
+          echo -n "$NOTARY_KEY_BASE64" |
+            base64 --decode -o "$notary_key_path"
+
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --key "$notary_key_path" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --keychain "$NOTARY_KEYCHAIN"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          for formula in create-dmg gh; do
+            if ! brew list --formula "$formula" >/dev/null 2>&1; then
+              brew install "$formula"
+            fi
+          done
+
+      - name: Build complete launcher DMG
+        working-directory: macos
+        run: make
+
+      - name: Run full launcher integration test
+        env:
+          DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
+        run: macos/Tests/Integration/install-from-dmg.sh
+
+      - name: Create version tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        shell: bash
+        run: |
+          release_flags=(--generate-notes)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_flags+=(--prerelease --latest=false)
+          else
+            release_flags+=(--latest)
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            "macos/.build/Xe Computer.dmg" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Xe Computer $RELEASE_TAG" \
+            "${release_flags[@]}"
+
+      - name: Remove temporary signing material
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [[ -s "$ORIGINAL_KEYCHAINS" ]]; then
+            original_keychains=()
+            while IFS= read -r keychain; do
+              [[ -n "$keychain" ]] && original_keychains+=("$keychain")
+            done < "$ORIGINAL_KEYCHAINS"
+            security list-keychains \
+              -d user \
+              -s "${original_keychains[@]}"
+          fi
+
+          security delete-keychain "$NOTARY_KEYCHAIN" 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/developer-id.p12" \
+            "$RUNNER_TEMP/AuthKey.p8" \
+            "$ORIGINAL_KEYCHAINS"
