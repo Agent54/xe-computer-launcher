@@ -6,7 +6,7 @@ APP_NAME="Xe Computer"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/.build/Xe Computer.dmg"
+REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Computer.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
 MOUNT_POINT=""
 

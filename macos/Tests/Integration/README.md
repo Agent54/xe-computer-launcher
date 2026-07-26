@@ -117,7 +117,7 @@ cleanup, artifact/build preparation, and the test invocation:
 
 - name: Run installer integration test
   env:
-    DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
+    DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Computer.dmg
   run: macos/Tests/Integration/install-from-dmg.sh
 
 - name: Verify version in About dialog

@@ -28,7 +28,7 @@
 ;; Read the app bundle directory
 (allow file-read* (subpath (param "BUNDLE_PATH")))
 
-;; For development - allow reading the bundle's parent directory (.build)
+;; For development - allow reading the bundle's parent directory (dist)
 (allow file-read* (subpath (param "BUNDLE_DIR")))
 
 ;; Allow reading cwd and parent paths for path resolution (needed by Process)

@@ -5,7 +5,8 @@ export
 APP_NAME = Xe Computer
 BUNDLE_ID = dev.xe.computer
 BUILD_DIR = .build
-APP_BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
+DIST_DIR = dist
+APP_BUNDLE = $(DIST_DIR)/$(APP_NAME).app
 CONTENTS = $(APP_BUNDLE)/Contents
 MACOS_DIR = $(CONTENTS)/MacOS
 RESOURCES = $(CONTENTS)/Resources
@@ -105,7 +106,8 @@ notarize: check
 # Create DMG for distribution (after notarization)
 dmg: notarize
 	@echo "Creating DMG..."
-	@rm -f "$(BUILD_DIR)/$(DMG_NAME)"
+	@mkdir -p "$(DIST_DIR)"
+	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
 	@create-dmg \
 		--volname "$(APP_NAME)" \
 		--window-pos 510 370 \
@@ -114,17 +116,17 @@ dmg: notarize
 		--icon "$(APP_NAME).app" 180 140 \
 		--hide-extension "$(APP_NAME).app" \
 		--codesign "$(DEVELOPER_ID)" \
-		"$(BUILD_DIR)/$(DMG_NAME)" \
+		"$(DIST_DIR)/$(DMG_NAME)" \
 		"$(APP_BUNDLE)"
-	@echo "DMG created at $(BUILD_DIR)/$(DMG_NAME)"
+	@echo "DMG created at $(DIST_DIR)/$(DMG_NAME)"
 
 # Full release: sign, notarize, create DMG
 release: dmg
 	@echo "Release build complete!"
 	@echo "  App: $(APP_BUNDLE)"
-	@echo "  DMG: $(BUILD_DIR)/$(DMG_NAME)"
+	@echo "  DMG: $(DIST_DIR)/$(DMG_NAME)"
 
 clean:
 	swift package clean
 	rm -rf "$(APP_BUNDLE)"
-	rm -f "$(BUILD_DIR)/$(DMG_NAME)"
+	rm -f "$(DIST_DIR)/$(DMG_NAME)"

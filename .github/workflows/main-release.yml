@@ -166,7 +166,7 @@ jobs:
 
       - name: Run full launcher integration test
         env:
-          DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
+          DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Computer.dmg
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Verify version in About dialog
@@ -189,7 +189,7 @@ jobs:
           fi
 
           gh release create "$RELEASE_TAG" \
-            "macos/.build/Xe Computer.dmg" \
+            "macos/dist/Xe Computer.dmg" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Xe Computer $RELEASE_TAG" \
