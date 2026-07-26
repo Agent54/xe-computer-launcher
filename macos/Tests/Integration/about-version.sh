@@ -3,8 +3,10 @@
 set -euo pipefail
 
 APP_NAME="Xe Computer"
-INSTALLED_APP="/Applications/${APP_NAME}.app"
+INSTALLED_APP="${INSTALLED_APP:-/Applications/${APP_NAME}.app}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
+STATUS_MENU_IDENTIFIER="dev.xe.computer.status-menu"
+STATUS_MENU_LABEL="Xe Computer status menu"
 
 log() {
     printf '[about-version-integration] %s\n' "$*"
@@ -15,38 +17,18 @@ fail() {
     exit 1
 }
 
-run_with_timeout() {
+osascript_with_timeout() {
     local timeout_seconds="$1"
     shift
-    local command_pid
-    local watchdog_pid
-    local command_status
 
-    "$@" <&0 &
-    command_pid=$!
-    (
-        sleep "$timeout_seconds"
-        if kill -0 "$command_pid" 2>/dev/null; then
-            kill -TERM "$command_pid" 2>/dev/null || true
-        fi
-    ) &
-    watchdog_pid=$!
-
-    if wait "$command_pid" 2>/dev/null; then
-        command_status=0
-    else
-        command_status=$?
-    fi
-
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
-
-    if [[ "$command_status" -eq 143 ]]; then
-        printf '[about-version-integration] ERROR: UI command timed out after %s seconds\n' \
-            "$timeout_seconds" >&2
-        return 124
-    fi
-    return "$command_status"
+    perl -e '
+        use strict;
+        use warnings;
+        my $timeout = shift @ARGV;
+        $SIG{ALRM} = sub { die "__ABOUT_UI_TIMEOUT__\n" };
+        alarm $timeout;
+        exec @ARGV or die "exec @ARGV failed: $!\n";
+    ' "$timeout_seconds" "$@"
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "this test must run on macOS"
@@ -62,16 +44,18 @@ if [[ -z "$EXPECTED_VERSION" ]]; then
 fi
 [[ -n "$EXPECTED_VERSION" ]] || fail "could not determine the expected version"
 
-pgrep -f '/Applications/Xe Computer.app/Contents/MacOS/bin' >/dev/null \
+pgrep -f "$INSTALLED_APP/Contents/MacOS/bin" >/dev/null \
     || fail "the installed app is not running"
 
 log "opening About from the status menu and expecting version $EXPECTED_VERSION"
-if ! run_with_timeout 45 osascript - \
-    "$APP_NAME" "$EXPECTED_VERSION" <<'APPLESCRIPT'
+if ! osascript_with_timeout 45 osascript - \
+    "$APP_NAME" "$EXPECTED_VERSION" \
+    "$STATUS_MENU_IDENTIFIER" "$STATUS_MENU_LABEL" <<'APPLESCRIPT'
 on run argv
     set appName to item 1 of argv
     set expectedVersion to item 2 of argv
-    set aboutOpened to false
+    set statusMenuIdentifier to item 3 of argv
+    set statusMenuLabel to item 4 of argv
 
     tell application "System Events"
         set targetProcess to missing value
@@ -87,61 +71,102 @@ on run argv
         if targetProcess is missing value then error "Could not find the installed app process"
         log "Located the " & appName & " process"
 
-        -- Locate the status item by behavior instead of relying on its menu-bar
-        -- index or accessibility title, both of which vary between macOS hosts.
+        -- Close any menu left open by the previously active application.
+        key code 53
+
+        set statusMenuItem to missing value
         repeat with uiMenuBar in menu bars of targetProcess
             repeat with uiMenuBarItem in menu bar items of uiMenuBar
+                set itemMatches to false
                 try
-                    click uiMenuBarItem
-                    delay 0.2
-                    if exists menu 1 of uiMenuBarItem then
-                        if exists menu item "About" of menu 1 of uiMenuBarItem then
-                            click menu item "About" of menu 1 of uiMenuBarItem
-                            set aboutOpened to true
-                            exit repeat
-                        end if
-                    end if
-                    key code 53
+                    set elementIdentifier to value of attribute "AXIdentifier" of uiMenuBarItem as text
+                    if elementIdentifier is statusMenuIdentifier then set itemMatches to true
                 end try
+                try
+                    if (name of uiMenuBarItem as text) is statusMenuLabel then set itemMatches to true
+                end try
+                try
+                    if (description of uiMenuBarItem as text) is statusMenuLabel then set itemMatches to true
+                end try
+                try
+                    if (subrole of uiMenuBarItem as text) is "AXMenuExtra" then set itemMatches to true
+                end try
+
+                if itemMatches then
+                    set statusMenuItem to uiMenuBarItem
+                    exit repeat
+                end if
             end repeat
-            if aboutOpened then exit repeat
+            if statusMenuItem is not missing value then exit repeat
         end repeat
-        if not aboutOpened then error "Could not find About in the status menu"
+
+        if statusMenuItem is missing value then
+            error "Could not find the Xe Computer status item"
+        end if
+
+        click statusMenuItem
+        set statusMenuOpened to false
+        repeat 20 times
+            if exists menu 1 of statusMenuItem then
+                set statusMenuOpened to true
+                exit repeat
+            end if
+            delay 0.25
+        end repeat
+        if not statusMenuOpened then
+            error "Xe Computer status menu did not open"
+        end if
+        if not (exists menu item "About" of menu 1 of statusMenuItem) then
+            error "Could not find About in the Xe Computer status menu"
+        end if
+        click menu item "About" of menu 1 of statusMenuItem
         log "Opened About from the status menu"
 
         set foundAboutPanel to false
         log "Inspecting the About panel contents"
         repeat 80 times
-            if exists window 1 of targetProcess then
-                set uiWindow to window 1 of targetProcess
+            repeat with uiWindow in windows of targetProcess
                 set headingMatches to false
                 set versionMatches to false
-                set displayedTexts to {}
-
-                -- The standard panel exposes its visible heading and version
-                -- as direct static texts. Do not request "entire contents":
-                -- recursive AX traversal can block System Events indefinitely.
+                set uiElements to {}
                 try
-                    set displayedTexts to displayedTexts & (name of every static text of uiWindow)
-                end try
-                try
-                    set displayedTexts to displayedTexts & (value of every static text of uiWindow)
+                    set uiElements to entire contents of uiWindow
                 end try
 
-                repeat with displayedText in displayedTexts
+                -- Depending on the macOS release, Accessibility may expose the
+                -- heading and version as separate elements or coalesce them into
+                -- one value such as "Xe Computer Version 1.0 (1)".
+                repeat with uiElement in uiElements
+                    set displayedTexts to {}
                     try
+                        set end of displayedTexts to name of uiElement as text
+                    end try
+                    try
+                        set end of displayedTexts to value of uiElement as text
+                    end try
+                    try
+                        set end of displayedTexts to description of uiElement as text
+                    end try
+
+                    repeat with displayedText in displayedTexts
                         set displayedTextValue to displayedText as text
-                        if displayedTextValue is appName then set headingMatches to true
-                        if displayedTextValue is expectedVersion or displayedTextValue is ("Version " & expectedVersion) or displayedTextValue starts with ("Version " & expectedVersion & " (") then
+                        if displayedTextValue contains appName then
+                            set headingMatches to true
+                        end if
+                        if displayedTextValue contains expectedVersion then
                             set versionMatches to true
                         end if
-                    end try
+                    end repeat
                 end repeat
 
                 if headingMatches then set foundAboutPanel to true
                 if headingMatches and versionMatches then
-                    if (frontmost of targetProcess) is false then
-                        error "About dialog opened without bringing the app to the foreground"
+                    set aboutFocused to false
+                    try
+                        set aboutFocused to value of attribute "AXFocused" of uiWindow
+                    end try
+                    if aboutFocused is not true then
+                        error "About dialog opened without focusing its window"
                     end if
 
                     try
@@ -149,7 +174,7 @@ on run argv
                     end try
                     return expectedVersion
                 end if
-            end if
+            end repeat
             delay 0.25
         end repeat
         if foundAboutPanel then

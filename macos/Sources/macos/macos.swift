@@ -209,6 +209,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
+            button.setAccessibilityIdentifier("dev.xe.computer.status-menu")
+            button.setAccessibilityLabel("Xe Computer status menu")
+            button.toolTip = "Xe Computer"
+
             if let resourceURL = Bundle.main.resourceURL,
                let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("status-icon.png")) {
                 icon.size = NSSize(width: 18, height: 18)
