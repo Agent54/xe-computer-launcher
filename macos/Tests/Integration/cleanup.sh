@@ -24,11 +24,55 @@ detach_disk_image() {
     fi
 }
 
+stop_matching_processes() {
+    local description="$1"
+    local pattern="$2"
+    local process_ids
+
+    process_ids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    [[ -n "$process_ids" ]] || return 0
+
+    log "stopping $description"
+    while IFS= read -r process_id; do
+        kill -TERM "$process_id" 2>/dev/null || true
+    done <<<"$process_ids"
+
+    # Chromium helpers and app shims normally exit with their parent. Give them
+    # a short grace period, then ensure stale instances cannot keep app-data
+    # files open while cleanup moves the directory.
+    for _ in {1..20}; do
+        pgrep -f "$pattern" >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+
+    process_ids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    while IFS= read -r process_id; do
+        [[ -n "$process_id" ]] && kill -KILL "$process_id" 2>/dev/null || true
+    done <<<"$process_ids"
+
+    sleep 0.1
+    pgrep -f "$pattern" >/dev/null 2>&1 \
+        && fail "could not stop $description"
+    return 0
+}
+
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
 command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
 
 log "stopping existing app processes"
-pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
+bundle_id_pattern="${BUNDLE_ID//./[.]}"
+stop_matching_processes \
+    "Xe Computer instances" \
+    '/Xe Computer[.]app/Contents/MacOS/bin'
+stop_matching_processes \
+    "Darc app shims" \
+    "/Library/Application Support/${bundle_id_pattern}/shims/.*/Darc[^/]*[.]app/Contents/MacOS/app_mode_loader"
+stop_matching_processes \
+    "Darc app shims launched by Xe Computer's Helium" \
+    "app_mode_loader .*--launched-by-chrome-bundle-path=.*/Library/Application Support/${bundle_id_pattern}/Helium[.]app"
+stop_matching_processes \
+    "Xe Computer's Helium and helper processes" \
+    "/Library/Application Support/${bundle_id_pattern}/Helium[.]app/"
 
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do
@@ -45,10 +89,7 @@ done < <(
         /^image-path[[:space:]]*:/ {
             image_path = $0
             sub(/^[^:]*:[[:space:]]*/, "", image_path)
-            matches_xe_dmg = (
-                image_path ~ /\/Xe Computer\.dmg$/ ||
-                image_path ~ /\/Xe\.Computer\.dmg$/
-            )
+            matches_xe_dmg = image_path ~ /\/Xe Computer\.dmg$/ || image_path ~ /\/Xe\.Computer\.dmg$/
             next
         }
         matches_xe_dmg && /^\/dev\/disk[0-9]+[[:space:]]/ {

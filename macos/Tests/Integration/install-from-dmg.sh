@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Computer.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
 MOUNT_POINT=""
+DEV_MODE=false
+DEV_INSTALL_ARGUMENT="--xe-computer-development-install"
+INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
 
 log() {
     printf '[installer-integration] %s\n' "$*"
@@ -18,6 +21,32 @@ fail() {
     printf '[installer-integration] ERROR: %s\n' "$*" >&2
     exit 1
 }
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [--dev]
+
+  --dev  Test an ad-hoc-signed development DMG. Strict code-signature checks
+         still run, but Gatekeeper assessments requiring Developer ID signing
+         and notarization are skipped.
+EOF
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --dev)
+            DEV_MODE=true
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "unknown argument: $1"
+            ;;
+    esac
+    shift
+done
 
 # Apple Events can wait forever when the process running this test has not yet
 # been granted Automation or Accessibility access. Keep every UI operation
@@ -114,6 +143,10 @@ on run argv
                         end repeat
 
                         if targetButton is not missing value and contextMatches then
+                            set matchedProcessName to ""
+                            try
+                                set matchedProcessName to name of uiProcess as text
+                            end try
                             set buttonPosition to position of targetButton
                             set buttonSize to size of targetButton
 
@@ -130,7 +163,7 @@ on run argv
                                 click at {item 1 of buttonPosition + (item 1 of buttonSize div 2), item 2 of buttonPosition + (item 2 of buttonSize div 2)}
                                 delay 0.5
                             end if
-                            return name of uiProcess as text
+                            return matchedProcessName
                         end if
                     end repeat
                 end if
@@ -144,39 +177,155 @@ end run
 APPLESCRIPT
 }
 
-# Press a direct button in an app-owned window without recursively traversing
-# the accessibility tree. This is used for Xe Computer's own onboarding alert.
-press_app_button() {
-    local app_name="$1"
+# Directly launched development apps appear to System Events under their
+# executable name ("bin") instead of their bundle identifier. Target that
+# process without enumerating every GUI process.
+press_process_button() {
+    local process_name="$1"
     local button_name="$2"
-    local timeout_seconds="$3"
+    local context_text="$3"
+    local timeout_seconds="$4"
 
     run_with_timeout "$((timeout_seconds + 10))" osascript - \
-        "$app_name" "$button_name" "$timeout_seconds" <<'APPLESCRIPT'
+        "$process_name" "$button_name" "$context_text" "$timeout_seconds" <<'APPLESCRIPT'
 on run argv
-    set appName to item 1 of argv
+    set processName to item 1 of argv
     set wantedButtonName to item 2 of argv
-    set timeoutSeconds to item 3 of argv as integer
+    set wantedContext to item 3 of argv
+    set timeoutSeconds to item 4 of argv as integer
 
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
-            if exists application process appName then
-                tell application process appName
+            if exists application process processName then
+                tell application process processName
                     repeat with uiWindow in windows
-                        repeat with uiButton in buttons of uiWindow
+                        set uiElements to {}
+                        try
+                            set uiElements to entire contents of uiWindow
+                        end try
+
+                        set contextMatches to (wantedContext is "")
+                        set targetButton to missing value
+                        repeat with uiElement in uiElements
                             try
-                                if name of uiButton as text is wantedButtonName then
-                                    perform action "AXPress" of uiButton
-                                    return appName
+                                set elementName to name of uiElement as text
+                                if elementName is wantedButtonName and role of uiElement is "AXButton" then
+                                    set targetButton to uiElement
+                                end if
+                                if wantedContext is not "" and elementName contains wantedContext then
+                                    set contextMatches to true
+                                end if
+                            end try
+                            try
+                                if wantedContext is not "" then
+                                    set elementValue to value of uiElement as text
+                                    if elementValue contains wantedContext then set contextMatches to true
                                 end if
                             end try
                         end repeat
+
+                        if targetButton is not missing value and contextMatches then
+                            try
+                                perform action "AXPress" of targetButton
+                            end try
+                            return processName
+                        end if
                     end repeat
                 end tell
             end if
             delay 0.25
         end repeat
-        error "Timed out waiting for " & appName & " button “" & wantedButtonName & "”"
+        error "Timed out waiting for " & processName & " button “" & wantedButtonName & "”"
+    end tell
+end run
+APPLESCRIPT
+}
+
+# Accessibility requests are presented by macOS in a dedicated system process.
+# A previous interrupted run can leave another request for the same app queued
+# in front of the current one. Press every matching native prompt so none remain
+# pending when the test enables the app in System Settings.
+drain_accessibility_permission_prompts() {
+    local app_name="$1"
+    local timeout_seconds="$2"
+
+    run_with_timeout "$((timeout_seconds + 10))" osascript - \
+        "$app_name" "$timeout_seconds" <<'APPLESCRIPT'
+on run argv
+    set appName to item 1 of argv
+    set timeoutSeconds to item 2 of argv as integer
+    set pressedCount to 0
+    set quietPollCount to 0
+
+    tell application "System Events"
+        repeat with attemptNumber from 1 to (timeoutSeconds * 4)
+            set pressedPrompt to false
+
+            if exists application process "universalAccessAuthWarn" then
+                tell application process "universalAccessAuthWarn"
+                    repeat with uiWindow in windows
+                        set uiElements to {}
+                        try
+                            set uiElements to entire contents of uiWindow
+                        end try
+
+                        set contextMatches to false
+                        set targetButton to missing value
+                        repeat with uiElement in uiElements
+                            try
+                                set elementName to name of uiElement as text
+                                if elementName is "Open System Settings" and role of uiElement is "AXButton" then
+                                    set targetButton to uiElement
+                                end if
+                                if elementName contains appName and elementName contains "accessibility features" then
+                                    set contextMatches to true
+                                end if
+                            end try
+                            try
+                                set elementValue to value of uiElement as text
+                                if elementValue contains appName and elementValue contains "accessibility features" then
+                                    set contextMatches to true
+                                end if
+                            end try
+                        end repeat
+
+                        if targetButton is not missing value and contextMatches then
+                            set buttonPosition to position of targetButton
+                            set buttonSize to size of targetButton
+
+                            try
+                                perform action "AXPress" of targetButton
+                            end try
+                            delay 0.5
+
+                            set buttonStillExists to false
+                            try
+                                set buttonStillExists to exists targetButton
+                            end try
+                            if buttonStillExists then
+                                click at {item 1 of buttonPosition + (item 1 of buttonSize div 2), item 2 of buttonPosition + (item 2 of buttonSize div 2)}
+                                delay 0.5
+                            end if
+
+                            set pressedPrompt to true
+                            exit repeat
+                        end if
+                    end repeat
+                end tell
+            end if
+
+            if pressedPrompt then
+                set pressedCount to pressedCount + 1
+                set quietPollCount to 0
+            else if pressedCount > 0 then
+                set quietPollCount to quietPollCount + 1
+                if quietPollCount ≥ 8 then return pressedCount
+                delay 0.25
+            else
+                delay 0.25
+            end if
+        end repeat
+        error "Timed out waiting for the native macOS Accessibility prompt for " & appName
     end tell
 end run
 APPLESCRIPT
@@ -302,24 +451,42 @@ volume_name="${volume_relative_path%%/*}"
 MOUNT_POINT="/Volumes/${volume_name}"
 log "found source app at $SOURCE_APP"
 
-log "verifying source signature and Gatekeeper assessment"
+log "verifying source signature"
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP" \
     || fail "source app has an invalid code signature: $SOURCE_APP"
-spctl --assess --type execute --verbose=2 "$SOURCE_APP" \
-    || fail "Gatekeeper rejected the source app: $SOURCE_APP"
-
-log "opening the app from the disk image through Launch Services"
-open "$SOURCE_APP"
-
-log "checking for the Gatekeeper first-open confirmation"
-if press_ui_button "" "Open" "downloaded from the Internet" 15; then
-    log "approved the Gatekeeper first-open confirmation"
+if [[ "$DEV_MODE" == true ]]; then
+    log "development mode: skipping source Gatekeeper assessment"
 else
-    log "no Gatekeeper first-open confirmation appeared"
+    log "verifying source Gatekeeper assessment"
+    spctl --assess --type execute --verbose=2 "$SOURCE_APP" \
+        || fail "Gatekeeper rejected the source app: $SOURCE_APP"
+fi
+
+if [[ "$DEV_MODE" == true ]]; then
+    log "development mode: dismissing stale Gatekeeper denial dialogs"
+    if press_ui_button "" "Done" "free of malware" 2 2>/dev/null; then
+        log "dismissed a stale Gatekeeper denial dialog"
+    fi
+    log "development mode: launching the app directly from the disk image"
+    "$SOURCE_APP/Contents/MacOS/bin" "$DEV_INSTALL_ARGUMENT" &
+else
+    log "opening the app from the disk image through Launch Services"
+    open "$SOURCE_APP"
+
+    log "checking for the Gatekeeper first-open confirmation"
+    if press_ui_button "" "Open" "downloaded from the Internet" 15; then
+        log "approved the Gatekeeper first-open confirmation"
+    else
+        log "no Gatekeeper first-open confirmation appeared"
+    fi
 fi
 
 log "approving the real installer alert"
-press_ui_button "$BUNDLE_ID" "Install in Applications" "" 60
+if [[ "$DEV_MODE" == true ]]; then
+    press_process_button "bin" "Install in Applications" "Install Xe Computer?" 60
+else
+    press_ui_button "$BUNDLE_ID" "Install in Applications" "" 60
+fi
 
 log "waiting for the installed bundle to be created"
 deadline=$((SECONDS + 30))
@@ -328,15 +495,39 @@ while (( SECONDS < deadline )) && [[ ! -d "$INSTALLED_APP" ]]; do
 done
 [[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
 
-log "checking for a Gatekeeper confirmation for the installed copy"
-if press_ui_button "" "Open" "downloaded from the Internet" 10; then
-    log "approved the Gatekeeper confirmation for the installed copy"
+if [[ "$DEV_MODE" == true ]]; then
+    log "development mode: skipping Gatekeeper confirmation for the installed copy"
+    log "development mode: waiting for the disk-image copy to exit"
+    deadline=$((SECONDS + 10))
+    while (( SECONDS < deadline )) && pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null; do
+        sleep 0.1
+    done
+    pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null \
+        && fail "disk-image copy did not exit after development installation"
+
+    log "development mode: removing quarantine from the installed copy"
+    xattr -dr com.apple.quarantine "$INSTALLED_APP" 2>/dev/null || true
+    if xattr -pr com.apple.quarantine "$INSTALLED_APP" >/dev/null 2>&1; then
+        fail "could not remove quarantine from the development installation"
+    fi
+
+    log "development mode: launching the installed app through Launch Services"
+    # Launching the Mach-O directly makes the test runner the TCC-responsible
+    # process. Launch Services gives the installed bundle its own audit identity,
+    # which is required for the native Accessibility prompt and settings row to
+    # be attributed to Xe Computer.
+    open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
 else
-    log "no Gatekeeper confirmation appeared for the installed copy"
+    log "checking for a Gatekeeper confirmation for the installed copy"
+    if press_ui_button "" "Open" "downloaded from the Internet" 10; then
+        log "approved the Gatekeeper confirmation for the installed copy"
+    else
+        log "no Gatekeeper confirmation appeared for the installed copy"
+    fi
 fi
 
-log "opening the Accessibility privacy pane through the app permission prompt"
-press_app_button "$APP_NAME" "Open System Settings" 60
+log "accepting the native macOS Accessibility permission prompt"
+drain_accessibility_permission_prompts "$APP_NAME" 60
 
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90
@@ -353,9 +544,14 @@ done
 pgrep -f '/Applications/Xe Computer.app/Contents/MacOS/bin' >/dev/null \
     || fail "installed app did not relaunch from /Applications"
 
-log "verifying installed signature and Gatekeeper assessment"
+log "verifying installed signature"
 codesign --verify --deep --strict --verbose=2 "$INSTALLED_APP"
-spctl --assess --type execute --verbose=2 "$INSTALLED_APP"
+if [[ "$DEV_MODE" == true ]]; then
+    log "development mode: skipping installed Gatekeeper assessment"
+else
+    log "verifying installed Gatekeeper assessment"
+    spctl --assess --type execute --verbose=2 "$INSTALLED_APP"
+fi
 
 installed_bundle_id="$(defaults read "$INSTALLED_APP/Contents/Info" CFBundleIdentifier)"
 [[ "$installed_bundle_id" == "$BUNDLE_ID" ]] \
@@ -380,4 +576,8 @@ done
 brew list --formula colima >/dev/null 2>&1 \
     || fail "Colima was not installed during first-run setup"
 
-log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, and Colima checks succeeded"
+if [[ "$DEV_MODE" == true ]]; then
+    log "PASS: development DMG installation, relaunch, signature, quarantine, and Colima checks succeeded"
+else
+    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, and Colima checks succeeded"
+fi

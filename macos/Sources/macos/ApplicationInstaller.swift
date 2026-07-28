@@ -6,6 +6,7 @@ import AppKit
 @MainActor
 enum ApplicationInstaller {
     private static let installedRelaunchArgument = "--xe-computer-installed-relaunch"
+    private static let developmentInstallArgument = "--xe-computer-development-install"
     private static var handoffInProgress = false
 
     private enum InstallResult {
@@ -267,6 +268,15 @@ enum ApplicationInstaller {
         at destination: URL,
         onFailure: @escaping @MainActor @Sendable () -> Void
     ) {
+        if ProcessInfo.processInfo.arguments.contains(developmentInstallArgument) {
+            // The integration runner first removes the quarantine inherited
+            // from the DMG, then asks Launch Services to start the installed
+            // app. Starting it here would race that cleanup and trigger a
+            // Gatekeeper denial on ad-hoc-signed development builds.
+            NSApp.terminate(nil)
+            return
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.addsToRecentItems = false
@@ -290,15 +300,27 @@ enum ApplicationInstaller {
                     return
                 }
 
-                let alert = NSAlert()
-                alert.alertStyle = .critical
-                alert.messageText = "Installed, but Couldn’t Relaunch"
-                alert.informativeText = "Xe Computer was copied to \(destination.path), but macOS could not start it:\n\n\(failureMessage)\n\nThis copy will continue running from the disk image."
-                alert.addButton(withTitle: "Continue")
-                alert.runModal()
-                onFailure()
+                showRelaunchFailure(
+                    at: destination,
+                    message: failureMessage,
+                    onFailure: onFailure
+                )
             }
         }
+    }
+
+    private static func showRelaunchFailure(
+        at destination: URL,
+        message: String,
+        onFailure: @escaping @MainActor @Sendable () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Installed, but Couldn’t Relaunch"
+        alert.informativeText = "Xe Computer was copied to \(destination.path), but macOS could not start it:\n\n\(message)\n\nThis copy will continue running from the disk image."
+        alert.addButton(withTitle: "Continue")
+        alert.runModal()
+        onFailure()
     }
 
     private static func continueFromDiskImage(

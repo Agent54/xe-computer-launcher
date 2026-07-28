@@ -5,6 +5,7 @@ export
 APP_NAME = Xe Computer
 BUNDLE_ID = dev.xe.computer
 BUILD_DIR = .build
+BUILD_CONFIG ?= release
 DIST_DIR = dist
 APP_BUNDLE = $(DIST_DIR)/$(APP_NAME).app
 CONTENTS = $(APP_BUNDLE)/Contents
@@ -20,7 +21,7 @@ ENTITLEMENTS = Sources/macos/Entitlements.plist
 NOTARY_PROFILE ?= notarytool-profile
 NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
 
-.PHONY: all clean build bundle run release release-sign check notarize dmg
+.PHONY: all clean build bundle run release release-sign check notarize dmg dev-dmg
 
 all: release
 
@@ -29,13 +30,13 @@ zip-helpers:
 	@ditto -c -k --keepParent $(BUILD_DIR)/Helium.zip Sources/macos/helpers/Helium.app
 
 build:
-	swift build -c release
+	swift build -c $(BUILD_CONFIG)
 
 package: build
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
-	@cp "$(BUILD_DIR)/release/macos" "$(MACOS_DIR)/bin"
+	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/macos" "$(MACOS_DIR)/bin"
 	@echo 'APPL????' > "$(CONTENTS)/PkgInfo"
 	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
@@ -111,7 +112,7 @@ dmg: notarize
 	@create-dmg \
 		--volname "$(APP_NAME)" \
 		--window-pos 510 370 \
-		--window-size 360 320 \
+		--window-size 370 330 \
 		--icon-size 100 \
 		--icon "$(APP_NAME).app" 180 140 \
 		--hide-extension "$(APP_NAME).app" \
@@ -119,6 +120,28 @@ dmg: notarize
 		"$(DIST_DIR)/$(DMG_NAME)" \
 		"$(APP_BUNDLE)"
 	@echo "DMG created at $(DIST_DIR)/$(DMG_NAME)"
+
+# Development DMG: debug build, ad-hoc app signature, no Developer ID or
+# notarization. It intentionally uses the same create-dmg layout as releases.
+dev-dmg:
+	@command -v create-dmg >/dev/null 2>&1 || { \
+		echo "ERROR: create-dmg is required (install it with: brew install create-dmg)" >&2; \
+		exit 1; \
+	}
+	@$(MAKE) BUILD_CONFIG=debug bundle
+	@echo "Creating development DMG..."
+	@mkdir -p "$(DIST_DIR)"
+	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
+	@create-dmg \
+		--volname "$(APP_NAME)" \
+		--window-pos 510 370 \
+		--window-size 370 330 \
+		--icon-size 100 \
+		--icon "$(APP_NAME).app" 180 140 \
+		--hide-extension "$(APP_NAME).app" \
+		"$(DIST_DIR)/$(DMG_NAME)" \
+		"$(APP_BUNDLE)"
+	@echo "Development DMG created at $(DIST_DIR)/$(DMG_NAME)"
 
 # Full release: sign, notarize, create DMG
 release: dmg

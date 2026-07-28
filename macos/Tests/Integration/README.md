@@ -57,9 +57,9 @@ performing UI automation.
 
 ## Build and run
 
-The test expects a signed and notarized distribution DMG because it asserts
-both strict code-signature validity and a successful Gatekeeper assessment.
-Create it using the normal release configuration:
+By default, the test expects a signed and notarized distribution DMG because it
+asserts both strict code-signature validity and a successful Gatekeeper
+assessment. Create it using the normal release configuration:
 
 ```sh
 make -C macos release
@@ -80,6 +80,27 @@ DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
   macos/Tests/Integration/install-from-dmg.sh
 ```
 
+On a development machine without Developer ID signing and notarization
+credentials, build the ad-hoc-signed DMG and run the integration test in
+development mode:
+
+```sh
+brew install create-dmg # only if create-dmg is not already installed
+make -C macos dev-dmg
+bash macos/Tests/Integration/cleanup.sh
+macos/Tests/Integration/install-from-dmg.sh --dev
+```
+
+Those commands are written for the repository root. From inside the `macos`
+directory, use `make dev-dmg` and prefix the test scripts with `Tests/Integration/`.
+
+`--dev` retains strict code-signature validation but skips the Gatekeeper
+assessments and first-open confirmation waits that require a signed and
+notarized distribution build. It launches the disk-image copy directly, removes
+quarantine from the installed development copy, then launches that copy through
+Launch Services. The latter gives Xe Computer its own TCC audit identity so the
+native Accessibility prompt and System Settings row belong to the app.
+
 The test opens the DMG through Launch Services, waits for Finder's normal
 `/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
 app through Launch Services, approves the quarantined app's Gatekeeper
@@ -92,14 +113,17 @@ newly installed copy if macOS shows it again, and verifies:
 - relaunch from `/Applications`, not the mounted disk image;
 - the expected bundle identifier;
 - strict code-signature validity;
-- successful Gatekeeper assessment;
+- successful Gatekeeper assessment in distribution mode;
 - removal of the installed bundle's quarantine attribute; and
 - first-run reinstallation of Colima through Homebrew.
 
-For Accessibility onboarding, the installer test uses Xe Computer's
-**Open System Settings** button before enabling the app in the Privacy &
-Security pane. It does not invoke the protected system trust prompt—which
-cannot be driven through Accessibility automation—or leave a prompt behind.
+For Accessibility onboarding, the installer test uses the native macOS
+permission dialog's **Open System Settings** button before enabling the app in
+the Privacy & Security pane. It never opens that pane independently: bypassing
+the native dialog would leave an unanswered permission request queued in the
+macOS UI, and macOS may terminate the app while that request is pending. If an
+interrupted earlier run left more Xe Computer requests queued, the test accepts
+each native dialog before it changes the Accessibility switch.
 
 ## UTM and GitHub Actions
 

@@ -87,3 +87,9 @@ If you want, I can sketch the best concrete setup for one of these:
 GUI app + background sync service
 GUI app + root privileged helper
 GUI app + dedicated service-account daemon
+
+drag app icon to app issue
+version detection of data folder
+stale helium detection  + kill test
+
+- integration
