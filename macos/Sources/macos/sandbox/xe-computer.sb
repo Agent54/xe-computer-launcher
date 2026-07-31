@@ -1,4 +1,4 @@
-;; Seatbelt profile for Xe Computer
+;; Seatbelt profile for XE Launcher
 ;; View violations with: log stream --predicate 'sender == "Sandbox"' --level debug
 ;;
 ;; Parameters substituted at runtime by Sandbox.swift:

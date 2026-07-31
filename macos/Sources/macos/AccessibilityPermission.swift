@@ -14,7 +14,7 @@ enum AccessibilityPermission {
             allowsCancellation: false
         )
         updateSetupProgress(
-            status: "Grant Accessibility access to Xe Computer in System Settings. Setup will continue automatically."
+            status: "Grant Accessibility access to XE Launcher in System Settings. Setup will continue automatically."
         )
         setSetupProgressIndeterminate(true)
 

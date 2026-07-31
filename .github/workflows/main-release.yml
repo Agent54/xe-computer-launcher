@@ -62,7 +62,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "Building Xe Computer $version for release $release_tag"
+          echo "Building XE Launcher $version for release $release_tag"
 
           plutil -replace CFBundleShortVersionString \
             -string "$version" \
@@ -166,7 +166,7 @@ jobs:
 
       - name: Run full launcher integration test
         env:
-          DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Computer.dmg
+          DMG_PATH: ${{ github.workspace }}/macos/dist/XE Launcher.dmg
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Verify version in About dialog
@@ -189,10 +189,10 @@ jobs:
           fi
 
           gh release create "$RELEASE_TAG" \
-            "macos/dist/Xe Computer.dmg" \
+            "macos/dist/XE Launcher.dmg" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Xe Computer $RELEASE_TAG" \
+            --title "XE Launcher $RELEASE_TAG" \
             "${release_flags[@]}"
 
       - name: Announce release on Discord
@@ -214,7 +214,7 @@ jobs:
 
           release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
           payload="$(printf \
-            '{"content":"Xe Computer %s %s is available: %s"}' \
+            '{"content":"XE Launcher %s %s is available: %s"}' \
             "$RELEASE_TAG" "$release_kind" "$release_url")"
 
           curl --fail-with-body \

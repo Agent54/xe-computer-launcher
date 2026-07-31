@@ -317,10 +317,10 @@ extension ExternalState {
             }
 
             // Restart Chrome
-            self.appendLog("launcher", "Restarting Chrome and Darc after shim provisioning...")
+            self.appendLog("launcher", "Restarting Chrome and XE Computer after shim provisioning...")
             let err = self.startDarc()
             if let err {
-                self.appendLog("launcher", "Darc relaunch failed: \(err)")
+                self.appendLog("launcher", "XE Computer relaunch failed: \(err)")
             }
         }
     }
@@ -513,7 +513,7 @@ extension ExternalState {
         let ownBrowserPid = _browserPid
         let ownDarcPid = darcAppRef?.processIdentifier ?? -1
         let ownPid = ProcessInfo.processInfo.processIdentifier
-        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownDarcPid=\(ownDarcPid), ownPid=\(ownPid)")
+        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownXEComputerPid=\(ownDarcPid), ownPid=\(ownPid)")
 
         var zombies: [ZombieProcess] = []
 
@@ -538,7 +538,7 @@ extension ExternalState {
 
             // Try to get command-line args to extract --user-data-dir
             let profileDir = Self.extractUserDataDir(pid: pid)
-            let name = isHelium ? "Helium" : "Darc (app_mode_loader)"
+            let name = isHelium ? "Helium" : "XE Computer (app_mode_loader)"
             zombies.append(ZombieProcess(pid: pid, name: name, profileDir: profileDir))
         }
 

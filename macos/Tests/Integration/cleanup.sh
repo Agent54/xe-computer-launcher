@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-APP_NAME="Xe Computer"
+APP_NAME="XE Launcher"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
@@ -81,16 +81,16 @@ command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
 stop_matching_processes \
-    "Xe Computer instances" \
-    '/Xe Computer[.]app/Contents/MacOS/bin'
+    "XE Launcher instances" \
+    '/XE Launcher[.]app/Contents/MacOS/bin'
 stop_matching_processes \
     "Darc app shims" \
     "/Library/Application Support/${bundle_id_pattern}/shims/.*/Darc[^/]*[.]app/Contents/MacOS/app_mode_loader"
 stop_matching_processes \
-    "Darc app shims launched by Xe Computer's Helium" \
+    "Darc app shims launched by XE Launcher's Helium" \
     "app_mode_loader .*--launched-by-chrome-bundle-path=.*/Library/Application Support/${bundle_id_pattern}/Helium[.]app"
 stop_matching_processes \
-    "Xe Computer's Helium and helper processes" \
+    "XE Launcher's Helium and helper processes" \
     "/Library/Application Support/${bundle_id_pattern}/Helium[.]app/"
 
 log "removing stale generated app shims"
@@ -102,7 +102,7 @@ trash_generated_shim_if_owned \
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do
     detach_disk_image "$stale_mount"
-done < <(find /Volumes -maxdepth 1 -type d -name 'Xe Computer*' -print 2>/dev/null)
+done < <(find /Volumes -maxdepth 1 -type d -name 'XE Launcher*' -print 2>/dev/null)
 
 # An interrupted first-open confirmation can leave an image attached to a
 # /dev/disk node without a mounted volume. Detach both the normal build name
@@ -114,7 +114,7 @@ done < <(
         /^image-path[[:space:]]*:/ {
             image_path = $0
             sub(/^[^:]*:[[:space:]]*/, "", image_path)
-            matches_xe_dmg = image_path ~ /\/Xe Computer\.dmg$/ || image_path ~ /\/Xe\.Computer\.dmg$/
+            matches_xe_dmg = image_path ~ /\/XE Launcher\.dmg$/ || image_path ~ /\/XE\.Launcher\.dmg$/
             next
         }
         matches_xe_dmg && /^\/dev\/disk[0-9]+[[:space:]]/ {

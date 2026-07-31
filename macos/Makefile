@@ -2,7 +2,7 @@
 -include .env
 export
 
-APP_NAME = Xe Computer
+APP_NAME = XE Launcher
 BUNDLE_ID = dev.xe.computer
 BUILD_DIR = .build
 BUILD_CONFIG ?= release
