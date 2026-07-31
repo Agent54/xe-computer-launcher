@@ -2,6 +2,16 @@ import Foundation
 import AppKit
 import ApplicationServices
 
+// macOS normally attributes a posix_spawn child’s privacy-sensitive work to
+// its parent. Helium is a separately signed application and must own its own
+// TCC responsibility, just as it does when launched through Launch Services.
+// Chromium and LLDB use this Darwin SPI for the same kind of helper launch.
+@_silgen_name("responsibility_spawnattrs_setdisclaim")
+private func responsibilitySpawnAttributesSetDisclaim(
+    _ attributes: UnsafeMutablePointer<posix_spawnattr_t?>,
+    _ disclaim: Int32
+) -> Int32
+
 // Chrome launch configuration and lifecycle management.
 // Edit the flags and arguments here to customise how Chrome is started.
 
@@ -399,6 +409,13 @@ extension ExternalState {
         var attrs: posix_spawnattr_t?
         posix_spawnattr_init(&attrs)
         defer { posix_spawnattr_destroy(&attrs) }
+
+        let responsibilityResult = responsibilitySpawnAttributesSetDisclaim(&attrs, 1)
+        guard responsibilityResult == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(responsibilityResult), userInfo: [
+                NSLocalizedDescriptionKey: "Could not assign browser privacy responsibility: \(String(cString: strerror(responsibilityResult)))"
+            ])
+        }
 
         var pid: pid_t = 0
         let spawnResult = cArgs.withUnsafeBufferPointer { argsBuf in

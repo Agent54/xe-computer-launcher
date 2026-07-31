@@ -5,6 +5,8 @@ set -euo pipefail
 APP_NAME="Xe Computer"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
+APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
+MANAGED_DARC_APP="${APP_DATA}/shims/default/Darc.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Computer.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
@@ -12,6 +14,7 @@ MOUNT_POINT=""
 DEV_MODE=false
 DEV_INSTALL_ARGUMENT="--xe-computer-development-install"
 INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
+TEST_STARTED_AT="$(date '+%Y-%m-%d %H:%M:%S')"
 
 log() {
     printf '[installer-integration] %s\n' "$*"
@@ -347,51 +350,58 @@ on run argv
             if exists application process "System Settings" then
                 tell application process "System Settings"
                     repeat with uiWindow in windows
-                        set uiElements to {}
+                        set isAccessibilityPane to false
                         try
-                            set uiElements to entire contents of uiWindow
+                            set isAccessibilityPane to (name of uiWindow as text) is "Accessibility"
                         end try
 
-                        repeat with uiElement in uiElements
-                            set elementIdentifier to ""
+                        if isAccessibilityPane then
+                            set uiElements to {}
                             try
-                                set elementIdentifier to value of attribute "AXIdentifier" of uiElement as text
+                                set uiElements to entire contents of uiWindow
                             end try
 
-                            if elementIdentifier is wantedIdentifier then
-                                set toggleValue to 0
+                            repeat with uiElement in uiElements
+                                set elementIdentifier to ""
                                 try
-                                    set toggleValue to value of uiElement as integer
+                                    set elementIdentifier to value of attribute "AXIdentifier" of uiElement as text
                                 end try
-                                if toggleValue is 1 then return "already enabled"
 
-                                set togglePosition to position of uiElement
-                                set toggleSize to size of uiElement
-                                try
-                                    perform action "AXPress" of uiElement
-                                end try
-                                delay 0.5
-
-                                try
-                                    set toggleValue to value of uiElement as integer
-                                end try
-                                if toggleValue is not 1 then
-                                    click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
-                                end if
-
-                                -- macOS may require the user to authenticate
-                                -- before changing this security-sensitive
-                                -- setting. Keep the test alive while that
-                                -- system-owned sheet is completed manually.
-                                repeat (timeoutSeconds * 4) times
-                                    delay 0.25
+                                if elementIdentifier is wantedIdentifier then
+                                    set toggleValue to 0
                                     try
-                                        if value of uiElement as integer is 1 then return "enabled"
+                                        set toggleValue to value of uiElement as integer
                                     end try
-                                end repeat
-                                error "The Accessibility switch for " & appName & " did not turn on"
-                            end if
-                        end repeat
+                                    if toggleValue is 1 then return "already enabled"
+
+                                    set togglePosition to position of uiElement
+                                    set toggleSize to size of uiElement
+                                    try
+                                        perform action "AXPress" of uiElement
+                                    end try
+                                    delay 0.5
+
+                                    try
+                                        set toggleValue to value of uiElement as integer
+                                    end try
+                                    if toggleValue is not 1 then
+                                        click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
+                                    end if
+
+                                    -- macOS may require the user to authenticate
+                                    -- before changing this security-sensitive
+                                    -- setting. Keep the test alive while that
+                                    -- system-owned sheet is completed manually.
+                                    repeat (timeoutSeconds * 4) times
+                                        delay 0.25
+                                        try
+                                            if value of uiElement as integer is 1 then return "enabled"
+                                        end try
+                                    end repeat
+                                    error "The Accessibility switch for " & appName & " did not turn on"
+                                end if
+                            end repeat
+                        end if
                     end repeat
                 end tell
             end if
@@ -576,8 +586,47 @@ done
 brew list --formula colima >/dev/null 2>&1 \
     || fail "Colima was not installed during first-run setup"
 
+log "waiting for the managed Darc app shim"
+deadline=$((SECONDS + 90))
+while (( SECONDS < deadline )); do
+    if [[ -d "$MANAGED_DARC_APP" ]] \
+        && pgrep -f "${MANAGED_DARC_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
+        break
+    fi
+    sleep 1
+done
+[[ -d "$MANAGED_DARC_APP" ]] \
+    || fail "Darc app shim was not provisioned at $MANAGED_DARC_APP"
+pgrep -f "${MANAGED_DARC_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
+    || fail "Darc app shim did not launch from its managed location"
+
+log "checking that setup did not request App Management permission"
+app_management_events="$(
+    /usr/bin/log show \
+        --start "$TEST_STARTED_AT" \
+        --style compact \
+        --predicate \
+        'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "identifier=dev.xe.computer"' \
+        2>/dev/null \
+        | tail -n +2
+)"
+[[ -z "$app_management_events" ]] \
+    || fail "Xe Computer triggered macOS App Management protection:\n$app_management_events"
+
+app_management_denials="$(
+    /usr/bin/log show \
+        --start "$TEST_STARTED_AT" \
+        --style compact \
+        --predicate \
+        'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "returning denied"' \
+        2>/dev/null \
+        | tail -n +2
+)"
+[[ -z "$app_management_denials" ]] \
+    || fail "macOS denied an App Management request during Xe Computer setup:\n$app_management_denials"
+
 if [[ "$DEV_MODE" == true ]]; then
-    log "PASS: development DMG installation, relaunch, signature, quarantine, and Colima checks succeeded"
+    log "PASS: development DMG installation, relaunch, signature, quarantine, Colima, Darc, and permission checks succeeded"
 else
-    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, and Colima checks succeeded"
+    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Colima, Darc, and permission checks succeeded"
 fi

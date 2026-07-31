@@ -112,7 +112,7 @@ dmg: notarize
 	@create-dmg \
 		--volname "$(APP_NAME)" \
 		--window-pos 510 370 \
-		--window-size 370 330 \
+		--window-size 380 340 \
 		--icon-size 100 \
 		--icon "$(APP_NAME).app" 180 140 \
 		--hide-extension "$(APP_NAME).app" \
@@ -135,7 +135,7 @@ dev-dmg:
 	@create-dmg \
 		--volname "$(APP_NAME)" \
 		--window-pos 510 370 \
-		--window-size 370 330 \
+		--window-size 380 340 \
 		--icon-size 100 \
 		--icon "$(APP_NAME).app" 180 140 \
 		--hide-extension "$(APP_NAME).app" \

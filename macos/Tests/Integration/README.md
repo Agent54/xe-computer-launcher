@@ -115,7 +115,9 @@ newly installed copy if macOS shows it again, and verifies:
 - strict code-signature validity;
 - successful Gatekeeper assessment in distribution mode;
 - removal of the installed bundle's quarantine attribute; and
-- first-run reinstallation of Colima through Homebrew.
+- first-run reinstallation of Colima through Homebrew;
+- provisioning and launch of the managed Darc app shim; and
+- no macOS App Management request or "prevented from modifying apps" warning.
 
 For Accessibility onboarding, the installer test uses the native macOS
 permission dialog's **Open System Settings** button before enabling the app in

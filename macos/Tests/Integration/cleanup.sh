@@ -24,6 +24,25 @@ detach_disk_image() {
     fi
 }
 
+trash_generated_shim_if_owned() {
+    local shim_path="$1"
+    local plist_path="${shim_path}/Contents/Info.plist"
+    local shim_user_data_dir
+    local trashed_shim
+
+    [[ -d "$shim_path" && -f "$plist_path" ]] || return 0
+    shim_user_data_dir="$(
+        /usr/libexec/PlistBuddy -c 'Print :CrAppModeUserDataDir' "$plist_path" 2>/dev/null \
+            || true
+    )"
+    [[ "$shim_user_data_dir" == "${APP_DATA}/profiles/"* ]] || return 0
+
+    trashed_shim="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-shim-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+    rmdir "$trashed_shim"
+    log "moving stale generated app shim to $trashed_shim"
+    mv "$shim_path" "$trashed_shim"
+}
+
 stop_matching_processes() {
     local description="$1"
     local pattern="$2"
@@ -73,6 +92,12 @@ stop_matching_processes \
 stop_matching_processes \
     "Xe Computer's Helium and helper processes" \
     "/Library/Application Support/${bundle_id_pattern}/Helium[.]app/"
+
+log "removing stale generated app shims"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chromium Apps.localized/Darc.app"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Darc.app"
 
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do
