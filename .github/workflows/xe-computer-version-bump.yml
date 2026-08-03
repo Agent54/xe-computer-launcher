@@ -1,0 +1,177 @@
+name: Update bundled Xe Computer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released Xe Computer version, without the leading v (for example 1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: xe-computer-version-bump
+  cancel-in-progress: false
+
+jobs:
+  update-xe-computer:
+    runs-on: [self-hosted, macOS, ARM64, xe-mac]
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: int
+          fetch-depth: 0
+
+      - name: Validate version number
+        shell: bash
+        run: |
+          version_component='(0|[1-9][0-9]{0,8})'
+          if [[ ! "$VERSION" =~ ^${version_component}\.${version_component}\.${version_component}$ ]]; then
+            echo "::error::Invalid Xe Computer version number"
+            exit 1
+          fi
+
+          IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH <<< "$VERSION"
+          echo "VERSION_MAJOR=$VERSION_MAJOR" >> "$GITHUB_ENV"
+          echo "VERSION_MINOR=$VERSION_MINOR" >> "$GITHUB_ENV"
+          echo "VERSION_PATCH=$VERSION_PATCH" >> "$GITHUB_ENV"
+
+      - name: Reject version downgrade
+        shell: bash
+        run: |
+          sources_file="macos/Sources/macos/Resources/sources.json"
+
+          jq -e '
+            [.darc.version.major, .darc.version.minor, .darc.version.patch] |
+            all(.[]; type == "number" and . >= 0 and floor == .)
+          ' "$sources_file" >/dev/null || {
+            echo "::error::The currently pinned Xe Computer version is invalid"
+            exit 1
+          }
+
+          read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH < <(
+            jq -r \
+              '[.darc.version.major, .darc.version.minor, .darc.version.patch] | @tsv' \
+              "$sources_file"
+          )
+
+          if ((
+            VERSION_MAJOR < CURRENT_MAJOR ||
+            (VERSION_MAJOR == CURRENT_MAJOR && VERSION_MINOR < CURRENT_MINOR) ||
+            (VERSION_MAJOR == CURRENT_MAJOR && VERSION_MINOR == CURRENT_MINOR && VERSION_PATCH < CURRENT_PATCH)
+          )); then
+            echo "::error::Refusing to downgrade Xe Computer from ${CURRENT_MAJOR}.${CURRENT_MINOR}.${CURRENT_PATCH} to ${VERSION}"
+            exit 1
+          fi
+
+      - name: Verify trusted upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          release_json="$RUNNER_TEMP/xe-computer-release.json"
+          gh api \
+            "repos/Agent54/xe-darc/releases/tags/v$VERSION" \
+            > "$release_json"
+
+          jq -e '
+            .draft == false and
+            .prerelease == true and
+            any(.assets[]; .name == "darc.swbn")
+          ' "$release_json" >/dev/null || {
+            echo "::error::The trusted upstream release must be a published prerelease with a darc.swbn asset"
+            exit 1
+          }
+
+      - name: Pin validated Xe Computer version
+        shell: bash
+        run: |
+          sources_file="macos/Sources/macos/Resources/sources.json"
+          updated_sources="$RUNNER_TEMP/sources.json"
+          jq --indent 4 \
+            --argjson major "$VERSION_MAJOR" \
+            --argjson minor "$VERSION_MINOR" \
+            --argjson patch "$VERSION_PATCH" \
+            '.darc.version = {major: $major, minor: $minor, patch: $patch}' \
+            "$sources_file" > "$updated_sources"
+          mv "$updated_sources" "$sources_file"
+
+          jq -e \
+            --argjson major "$VERSION_MAJOR" \
+            --argjson minor "$VERSION_MINOR" \
+            --argjson patch "$VERSION_PATCH" \
+            '.darc.version == {major: $major, minor: $minor, patch: $patch} and (.darc | has("url") | not)' \
+            "$sources_file" >/dev/null
+
+      - name: Build launcher
+        run: make -C macos build
+
+      - name: Create or update pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: int
+        shell: bash
+        run: |
+          safe_version="${VERSION//[^A-Za-z0-9._-]/-}"
+          branch="automation/xe-computer-$safe_version"
+          title="Update Xe Computer to $VERSION"
+          body_file="$RUNNER_TEMP/xe-computer-version-bump.md"
+
+          if git diff --quiet -- macos/Sources/macos/Resources/sources.json; then
+            echo "Xe Computer $VERSION is already pinned; no pull request is needed."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add macos/Sources/macos/Resources/sources.json
+          git commit -m "$title"
+
+          git fetch origin \
+            "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+          git push \
+            --force-with-lease="refs/heads/$branch" \
+            origin \
+            "HEAD:refs/heads/$branch"
+
+          {
+            echo "Updates the bundled Xe Computer IWA version from the verified Agent54/xe-darc release."
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo
+            echo "The launcher was compiled with \`make -C macos build\` before this branch was published."
+          } > "$body_file"
+
+          pr_number="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$branch" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body-file "$body_file"
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$branch" \
+              --title "$title" \
+              --body-file "$body_file"
+          fi

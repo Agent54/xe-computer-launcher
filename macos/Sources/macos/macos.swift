@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 
 @main
 struct MacOSApp {
@@ -26,7 +27,19 @@ struct MacOSApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var didFinishNormalStartup = false
+    private var isPreparingForTermination = false
     private var statusItem: NSStatusItem?
+    private var isUpdaterConfigured: Bool {
+        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
+            return false
+        }
+        return !publicKey.isEmpty && publicKey != "SPARKLE_PUBLIC_ED_KEY"
+    }
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
     private var specialKeyCheck: Any?
@@ -85,8 +98,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
         renderMenuLabels()
 
+        // Updating a copy on a read-only disk image cannot succeed. The copy
+        // installed into /Applications or ~/Applications starts Sparkle on its
+        // first normal launch instead.
+        if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+            _ = updaterController
+        }
+
         // Permission onboarding must not depend on whether downloadable assets
-        // or an existing Darc app shim are already present.
+        // or an existing Xe Computer app shim are already present.
         Task { @MainActor [weak self] in
             _ = await AccessibilityPermission.requestIfNeeded()
             self?.startBackgroundInitialization()
@@ -187,7 +207,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        prepareForTermination()
         stopStateRefreshLoop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Sparkle sends the application a regular terminate request before it
+        // atomically replaces and relaunches the bundle. Keep this cleanup in
+        // the delegate so updater-triggered termination and the Quit menu item
+        // have identical service-state behavior.
+        prepareForTermination()
+        return .terminateNow
+    }
+
+    private func prepareForTermination() {
+        guard !isPreparingForTermination, didFinishNormalStartup else { return }
+        isPreparingForTermination = true
+
+        let state = ExternalState.shared
+        state.setBoolSetting("darc_was_running", state.darcRunning)
+        state.setBoolSetting("chrome_was_running", state.chromeRunning)
+        state.stopChrome()  // stopChrome calls stopDarc internally
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -276,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -977,12 +1018,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.keyWindow?.makeKeyAndOrderFront(nil)
         }
     }
+
+    @objc private func checkForUpdatesAction() {
+        guard isUpdaterConfigured else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Updates Are Not Configured"
+            alert.informativeText = "This development build does not contain a Sparkle update-signing public key."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        guard !ApplicationInstaller.isRunningFromDiskImage() else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Install XE Launcher to Update"
+            alert.informativeText = "Updates can be installed after XE Launcher has been copied to an Applications folder."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(nil)
+    }
+
     @objc private func quitAction() {
-        // Save running state before stopping so it can be restored on next launch
-        let state = ExternalState.shared
-        state.setBoolSetting("darc_was_running", state.darcRunning)
-        state.setBoolSetting("chrome_was_running", state.chromeRunning)
-        state.stopChrome()  // stopChrome calls stopDarc internally
         NSApp.terminate(nil)
     }
 

@@ -16,6 +16,13 @@ final class ExternalState: @unchecked Sendable {
     static var vmsPath: String { appDataURL.appendingPathComponent("vms", isDirectory: true).path }
     static var settingsPath: String { appDataURL.appendingPathComponent("settings.json").path }
 
+    static let xeComputerShimAppName = "Xe Computer.app"
+    static let xeComputerDevelopmentShimAppName = "Xe Computer Dev.app"
+
+    static func xeComputerShimAppName(isDevelopment: Bool) -> String {
+        isDevelopment ? xeComputerDevelopmentShimAppName : xeComputerShimAppName
+    }
+
     private static let logBufferSize = 1000
     private static let colimaProfilePrefix = "darc-"
     private static let requiredChromeFlags = [
@@ -143,7 +150,7 @@ final class ExternalState: @unchecked Sendable {
     private func darcShimAppURL() -> URL {
         let profileName = selectedProfileName()
         let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
         return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
     }
 
@@ -226,7 +233,7 @@ final class ExternalState: @unchecked Sendable {
         seedBundledAssets()
     }
 
-    /// Seed VM profile templates and download required assets (Helium, Darc) on first run.
+    /// Seed VM profile templates and download required assets (Helium, Xe Computer) on first run.
     private func seedBundledAssets() {
         let fm = FileManager.default
         let dataURL = Self.appDataURL
@@ -780,7 +787,7 @@ final class ExternalState: @unchecked Sendable {
         print("[ExternalState] Restored \(min(entries.count, allWindows.count)) window positions")
     }
 
-    /// Open a new window in the Darc app shim via its dock menu "New Window" item
+    /// Open a new window in the Xe Computer app shim via its dock menu "New Window" item.
     private func openNewDarcWindow(app: AXUIElement, pid: Int32) {
         // Use AppleScript to click "New Window" in the app's dock menu
         let script = """
@@ -791,7 +798,7 @@ final class ExternalState: @unchecked Sendable {
                     try
                         if (value of attribute "AXIsApplicationRunning" of dockItem) is true then
                             set itemName to name of dockItem
-                            if itemName is "Darc" then
+                            if itemName is "Xe Computer" then
                                 perform action "AXShowMenu" of dockItem
                                 delay 0.3
                                 click menu item "New Window" of menu 1 of dockItem

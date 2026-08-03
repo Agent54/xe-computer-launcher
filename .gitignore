@@ -9,4 +9,6 @@ DerivedData/
 .netrc
 macos/Helpers
 macos/.env
+macos/local-secrets/*
+!macos/local-secrets/README.md
 patches

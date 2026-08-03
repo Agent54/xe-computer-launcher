@@ -6,7 +6,7 @@ APP_NAME="XE Launcher"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
-MANAGED_DARC_APP="${APP_DATA}/shims/default/Darc.app"
+MANAGED_XE_COMPUTER_APP="${APP_DATA}/shims/default/Xe Computer.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/XE Launcher.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
@@ -586,19 +586,19 @@ done
 brew list --formula colima >/dev/null 2>&1 \
     || fail "Colima was not installed during first-run setup"
 
-log "waiting for the managed Darc app shim"
+log "waiting for the managed Xe Computer app shim"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    if [[ -d "$MANAGED_DARC_APP" ]] \
-        && pgrep -f "${MANAGED_DARC_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
+    if [[ -d "$MANAGED_XE_COMPUTER_APP" ]] \
+        && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
         break
     fi
     sleep 1
 done
-[[ -d "$MANAGED_DARC_APP" ]] \
-    || fail "Darc app shim was not provisioned at $MANAGED_DARC_APP"
-pgrep -f "${MANAGED_DARC_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
-    || fail "Darc app shim did not launch from its managed location"
+[[ -d "$MANAGED_XE_COMPUTER_APP" ]] \
+    || fail "Xe Computer app shim was not provisioned at $MANAGED_XE_COMPUTER_APP"
+pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
+    || fail "Xe Computer app shim did not launch from its managed location"
 
 log "checking that setup did not request App Management permission"
 app_management_events="$(
@@ -626,7 +626,7 @@ app_management_denials="$(
     || fail "macOS denied an App Management request during XE Launcher setup:\n$app_management_denials"
 
 if [[ "$DEV_MODE" == true ]]; then
-    log "PASS: development DMG installation, relaunch, signature, quarantine, Colima, Darc, and permission checks succeeded"
+    log "PASS: development DMG installation, relaunch, signature, quarantine, Colima, Xe Computer, and permission checks succeeded"
 else
-    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Colima, Darc, and permission checks succeeded"
+    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Colima, Xe Computer, and permission checks succeeded"
 fi

@@ -85,7 +85,9 @@ extension ExternalState {
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
         let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
         let shimDir = Self.appDataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
-        let devShimExists = FileManager.default.fileExists(atPath: shimDir.appendingPathComponent("Darc Dev.app").path)
+        let devShimExists = FileManager.default.fileExists(
+            atPath: shimDir.appendingPathComponent(Self.xeComputerDevelopmentShimAppName).path
+        )
 
         if let overrideURL = darcOverrideURL(forProfile: profileName),
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
@@ -129,7 +131,7 @@ extension ExternalState {
             }
 
             // Check if app shim needs provisioning (in parallel)
-            let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+            let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
             let shimApp = shimDir.appendingPathComponent(shimAppName)
             if !FileManager.default.fileExists(atPath: shimApp.path) {
                 provisionAppShim(profileName: profileName, profileDir: profileDir, shimApp: shimApp, chrome: chrome)
@@ -222,7 +224,7 @@ extension ExternalState {
     }
 
     /// Provision the app shim in the background.
-    /// Chrome creates the shim at ~/Applications/Chromium Apps.localized/Darc.app
+    /// Chrome creates the shim at ~/Applications/Chromium Apps.localized/Xe Computer.app
     /// on first IWA install. We wait for it, move it to our shims dir, restart Chrome
     /// with a fresh Preferences.json.
     private func provisionAppShim(profileName: String, profileDir: URL, shimApp: URL, chrome: InstalledChrome) {
@@ -230,7 +232,7 @@ extension ExternalState {
             guard let self else { return }
             let fm = FileManager.default
             let appsFolder = chrome.variant == "canary" ? "Chrome Canary Apps.localized" : "Chromium Apps.localized"
-            let systemShimPath = NSHomeDirectory() + "/Applications/\(appsFolder)/Darc.app"
+            let systemShimPath = NSHomeDirectory() + "/Applications/\(appsFolder)/\(Self.xeComputerShimAppName)"
             let shimCodeSignature = systemShimPath + "/Contents/_CodeSignature"
 
             self.appendLog("launcher", "Waiting for app shim at \(systemShimPath)...")

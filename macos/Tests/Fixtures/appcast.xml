@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="https://sparkle-project.org/xml-namespaces/sparkle">
+  <channel>
+    <title>XE Launcher</title>
+    <item>
+      <title>Version 1.2.3</title>
+      <sparkle:version>123.1</sparkle:version>
+      <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
+      <enclosure
+        url="https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/XE-Launcher.dmg"
+        sparkle:edSignature="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+        length="1234"
+        type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
+<!-- sparkle-signatures:
+edSignature: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+length: 1
+-->

@@ -41,6 +41,24 @@
         <key>NSPrincipalClass</key>
         <string>NSAppication</string>
 
+        <key>SUFeedURL</key>
+        <string>https://raw.githubusercontent.com/Agent54/xe-darc-launcher/updates/stable/appcast.xml</string>
+
+        <key>SUAllowsAutomaticUpdates</key>
+        <true/>
+
+        <key>SUAutomaticallyUpdate</key>
+        <false/>
+
+        <key>SUVerifyUpdateBeforeExtraction</key>
+        <true/>
+
+        <key>SURequireSignedFeed</key>
+        <true/>
+
+        <key>SUPublicEDKey</key>
+        <string>SPARKLE_PUBLIC_ED_KEY</string>
+
         <key>CFBundleIconFile</key>
         <string>app</string>
 

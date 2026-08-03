@@ -3,6 +3,8 @@
 `cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
+`verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
+updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on
 a macOS CI runner. UTM and CI should only provision the machine and invoke
 these scripts; they should not duplicate their behavior.
@@ -63,6 +65,8 @@ assessment. Create it using the normal release configuration:
 
 ```sh
 make -C macos release
+macos/Tests/Integration/verify-sparkle.sh \
+  "macos/dist/XE Launcher.app" --release
 ```
 
 Reset the machine and run the test from the repository root:
@@ -116,7 +120,7 @@ newly installed copy if macOS shows it again, and verifies:
 - successful Gatekeeper assessment in distribution mode;
 - removal of the installed bundle's quarantine attribute; and
 - first-run reinstallation of Colima through Homebrew;
-- provisioning and launch of the managed Darc app shim; and
+- provisioning and launch of the managed Xe Computer app shim; and
 - no macOS App Management request or "prevented from modifying apps" warning.
 
 For Accessibility onboarding, the installer test uses the native macOS

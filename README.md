@@ -31,3 +31,8 @@ see [xe-darc INSTALL.md](https://github.com/Agent54/xe-darc/blob/main/INSTALL.md
 
 
 [Download the latest installer from GitHub Releases here](https://github.com/Agent54/xe-darc-launcher/releases/latest).
+
+## Updates
+
+Installed copies use Sparkle for signed in-app updates. Release maintainers
+should follow [the updater setup and release guide](macos/UPDATES.md).

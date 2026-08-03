@@ -2,6 +2,29 @@ import Foundation
 import AppKit
 import Darwin
 
+private let trustedXeComputerReleaseRoot = "https://github.com/Agent54/xe-darc/releases/download"
+
+private func trustedAssetURL(name: String, info: [String: Any]) -> URL? {
+    if name == "darc" {
+        guard let version = info["version"] as? [String: Any],
+              let major = version["major"] as? Int,
+              let minor = version["minor"] as? Int,
+              let patch = version["patch"] as? Int,
+              version.count == 3,
+              [major, minor, patch].allSatisfy({ (0...999_999_999).contains($0) }) else {
+            return nil
+        }
+
+        let versionNumber = "\(major).\(minor).\(patch)"
+        return URL(string: "\(trustedXeComputerReleaseRoot)/v\(versionNumber)/darc.swbn")
+    }
+
+    guard let urlString = info["url"] as? String, !urlString.isEmpty else {
+        return nil
+    }
+    return URL(string: urlString)
+}
+
 /// Download and install assets defined in sources.json on first run.
 /// Shows a progress window while downloading. Assets with `"unzip": true` are extracted via ditto;
 /// others are saved directly to the app data directory.
@@ -24,8 +47,10 @@ func downloadSourceAssetsIfNeeded(dataURL: URL, log: @escaping (String, String) 
     }
     var pending: [AssetInfo] = []
     for (name, info) in sources {
-        guard let urlString = info["url"] as? String, !urlString.isEmpty,
-              let url = URL(string: urlString) else { continue }
+        guard let url = trustedAssetURL(name: name, info: info) else {
+            log("launcher", "Invalid source configuration for \(name), skipping asset download")
+            continue
+        }
         let shouldUnzip = info["unzip"] as? Bool ?? true
         let label = info["label"] as? String ?? name
         let filename = url.lastPathComponent
