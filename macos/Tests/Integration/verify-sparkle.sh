@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-app_path="${1:-macos/dist/XE Launcher.app}"
+app_path="${1:-macos/dist/Xe Launcher.app}"
 require_configured=false
 if [[ "${2:-}" == "--release" ]]; then
     require_configured=true
@@ -43,12 +43,19 @@ otool -l "$executable" \
 
 feed_url="$(plutil -extract SUFeedURL raw "$info_plist")"
 public_key="$(plutil -extract SUPublicEDKey raw "$info_plist")"
+automatic_checks="$(plutil -extract SUEnableAutomaticChecks raw "$info_plist")"
+allows_automatic_updates="$(plutil -extract SUAllowsAutomaticUpdates raw "$info_plist")"
 automatic_install="$(plutil -extract SUAutomaticallyUpdate raw "$info_plist")"
 verify_before_extraction="$(plutil -extract SUVerifyUpdateBeforeExtraction raw "$info_plist")"
 require_signed_feed="$(plutil -extract SURequireSignedFeed raw "$info_plist")"
 
 [[ "$feed_url" == https://* ]] || fail "SUFeedURL must use HTTPS"
-[[ "$automatic_install" == "false" ]] || fail "silent automatic installation must default to off"
+[[ "$automatic_checks" == "true" ]] \
+    || fail "automatic update checks must be enabled without a permission prompt"
+[[ "$allows_automatic_updates" == "false" ]] \
+    || fail "users must not be offered automatic update installation"
+[[ "$automatic_install" == "false" ]] \
+    || fail "silent automatic installation must be disabled"
 [[ "$verify_before_extraction" == "true" ]] \
     || fail "updates are not verified before extraction"
 [[ "$require_signed_feed" == "true" ]] || fail "signed appcast feeds are not required"

@@ -250,8 +250,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let button = statusItem?.button {
             button.setAccessibilityIdentifier("dev.xe.computer.status-menu")
-            button.setAccessibilityLabel("XE Launcher status menu")
-            button.toolTip = "XE Launcher"
+            button.setAccessibilityLabel("Xe Launcher status menu")
+            button.toolTip = "Xe Launcher"
 
             if let resourceURL = Bundle.main.resourceURL,
                let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("status-icon.png")) {
@@ -261,7 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 button.image = NSImage(
                     systemSymbolName: "desktopcomputer",
-                    accessibilityDescription: "XE Launcher"
+                    accessibilityDescription: "Xe Launcher"
                 )
                 button.image?.size = NSSize(width: 18, height: 18)
             }
@@ -445,8 +445,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             profileSubmenu.addItem(selectItem)
             profileSubmenu.addItem(.separator())
 
-            // XE Computer submenu
-            let darcSub = NSMenuItem(title: "XE Computer", action: nil, keyEquivalent: "")
+            // Xe Computer submenu
+            let darcSub = NSMenuItem(title: "Xe Computer", action: nil, keyEquivalent: "")
             let darcMenu = NSMenu()
             darcMenu.autoenablesItems = false
             let dStart = NSMenuItem(title: "Start", action: #selector(darcStartAction), keyEquivalent: "")
@@ -694,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Update titles and enable states for active profile items
-        darcItem?.title = serviceTitle("XE Computer", key: "darc", running: state.darcRunning)
+        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: state.darcRunning)
         let chromeName = state.selectedChrome()?.name ?? "Chrome Engine"
         chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: state.chromeRunning)
 
@@ -796,8 +796,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let currentURL = state.darcOverrideURL(forProfile: profileName) ?? ""
 
         let alert = NSAlert()
-        alert.messageText = "Override XE Computer URL"
-        alert.informativeText = "Enter the base URL for the XE Computer IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
+        alert.messageText = "Override Xe Computer URL"
+        alert.informativeText = "Enter the base URL for the Xe Computer IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -986,7 +986,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func configureApplicationIdentity() {
         let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-            ?? "XE Launcher"
+            ?? "Xe Launcher"
         ProcessInfo.processInfo.processName = displayName
 
         if let resourceURL = Bundle.main.resourceURL,
@@ -1034,8 +1034,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !ApplicationInstaller.isRunningFromDiskImage() else {
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "Install XE Launcher to Update"
-            alert.informativeText = "Updates can be installed after XE Launcher has been copied to an Applications folder."
+            alert.messageText = "Install Xe Launcher to Update"
+            alert.informativeText = "Updates can be installed after Xe Launcher has been copied to an Applications folder."
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
@@ -1077,7 +1077,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Stale Browser Processes Found"
-        alert.informativeText = "The following Helium/XE Computer processes from a previous session are still running:\n\n"
+        alert.informativeText = "The following Helium/Xe Computer processes from a previous session are still running:\n\n"
             + descriptions.joined(separator: "\n")
             + "\n\nWould you like to terminate them before launching?"
         alert.alertStyle = .warning

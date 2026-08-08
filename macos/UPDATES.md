@@ -1,6 +1,6 @@
-# XE Launcher updates
+# Xe Launcher updates
 
-XE Launcher uses Sparkle 2.9.4 for signed in-app updates. Stable builds read the
+Xe Launcher uses Sparkle 2.9.4 for signed in-app updates. Stable builds read the
 `stable` appcast and `int` prereleases read the `int` appcast. Both feeds are
 published on the repository's `updates` branch; release DMGs remain GitHub
 Release assets.
@@ -11,10 +11,11 @@ Sparkle validates three things before replacing the installed application:
 2. the Ed25519 signature on the downloaded DMG; and
 3. the application's Apple Developer ID signature.
 
-Sparkle asks on the second installed launch whether automatic checks should be
-enabled; automatic installation defaults to off. Users can always choose
-**Check for Updates…** from the status menu. Development builds with the
-placeholder public key keep the updater disabled.
+Sparkle checks automatically without showing its update-check permission
+question. When a new version is available, users choose whether and when to
+install it: automatic downloading and installation are explicitly disallowed.
+Users can also choose **Check for Updates…** from the status menu at any time.
+Development builds with the placeholder public key keep the updater disabled.
 
 ## One-time signing-key setup
 
@@ -104,7 +105,7 @@ The release workflow:
 2. embeds the channel feed URL and public key;
 3. builds, signs, notarizes, and tests the application and DMG;
 4. generates a signed appcast from the notarized DMG;
-5. creates the GitHub release with `XE-Launcher.dmg` and `appcast.xml`;
+5. creates the GitHub release with `Xe-Launcher.dmg` and `appcast.xml`;
 6. updates `stable/appcast.xml` or `int/appcast.xml` on the `updates` branch;
 7. downloads and validates the newly published feed; and
 8. announces the release only after feed validation succeeds.
@@ -120,7 +121,7 @@ Verify a locally assembled application bundle:
 
 ```sh
 macos/Tests/Integration/verify-sparkle.sh \
-  "macos/dist/XE Launcher.app"
+  "macos/dist/Xe Launcher.app"
 ```
 
 Pass `--release` to additionally reject the public-key placeholder. The check
@@ -133,7 +134,7 @@ Verify a generated or published appcast:
 macos/Tests/Integration/verify-appcast.sh \
   /path/to/appcast.xml \
   EXPECTED_BUILD_VERSION \
-  https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/XE-Launcher.dmg
+  https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/Xe-Launcher.dmg
 ```
 
 For the first end-to-end update test, install the first Sparkle-enabled release

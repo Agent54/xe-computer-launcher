@@ -13,12 +13,12 @@ these scripts; they should not duplicate their behavior.
 
 Run this only in a disposable test account or VM. `cleanup.sh`:
 
-- quits running XE Launcher copies;
+- quits running Xe Launcher copies;
 - resets TCC permissions for `dev.xe.computer`;
-- removes `/Applications/XE Launcher.app`;
+- removes `/Applications/Xe Launcher.app`;
 - moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
-- detaches stale XE Launcher disk-image mounts; and
+- detaches stale Xe Launcher disk-image mounts; and
 - runs `brew uninstall --force colima` when Colima is installed.
 
 The launched app installs Colima again as part of the behavior under test. On a
@@ -43,7 +43,7 @@ that as an already-clean permission state and continues.
    dedicated local test account can cache credentials before running; a CI
    account should provide non-interactive sudo.
 
-The cleanup deliberately resets XE Launcher's own permissions on every run. After
+The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System
 Settings so first-run setup can continue and reinstall Colima. This interaction
 is part of the integration test, not a persistent one-time machine grant.
@@ -66,7 +66,7 @@ assessment. Create it using the normal release configuration:
 ```sh
 make -C macos release
 macos/Tests/Integration/verify-sparkle.sh \
-  "macos/dist/XE Launcher.app" --release
+  "macos/dist/Xe Launcher.app" --release
 ```
 
 Reset the machine and run the test from the repository root:
@@ -80,7 +80,7 @@ macos/Tests/Integration/about-version.sh
 To test a DMG from another location, including a downloaded CI artifact:
 
 ```sh
-DMG_PATH="$HOME/Downloads/XE Launcher.dmg" \
+DMG_PATH="$HOME/Downloads/Xe Launcher.dmg" \
   macos/Tests/Integration/install-from-dmg.sh
 ```
 
@@ -102,18 +102,18 @@ directory, use `make dev-dmg` and prefix the test scripts with `Tests/Integratio
 assessments and first-open confirmation waits that require a signed and
 notarized distribution build. It launches the disk-image copy directly, removes
 quarantine from the installed development copy, then launches that copy through
-Launch Services. The latter gives XE Launcher its own TCC audit identity so the
+Launch Services. The latter gives Xe Launcher its own TCC audit identity so the
 native Accessibility prompt and System Settings row belong to the app.
 
 The test opens the DMG through Launch Services, waits for Finder's normal
-`/Volumes` mount, locates `XE Launcher.app` by its bundle identifier, opens the
+`/Volumes` mount, locates `Xe Launcher.app` by its bundle identifier, opens the
 app through Launch Services, approves the quarantined app's Gatekeeper
 **downloaded from the Internet** confirmation with its default **Open** action
 when quarantine requires it, chooses the installer alert's default
 **Install in Applications**, approves the same system confirmation for the
 newly installed copy if macOS shows it again, and verifies:
 
-- installation as `/Applications/XE Launcher.app`;
+- installation as `/Applications/Xe Launcher.app`;
 - relaunch from `/Applications`, not the mounted disk image;
 - the expected bundle identifier;
 - strict code-signature validity;
@@ -128,7 +128,7 @@ permission dialog's **Open System Settings** button before enabling the app in
 the Privacy & Security pane. It never opens that pane independently: bypassing
 the native dialog would leave an unanswered permission request queued in the
 macOS UI, and macOS may terminate the app while that request is pending. If an
-interrupted earlier run left more XE Launcher requests queued, the test accepts
+interrupted earlier run left more Xe Launcher requests queued, the test accepts
 each native dialog before it changes the Accessibility switch.
 
 ## UTM and GitHub Actions
@@ -147,7 +147,7 @@ cleanup, artifact/build preparation, and the test invocation:
 
 - name: Run installer integration test
   env:
-    DMG_PATH: ${{ github.workspace }}/macos/dist/XE Launcher.dmg
+    DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Launcher.dmg
   run: macos/Tests/Integration/install-from-dmg.sh
 
 - name: Verify version in About dialog

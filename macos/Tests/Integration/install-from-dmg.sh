@@ -2,13 +2,13 @@
 
 set -euo pipefail
 
-APP_NAME="XE Launcher"
+APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 MANAGED_XE_COMPUTER_APP="${APP_DATA}/shims/default/Xe Computer.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/XE Launcher.dmg"
+REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Launcher.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
 MOUNT_POINT=""
 DEV_MODE=false
@@ -493,7 +493,7 @@ fi
 
 log "approving the real installer alert"
 if [[ "$DEV_MODE" == true ]]; then
-    press_process_button "bin" "Install in Applications" "Install XE Launcher?" 60
+    press_process_button "bin" "Install in Applications" "Install Xe Launcher?" 60
 else
     press_ui_button "$BUNDLE_ID" "Install in Applications" "" 60
 fi
@@ -525,7 +525,7 @@ if [[ "$DEV_MODE" == true ]]; then
     # Launching the Mach-O directly makes the test runner the TCC-responsible
     # process. Launch Services gives the installed bundle its own audit identity,
     # which is required for the native Accessibility prompt and settings row to
-    # be attributed to XE Launcher.
+    # be attributed to Xe Launcher.
     open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
 else
     log "checking for a Gatekeeper confirmation for the installed copy"
@@ -545,13 +545,13 @@ grant_accessibility_permission "$APP_NAME" 90
 log "waiting for installation and relaunch"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    if [[ -d "$INSTALLED_APP" ]] && pgrep -f '/Applications/XE Launcher.app/Contents/MacOS/bin' >/dev/null; then
+    if [[ -d "$INSTALLED_APP" ]] && pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; then
         break
     fi
     sleep 1
 done
 
-pgrep -f '/Applications/XE Launcher.app/Contents/MacOS/bin' >/dev/null \
+pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null \
     || fail "installed app did not relaunch from /Applications"
 
 log "verifying installed signature"
@@ -611,7 +611,7 @@ app_management_events="$(
         | tail -n +2
 )"
 [[ -z "$app_management_events" ]] \
-    || fail "XE Launcher triggered macOS App Management protection:\n$app_management_events"
+    || fail "Xe Launcher triggered macOS App Management protection:\n$app_management_events"
 
 app_management_denials="$(
     /usr/bin/log show \
@@ -623,7 +623,7 @@ app_management_denials="$(
         | tail -n +2
 )"
 [[ -z "$app_management_denials" ]] \
-    || fail "macOS denied an App Management request during XE Launcher setup:\n$app_management_denials"
+    || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
 
 if [[ "$DEV_MODE" == true ]]; then
     log "PASS: development DMG installation, relaunch, signature, quarantine, Colima, Xe Computer, and permission checks succeeded"

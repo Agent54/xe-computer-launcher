@@ -15,7 +15,7 @@
         <string>6.0</string>
 
         <key>CFBundleName</key>
-        <string>XE Launcher</string>
+        <string>Xe Launcher</string>
 
         <key>CFBundlePackageType</key>
         <string>APPL</string>
@@ -44,8 +44,11 @@
         <key>SUFeedURL</key>
         <string>https://raw.githubusercontent.com/Agent54/xe-darc-launcher/updates/stable/appcast.xml</string>
 
-        <key>SUAllowsAutomaticUpdates</key>
+        <key>SUEnableAutomaticChecks</key>
         <true/>
+
+        <key>SUAllowsAutomaticUpdates</key>
+        <false/>
 
         <key>SUAutomaticallyUpdate</key>
         <false/>

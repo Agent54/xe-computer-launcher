@@ -2,11 +2,11 @@
 
 set -euo pipefail
 
-APP_NAME="XE Launcher"
+APP_NAME="Xe Launcher"
 INSTALLED_APP="${INSTALLED_APP:-/Applications/${APP_NAME}.app}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 STATUS_MENU_IDENTIFIER="dev.xe.computer.status-menu"
-STATUS_MENU_LABEL="XE Launcher status menu"
+STATUS_MENU_LABEL="Xe Launcher status menu"
 
 log() {
     printf '[about-version-integration] %s\n' "$*"
@@ -101,7 +101,7 @@ on run argv
         end repeat
 
         if statusMenuItem is missing value then
-            error "Could not find the XE Launcher status item"
+            error "Could not find the Xe Launcher status item"
         end if
 
         click statusMenuItem
@@ -114,10 +114,10 @@ on run argv
             delay 0.25
         end repeat
         if not statusMenuOpened then
-            error "XE Launcher status menu did not open"
+            error "Xe Launcher status menu did not open"
         end if
         if not (exists menu item "About" of menu 1 of statusMenuItem) then
-            error "Could not find About in the XE Launcher status menu"
+            error "Could not find About in the Xe Launcher status menu"
         end if
         click menu item "About" of menu 1 of statusMenuItem
         log "Opened About from the status menu"
@@ -135,7 +135,7 @@ on run argv
 
                 -- Depending on the macOS release, Accessibility may expose the
                 -- heading and version as separate elements or coalesce them into
-                -- one value such as "XE Launcher Version 1.0 (1)".
+                -- one value such as "Xe Launcher Version 1.0 (1)".
                 repeat with uiElement in uiElements
                     set displayedTexts to {}
                     try

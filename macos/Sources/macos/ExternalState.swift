@@ -427,7 +427,7 @@ final class ExternalState: @unchecked Sendable {
     func installColima() -> String? {
         guard !isColimaInstalled else { return nil }
         guard let brewPath = resolveExecutable(name: "brew") else {
-            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart XE Launcher, or install Colima manually."
+            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Launcher, or install Colima manually."
         }
 
         appendLog("launcher", "Colima not found; installing it with Homebrew")
@@ -485,7 +485,7 @@ final class ExternalState: @unchecked Sendable {
         let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
-            let msg = "XE Computer loader not found at \(loader)"
+            let msg = "Xe Computer loader not found at \(loader)"
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
             return msg
@@ -501,7 +501,7 @@ final class ExternalState: @unchecked Sendable {
         let box = Box()
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] app, error in
             if let error {
-                box.error = "XE Computer open failed: \(error.localizedDescription)"
+                box.error = "Xe Computer open failed: \(error.localizedDescription)"
             } else if let app {
                 self?.darcApp = app
             }
@@ -516,8 +516,8 @@ final class ExternalState: @unchecked Sendable {
         }
         let running = darcRunning
         let pid = darcApp?.processIdentifier ?? -1
-        appendLog("launcher", "XE Computer started via NSWorkspace (isRunning=\(running), pid=\(pid))")
-        print("[ExternalState] XE Computer started, isRunning=\(running)")
+        appendLog("launcher", "Xe Computer started via NSWorkspace (isRunning=\(running), pid=\(pid))")
+        print("[ExternalState] Xe Computer started, isRunning=\(running)")
 
         // Bring the Darc app to the foreground (silently — ignore if app terminated)
         if let app = darcApp, !app.isTerminated {
@@ -542,8 +542,8 @@ final class ExternalState: @unchecked Sendable {
         }
         darcApp = nil
         terminateSubprocess("darc_log")
-        appendLog("launcher", "XE Computer stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] XE Computer stopped (wasRunning=\(wasRunning))")
+        appendLog("launcher", "Xe Computer stopped (wasRunning=\(wasRunning))")
+        print("[ExternalState] Xe Computer stopped (wasRunning=\(wasRunning))")
     }
 
     private func desktopForWindow(_ windowID: UInt32) -> Int? {
@@ -697,8 +697,8 @@ final class ExternalState: @unchecked Sendable {
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: darcWindows, options: [.prettyPrinted, .sortedKeys])
             try jsonData.write(to: outputURL, options: .atomic)
-            appendLog("launcher", "Saved \(darcWindows.count) XE Computer window position(s) to \(outputURL.path)")
-            print("[ExternalState] Saved \(darcWindows.count) XE Computer window positions to \(outputURL.path)")
+            appendLog("launcher", "Saved \(darcWindows.count) Xe Computer window position(s) to \(outputURL.path)")
+            print("[ExternalState] Saved \(darcWindows.count) Xe Computer window positions to \(outputURL.path)")
         } catch {
             appendLog("launcher", "Failed to save window positions: \(error)")
             print("[ExternalState] Failed to save window positions: \(error)")
@@ -725,8 +725,8 @@ final class ExternalState: @unchecked Sendable {
 
         guard !entries.isEmpty else { return }
         guard darcRunning, let darcPID = darcApp?.processIdentifier else {
-            appendLog("launcher", "XE Computer is not running, cannot restore windows")
-            print("[ExternalState] XE Computer not running")
+            appendLog("launcher", "Xe Computer is not running, cannot restore windows")
+            print("[ExternalState] Xe Computer not running")
             return
         }
 
@@ -815,7 +815,7 @@ final class ExternalState: @unchecked Sendable {
             appleScript.executeAndReturnError(&error)
             if let error {
                 print("[ExternalState] AppleScript new window error: \(error)")
-                appendLog("launcher", "Failed to open new XE Computer window: \(error)")
+                appendLog("launcher", "Failed to open new Xe Computer window: \(error)")
             }
         }
     }

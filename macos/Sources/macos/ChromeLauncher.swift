@@ -319,10 +319,10 @@ extension ExternalState {
             }
 
             // Restart Chrome
-            self.appendLog("launcher", "Restarting Chrome and XE Computer after shim provisioning...")
+            self.appendLog("launcher", "Restarting Chrome and Xe Computer after shim provisioning...")
             let err = self.startDarc()
             if let err {
-                self.appendLog("launcher", "XE Computer relaunch failed: \(err)")
+                self.appendLog("launcher", "Xe Computer relaunch failed: \(err)")
             }
         }
     }
@@ -540,7 +540,7 @@ extension ExternalState {
 
             // Try to get command-line args to extract --user-data-dir
             let profileDir = Self.extractUserDataDir(pid: pid)
-            let name = isHelium ? "Helium" : "XE Computer (app_mode_loader)"
+            let name = isHelium ? "Helium" : "Xe Computer (app_mode_loader)"
             zombies.append(ZombieProcess(pid: pid, name: name, profileDir: profileDir))
         }
 

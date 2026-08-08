@@ -70,7 +70,7 @@ jobs:
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "update_channel=$update_channel" >> "$GITHUB_OUTPUT"
-          echo "Building XE Launcher $version for release $release_tag"
+          echo "Building Xe Launcher $version for release $release_tag"
 
           if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
             echo "::error::Actions secret SPARKLE_PUBLIC_ED_KEY is not configured."
@@ -188,11 +188,11 @@ jobs:
         run: make
 
       - name: Verify Sparkle bundle integration
-        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/XE Launcher.app" --release
+        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release
 
       - name: Run full launcher integration test
         env:
-          DMG_PATH: ${{ github.workspace }}/macos/dist/XE Launcher.dmg
+          DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Launcher.dmg
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Verify version in About dialog
@@ -213,14 +213,14 @@ jobs:
 
           update_dir="$RUNNER_TEMP/sparkle-update"
           mkdir -p "$update_dir"
-          cp "macos/dist/XE Launcher.dmg" "$update_dir/XE-Launcher.dmg"
+          cp "macos/dist/Xe Launcher.dmg" "$update_dir/Xe-Launcher.dmg"
 
           {
-            echo "# XE Launcher $RELEASE_TAG"
+            echo "# Xe Launcher $RELEASE_TAG"
             echo
             echo "See the GitHub release for the complete notes:"
             echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
-          } > "$update_dir/XE-Launcher.md"
+          } > "$update_dir/Xe-Launcher.md"
 
           generate_appcast="macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
           if [[ ! -x "$generate_appcast" ]]; then
@@ -267,11 +267,11 @@ jobs:
           fi
 
           gh release create "$RELEASE_TAG" \
-            "$SPARKLE_UPDATE_DIR/XE-Launcher.dmg" \
+            "$SPARKLE_UPDATE_DIR/Xe-Launcher.dmg" \
             "$SPARKLE_UPDATE_DIR/appcast.xml" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "XE Launcher $RELEASE_TAG" \
+            --title "Xe Launcher $RELEASE_TAG" \
             "${release_flags[@]}"
 
       - name: Publish Sparkle channel feed
@@ -321,7 +321,7 @@ jobs:
         shell: bash
         run: |
           feed_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml"
-          asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/XE-Launcher.dmg"
+          asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg"
           macos/Tests/Integration/verify-appcast.sh \
             "$feed_url" \
             "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
@@ -346,7 +346,7 @@ jobs:
 
           release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
           payload="$(printf \
-            '{"content":"XE Launcher %s %s is available: %s"}' \
+            '{"content":"Xe Launcher %s %s is available: %s"}' \
             "$RELEASE_TAG" "$release_kind" "$release_url")"
 
           curl --fail-with-body \

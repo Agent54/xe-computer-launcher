@@ -95,7 +95,7 @@ jobs:
         run: make
 
       - name: Verify Sparkle bundle integration
-        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/XE Launcher.app" --release
+        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release
 
       - name: Run full launcher integration test
         run: macos/Tests/Integration/install-from-dmg.sh

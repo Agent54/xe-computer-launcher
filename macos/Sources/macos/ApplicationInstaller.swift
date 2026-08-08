@@ -22,7 +22,7 @@ enum ApplicationInstaller {
             switch self {
             case .couldNotStopExistingInstances(let processIdentifiers):
                 let identifiers = processIdentifiers.map(String.init).joined(separator: ", ")
-                return "The existing XE Launcher instance could not be stopped (process \(identifiers)). Quit it manually and try again."
+                return "The existing Xe Launcher instance could not be stopped (process \(identifiers)). Quit it manually and try again."
             }
         }
     }
@@ -45,8 +45,8 @@ enum ApplicationInstaller {
 
         let installAlert = NSAlert()
         installAlert.alertStyle = .informational
-        installAlert.messageText = "Install XE Launcher?"
-        installAlert.informativeText = "XE Launcher is running from a disk image. Would you like to copy it to the Applications folder and reopen it from there?"
+        installAlert.messageText = "Install Xe Launcher?"
+        installAlert.informativeText = "Xe Launcher is running from a disk image. Would you like to copy it to the Applications folder and reopen it from there?"
         installAlert.addButton(withTitle: "Install in Applications")
         installAlert.addButton(withTitle: "Run from Disk Image")
 
@@ -121,7 +121,7 @@ enum ApplicationInstaller {
         let fallbackAlert = NSAlert()
         fallbackAlert.alertStyle = .warning
         fallbackAlert.messageText = "Applications Folder Requires Permission"
-        fallbackAlert.informativeText = "macOS did not allow XE Launcher to write to /Applications. Would you like to install it in your personal Applications folder instead?"
+        fallbackAlert.informativeText = "macOS did not allow Xe Launcher to write to /Applications. Would you like to install it in your personal Applications folder instead?"
         fallbackAlert.addButton(withTitle: "Install for This User")
         fallbackAlert.addButton(withTitle: "Run from Disk Image")
 
@@ -156,7 +156,7 @@ enum ApplicationInstaller {
     private static func showExistingInstallation(at destination: URL) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "XE Launcher Is Already Installed"
+        alert.messageText = "Xe Launcher Is Already Installed"
         alert.informativeText = "An app already exists at \(destination.path). It will not be replaced. Remove it manually before installing this version, or continue running this copy from the disk image."
         alert.addButton(withTitle: "Run from Disk Image")
         alert.addButton(withTitle: "Show in Finder")
@@ -317,7 +317,7 @@ enum ApplicationInstaller {
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Installed, but Couldn’t Relaunch"
-        alert.informativeText = "XE Launcher was copied to \(destination.path), but macOS could not start it:\n\n\(message)\n\nThis copy will continue running from the disk image."
+        alert.informativeText = "Xe Launcher was copied to \(destination.path), but macOS could not start it:\n\n\(message)\n\nThis copy will continue running from the disk image."
         alert.addButton(withTitle: "Continue")
         alert.runModal()
         onFailure()
@@ -356,7 +356,7 @@ enum ApplicationInstaller {
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Installation Failed"
-        alert.informativeText = "XE Launcher could not be installed:\n\n\(error.localizedDescription)\n\nIt will continue running from the disk image."
+        alert.informativeText = "Xe Launcher could not be installed:\n\n\(error.localizedDescription)\n\nIt will continue running from the disk image."
         alert.addButton(withTitle: "Continue")
         alert.runModal()
     }
