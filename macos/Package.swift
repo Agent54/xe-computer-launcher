@@ -8,11 +8,17 @@ let package = Package(
     platforms: [
         .macOS("26.0")
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4")
+    ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
             name: "macos",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             exclude: [
                 "Info.plist",
                 "Entitlements.plist",
@@ -25,6 +31,12 @@ let package = Package(
                 .copy("Resources/Preferences.json"),
                 .copy("Resources/Local State"),
                 .copy("Resources/sources.json")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ])
             ]
         )
     ]

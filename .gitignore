@@ -1,5 +1,6 @@
 .DS_Store
 macos/.build
+macos/dist/
 macos/Packages
 xcuserdata/
 DerivedData/
@@ -8,3 +9,6 @@ DerivedData/
 .netrc
 macos/Helpers
 macos/.env
+macos/local-secrets/*
+!macos/local-secrets/README.md
+patches

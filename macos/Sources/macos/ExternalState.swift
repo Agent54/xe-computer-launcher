@@ -16,8 +16,15 @@ final class ExternalState: @unchecked Sendable {
     static var vmsPath: String { appDataURL.appendingPathComponent("vms", isDirectory: true).path }
     static var settingsPath: String { appDataURL.appendingPathComponent("settings.json").path }
 
+    static let xeComputerShimAppName = "Xe Computer.app"
+    static let xeComputerDevelopmentShimAppName = "Xe Computer Dev.app"
+
+    static func xeComputerShimAppName(isDevelopment: Bool) -> String {
+        isDevelopment ? xeComputerDevelopmentShimAppName : xeComputerShimAppName
+    }
+
     private static let logBufferSize = 1000
-    private static let colimaProfilePrefix = "darc_"
+    private static let colimaProfilePrefix = "darc-"
     private static let requiredChromeFlags = [
         "enable-desktop-pwas-additional-windowing-controls@1",
         "enable-desktop-pwas-borderless@1",
@@ -143,7 +150,7 @@ final class ExternalState: @unchecked Sendable {
     private func darcShimAppURL() -> URL {
         let profileName = selectedProfileName()
         let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
         return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
     }
 
@@ -226,7 +233,7 @@ final class ExternalState: @unchecked Sendable {
         seedBundledAssets()
     }
 
-    /// Seed VM profile templates and download required assets (Helium, Darc) on first run.
+    /// Seed VM profile templates and download required assets (Helium, Xe Computer) on first run.
     private func seedBundledAssets() {
         let fm = FileManager.default
         let dataURL = Self.appDataURL
@@ -420,7 +427,7 @@ final class ExternalState: @unchecked Sendable {
     func installColima() -> String? {
         guard !isColimaInstalled else { return nil }
         guard let brewPath = resolveExecutable(name: "brew") else {
-            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Computer, or install Colima manually."
+            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart XE Launcher, or install Colima manually."
         }
 
         appendLog("launcher", "Colima not found; installing it with Homebrew")
@@ -478,7 +485,7 @@ final class ExternalState: @unchecked Sendable {
         let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
-            let msg = "Darc loader not found at \(loader)"
+            let msg = "XE Computer loader not found at \(loader)"
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
             return msg
@@ -494,7 +501,7 @@ final class ExternalState: @unchecked Sendable {
         let box = Box()
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] app, error in
             if let error {
-                box.error = "Darc open failed: \(error.localizedDescription)"
+                box.error = "XE Computer open failed: \(error.localizedDescription)"
             } else if let app {
                 self?.darcApp = app
             }
@@ -509,8 +516,8 @@ final class ExternalState: @unchecked Sendable {
         }
         let running = darcRunning
         let pid = darcApp?.processIdentifier ?? -1
-        appendLog("launcher", "Darc started via NSWorkspace (isRunning=\(running), pid=\(pid))")
-        print("[ExternalState] Darc started, isRunning=\(running)")
+        appendLog("launcher", "XE Computer started via NSWorkspace (isRunning=\(running), pid=\(pid))")
+        print("[ExternalState] XE Computer started, isRunning=\(running)")
 
         // Bring the Darc app to the foreground (silently — ignore if app terminated)
         if let app = darcApp, !app.isTerminated {
@@ -535,8 +542,8 @@ final class ExternalState: @unchecked Sendable {
         }
         darcApp = nil
         terminateSubprocess("darc_log")
-        appendLog("launcher", "Darc stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] Darc stopped (wasRunning=\(wasRunning))")
+        appendLog("launcher", "XE Computer stopped (wasRunning=\(wasRunning))")
+        print("[ExternalState] XE Computer stopped (wasRunning=\(wasRunning))")
     }
 
     private func desktopForWindow(_ windowID: UInt32) -> Int? {
@@ -690,8 +697,8 @@ final class ExternalState: @unchecked Sendable {
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: darcWindows, options: [.prettyPrinted, .sortedKeys])
             try jsonData.write(to: outputURL, options: .atomic)
-            appendLog("launcher", "Saved \(darcWindows.count) darc window position(s) to \(outputURL.path)")
-            print("[ExternalState] Saved \(darcWindows.count) window positions to \(outputURL.path)")
+            appendLog("launcher", "Saved \(darcWindows.count) XE Computer window position(s) to \(outputURL.path)")
+            print("[ExternalState] Saved \(darcWindows.count) XE Computer window positions to \(outputURL.path)")
         } catch {
             appendLog("launcher", "Failed to save window positions: \(error)")
             print("[ExternalState] Failed to save window positions: \(error)")
@@ -718,8 +725,8 @@ final class ExternalState: @unchecked Sendable {
 
         guard !entries.isEmpty else { return }
         guard darcRunning, let darcPID = darcApp?.processIdentifier else {
-            appendLog("launcher", "Darc is not running, cannot restore windows")
-            print("[ExternalState] Darc not running")
+            appendLog("launcher", "XE Computer is not running, cannot restore windows")
+            print("[ExternalState] XE Computer not running")
             return
         }
 
@@ -780,7 +787,7 @@ final class ExternalState: @unchecked Sendable {
         print("[ExternalState] Restored \(min(entries.count, allWindows.count)) window positions")
     }
 
-    /// Open a new window in the Darc app shim via its dock menu "New Window" item
+    /// Open a new window in the Xe Computer app shim via its dock menu "New Window" item.
     private func openNewDarcWindow(app: AXUIElement, pid: Int32) {
         // Use AppleScript to click "New Window" in the app's dock menu
         let script = """
@@ -791,7 +798,7 @@ final class ExternalState: @unchecked Sendable {
                     try
                         if (value of attribute "AXIsApplicationRunning" of dockItem) is true then
                             set itemName to name of dockItem
-                            if itemName is "Darc" then
+                            if itemName is "Xe Computer" then
                                 perform action "AXShowMenu" of dockItem
                                 delay 0.3
                                 click menu item "New Window" of menu 1 of dockItem
@@ -808,7 +815,7 @@ final class ExternalState: @unchecked Sendable {
             appleScript.executeAndReturnError(&error)
             if let error {
                 print("[ExternalState] AppleScript new window error: \(error)")
-                appendLog("launcher", "Failed to open new darc window: \(error)")
+                appendLog("launcher", "Failed to open new XE Computer window: \(error)")
             }
         }
     }

@@ -35,7 +35,7 @@ nonisolated(unsafe) private var _cancelButton: NSButton?
 private let _cancellation = CancellationToken()
 
 private var setupAppDisplayName: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Computer"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "XE Launcher"
 }
 
 enum SetupProgressPlacement {

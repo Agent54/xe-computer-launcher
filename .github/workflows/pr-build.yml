@@ -16,6 +16,7 @@ jobs:
     env:
       DEVELOPER_ID: ${{ vars.MACOS_DEVELOPER_ID }}
       NOTARY_PROFILE: notarytool-profile
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
 
     steps:
       - name: Check out pull request
@@ -93,6 +94,11 @@ jobs:
         working-directory: macos
         run: make
 
+      - name: Verify Sparkle bundle integration
+        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/XE Launcher.app" --release
+
       - name: Run full launcher integration test
         run: macos/Tests/Integration/install-from-dmg.sh
-        
+
+      - name: Verify version in About dialog
+        run: macos/Tests/Integration/about-version.sh

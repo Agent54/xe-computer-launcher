@@ -1,4 +1,5 @@
 import AppKit
+import Sparkle
 
 @main
 struct MacOSApp {
@@ -26,7 +27,19 @@ struct MacOSApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var didFinishNormalStartup = false
+    private var isPreparingForTermination = false
     private var statusItem: NSStatusItem?
+    private var isUpdaterConfigured: Bool {
+        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
+            return false
+        }
+        return !publicKey.isEmpty && publicKey != "SPARKLE_PUBLIC_ED_KEY"
+    }
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
     private var specialKeyCheck: Any?
@@ -56,6 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
+    private var newProfileItem: NSMenuItem?
+    private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
 
@@ -83,8 +98,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
         renderMenuLabels()
 
+        // Updating a copy on a read-only disk image cannot succeed. The copy
+        // installed into /Applications or ~/Applications starts Sparkle on its
+        // first normal launch instead.
+        if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+            _ = updaterController
+        }
+
         // Permission onboarding must not depend on whether downloadable assets
-        // or an existing Darc app shim are already present.
+        // or an existing Xe Computer app shim are already present.
         Task { @MainActor [weak self] in
             _ = await AccessibilityPermission.requestIfNeeded()
             self?.startBackgroundInitialization()
@@ -168,14 +190,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        // Return the status-item menu itself so the Dock and menu bar expose the
-        // same live items, submenus, state indicators, and actions.
         renderMenuLabels()
-        return statusItem?.menu
+        updateOptionOnlyMenuItems(optionHeld: NSEvent.modifierFlags.contains(.option))
+
+        // The Dock appends its own native Quit command. Return a snapshot of
+        // the status menu without our duplicate Quit item.
+        guard let statusMenu = statusItem?.menu,
+              let dockMenu = statusMenu.copy() as? NSMenu else {
+            return nil
+        }
+        dockMenu.delegate = nil
+        if let quitItem = dockMenu.items.first(where: { $0.action == #selector(quitAction) }) {
+            dockMenu.removeItem(quitItem)
+        }
+        return dockMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        prepareForTermination()
         stopStateRefreshLoop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Sparkle sends the application a regular terminate request before it
+        // atomically replaces and relaunches the bundle. Keep this cleanup in
+        // the delegate so updater-triggered termination and the Quit menu item
+        // have identical service-state behavior.
+        prepareForTermination()
+        return .terminateNow
+    }
+
+    private func prepareForTermination() {
+        guard !isPreparingForTermination, didFinishNormalStartup else { return }
+        isPreparingForTermination = true
+
+        let state = ExternalState.shared
+        state.setBoolSetting("darc_was_running", state.darcRunning)
+        state.setBoolSetting("chrome_was_running", state.chromeRunning)
+        state.stopChrome()  // stopChrome calls stopDarc internally
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -197,6 +249,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
+            button.setAccessibilityIdentifier("dev.xe.computer.status-menu")
+            button.setAccessibilityLabel("XE Launcher status menu")
+            button.toolTip = "XE Launcher"
+
             if let resourceURL = Bundle.main.resourceURL,
                let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("status-icon.png")) {
                 icon.size = NSSize(width: 18, height: 18)
@@ -205,7 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 button.image = NSImage(
                     systemSymbolName: "desktopcomputer",
-                    accessibilityDescription: "Xe Computer"
+                    accessibilityDescription: "XE Launcher"
                 )
                 button.image?.size = NSSize(width: 18, height: 18)
             }
@@ -223,7 +279,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let newProfileItem = NSMenuItem(title: "New Profile...", action: #selector(newProfileAction), keyEquivalent: "")
         newProfileItem.target = self
+        newProfileItem.isHidden = true
         menu.addItem(newProfileItem)
+        self.newProfileItem = newProfileItem
 
         menu.addItem(.separator())
         legacyVMItem = buildSubmenu(parent: menu, title: "Legacy VM", startSelector: #selector(legacyVMStartAction), stopSelector: #selector(legacyVMStopAction), startRef: &legacyVMStartItem, stopRef: &legacyVMStopItem)
@@ -233,7 +291,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: ""))
+        let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
+        systemLogsItem.isHidden = true
+        menu.addItem(systemLogsItem)
+        self.systemLogsItem = systemLogsItem
 
         let appDataSeparator = NSMenuItem.separator()
         appDataSeparator.isHidden = true
@@ -255,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -383,8 +445,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             profileSubmenu.addItem(selectItem)
             profileSubmenu.addItem(.separator())
 
-            // Darc submenu
-            let darcSub = NSMenuItem(title: "Darc", action: nil, keyEquivalent: "")
+            // XE Computer submenu
+            let darcSub = NSMenuItem(title: "XE Computer", action: nil, keyEquivalent: "")
             let darcMenu = NSMenu()
             darcMenu.autoenablesItems = false
             let dStart = NSMenuItem(title: "Start", action: #selector(darcStartAction), keyEquivalent: "")
@@ -593,6 +655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateOptionOnlyMenuItems(optionHeld: Bool) {
         darcOverrideItem?.isHidden = !optionHeld
         darcOverrideSeparator?.isHidden = !optionHeld
+        newProfileItem?.isHidden = !optionHeld
+        systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
         statusItem?.menu?.update()
@@ -630,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Update titles and enable states for active profile items
-        darcItem?.title = serviceTitle("Darc", key: "darc", running: state.darcRunning)
+        darcItem?.title = serviceTitle("XE Computer", key: "darc", running: state.darcRunning)
         let chromeName = state.selectedChrome()?.name ?? "Chrome Engine"
         chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: state.chromeRunning)
 
@@ -732,8 +796,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let currentURL = state.darcOverrideURL(forProfile: profileName) ?? ""
 
         let alert = NSAlert()
-        alert.messageText = "Override Darc URL"
-        alert.informativeText = "Enter the base URL for the Darc IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
+        alert.messageText = "Override XE Computer URL"
+        alert.informativeText = "Enter the base URL for the XE Computer IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -910,13 +974,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let state = ExternalState.shared
         let isHidden = state.boolSetting("hide_dock_icon", default: false)
         state.setBoolSetting("hide_dock_icon", !isHidden)
-        applyDockIconPreference()
         renderMenuLabels()
+
+        // A Dock-menu action runs inside the Dock's menu tracking loop.
+        // Changing activation policy synchronously can leave a stale inactive
+        // tile behind, so apply it after the menu action has completed.
+        DispatchQueue.main.async { [weak self] in
+            self?.applyDockIconPreference()
+        }
     }
 
     private func configureApplicationIdentity() {
         let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-            ?? "Xe Computer"
+            ?? "XE Launcher"
         ProcessInfo.processInfo.processName = displayName
 
         if let resourceURL = Bundle.main.resourceURL,
@@ -930,13 +1000,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(shouldHide ? .accessory : .regular)
     }
 
-    @objc private func aboutAction() { NSApp.orderFrontStandardAboutPanel(nil) }
+    @objc private func aboutAction() {
+        let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "Unknown"
+        let options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationVersion: releaseVersion
+        ]
+
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
+
+        // The standard About panel is untitled. Promote the key window on the
+        // next run-loop turn, after status-menu tracking has finished.
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    @objc private func checkForUpdatesAction() {
+        guard isUpdaterConfigured else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Updates Are Not Configured"
+            alert.informativeText = "This development build does not contain a Sparkle update-signing public key."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        guard !ApplicationInstaller.isRunningFromDiskImage() else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Install XE Launcher to Update"
+            alert.informativeText = "Updates can be installed after XE Launcher has been copied to an Applications folder."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(nil)
+    }
+
     @objc private func quitAction() {
-        // Save running state before stopping so it can be restored on next launch
-        let state = ExternalState.shared
-        state.setBoolSetting("darc_was_running", state.darcRunning)
-        state.setBoolSetting("chrome_was_running", state.chromeRunning)
-        state.stopChrome()  // stopChrome calls stopDarc internally
         NSApp.terminate(nil)
     }
 
@@ -967,7 +1077,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Stale Browser Processes Found"
-        alert.informativeText = "The following Helium/Darc processes from a previous session are still running:\n\n"
+        alert.informativeText = "The following Helium/XE Computer processes from a previous session are still running:\n\n"
             + descriptions.joined(separator: "\n")
             + "\n\nWould you like to terminate them before launching?"
         alert.alertStyle = .warning

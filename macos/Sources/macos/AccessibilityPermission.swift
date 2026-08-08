@@ -14,14 +14,21 @@ enum AccessibilityPermission {
             allowsCancellation: false
         )
         updateSetupProgress(
-            status: "Grant Accessibility access to Xe Computer in System Settings. Setup will continue automatically."
+            status: "Grant Accessibility access to XE Launcher in System Settings. Setup will continue automatically."
         )
         setSetupProgressIndeterminate(true)
 
         // Show our non-floating companion panel first so the system prompt is
-        // never obscured by it.
+        // never obscured by it. The prompt's Open System Settings action must
+        // be used instead of opening the privacy pane ourselves: otherwise the
+        // unanswered system prompt remains queued and macOS may terminate the
+        // app while permission is still pending.
         await Task.yield()
-        let promptKey = "AXTrustedCheckOptionPrompt" as CFString
+        NSApp.activate(ignoringOtherApps: true)
+        // The imported SDK symbol is mutable global state and therefore
+        // rejected by Swift 6 concurrency checking. Its documented value is
+        // stable and safe to pass as the dictionary key.
+        let promptKey = "AXTrustedCheckOptionPrompt"
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
 
         for _ in 0..<120 {

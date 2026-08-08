@@ -6,6 +6,7 @@ import AppKit
 @MainActor
 enum ApplicationInstaller {
     private static let installedRelaunchArgument = "--xe-computer-installed-relaunch"
+    private static let developmentInstallArgument = "--xe-computer-development-install"
     private static var handoffInProgress = false
 
     private enum InstallResult {
@@ -21,7 +22,7 @@ enum ApplicationInstaller {
             switch self {
             case .couldNotStopExistingInstances(let processIdentifiers):
                 let identifiers = processIdentifiers.map(String.init).joined(separator: ", ")
-                return "The existing Xe Computer instance could not be stopped (process \(identifiers)). Quit it manually and try again."
+                return "The existing XE Launcher instance could not be stopped (process \(identifiers)). Quit it manually and try again."
             }
         }
     }
@@ -44,8 +45,8 @@ enum ApplicationInstaller {
 
         let installAlert = NSAlert()
         installAlert.alertStyle = .informational
-        installAlert.messageText = "Install Xe Computer?"
-        installAlert.informativeText = "Xe Computer is running from a disk image. Would you like to copy it to the Applications folder and reopen it from there?"
+        installAlert.messageText = "Install XE Launcher?"
+        installAlert.informativeText = "XE Launcher is running from a disk image. Would you like to copy it to the Applications folder and reopen it from there?"
         installAlert.addButton(withTitle: "Install in Applications")
         installAlert.addButton(withTitle: "Run from Disk Image")
 
@@ -120,7 +121,7 @@ enum ApplicationInstaller {
         let fallbackAlert = NSAlert()
         fallbackAlert.alertStyle = .warning
         fallbackAlert.messageText = "Applications Folder Requires Permission"
-        fallbackAlert.informativeText = "macOS did not allow Xe Computer to write to /Applications. Would you like to install it in your personal Applications folder instead?"
+        fallbackAlert.informativeText = "macOS did not allow XE Launcher to write to /Applications. Would you like to install it in your personal Applications folder instead?"
         fallbackAlert.addButton(withTitle: "Install for This User")
         fallbackAlert.addButton(withTitle: "Run from Disk Image")
 
@@ -155,7 +156,7 @@ enum ApplicationInstaller {
     private static func showExistingInstallation(at destination: URL) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Xe Computer Is Already Installed"
+        alert.messageText = "XE Launcher Is Already Installed"
         alert.informativeText = "An app already exists at \(destination.path). It will not be replaced. Remove it manually before installing this version, or continue running this copy from the disk image."
         alert.addButton(withTitle: "Run from Disk Image")
         alert.addButton(withTitle: "Show in Finder")
@@ -267,6 +268,15 @@ enum ApplicationInstaller {
         at destination: URL,
         onFailure: @escaping @MainActor @Sendable () -> Void
     ) {
+        if ProcessInfo.processInfo.arguments.contains(developmentInstallArgument) {
+            // The integration runner first removes the quarantine inherited
+            // from the DMG, then asks Launch Services to start the installed
+            // app. Starting it here would race that cleanup and trigger a
+            // Gatekeeper denial on ad-hoc-signed development builds.
+            NSApp.terminate(nil)
+            return
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.addsToRecentItems = false
@@ -290,15 +300,27 @@ enum ApplicationInstaller {
                     return
                 }
 
-                let alert = NSAlert()
-                alert.alertStyle = .critical
-                alert.messageText = "Installed, but Couldn’t Relaunch"
-                alert.informativeText = "Xe Computer was copied to \(destination.path), but macOS could not start it:\n\n\(failureMessage)\n\nThis copy will continue running from the disk image."
-                alert.addButton(withTitle: "Continue")
-                alert.runModal()
-                onFailure()
+                showRelaunchFailure(
+                    at: destination,
+                    message: failureMessage,
+                    onFailure: onFailure
+                )
             }
         }
+    }
+
+    private static func showRelaunchFailure(
+        at destination: URL,
+        message: String,
+        onFailure: @escaping @MainActor @Sendable () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Installed, but Couldn’t Relaunch"
+        alert.informativeText = "XE Launcher was copied to \(destination.path), but macOS could not start it:\n\n\(message)\n\nThis copy will continue running from the disk image."
+        alert.addButton(withTitle: "Continue")
+        alert.runModal()
+        onFailure()
     }
 
     private static func continueFromDiskImage(
@@ -334,7 +356,7 @@ enum ApplicationInstaller {
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Installation Failed"
-        alert.informativeText = "Xe Computer could not be installed:\n\n\(error.localizedDescription)\n\nIt will continue running from the disk image."
+        alert.informativeText = "XE Launcher could not be installed:\n\n\(error.localizedDescription)\n\nIt will continue running from the disk image."
         alert.addButton(withTitle: "Continue")
         alert.runModal()
     }

@@ -1,4 +1,16 @@
 {
-    "helium": {"url": "https://github.com/Agent54/xe-darc-launcher/releases/download/latest/Helium.zip", "unzip": true, "label": "Helium browser engine"},
-    "darc": {"url": "https://github.com/Agent54/xe-darc/releases/download/v0.0.11/darc.swbn", "unzip": false, "label": "Darc app"}
+    "helium": {
+        "url": "https://github.com/Agent54/xe-darc-launcher/releases/download/latest/Helium.zip",
+        "unzip": true,
+        "label": "Helium browser engine"
+    },
+    "darc": {
+        "version": {
+            "major": 0,
+            "minor": 0,
+            "patch": 11
+        },
+        "unzip": false,
+        "label": "XE Computer app"
+    }
 }

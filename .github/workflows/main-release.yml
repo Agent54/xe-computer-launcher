@@ -10,12 +10,17 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: launcher-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
     timeout-minutes: 60
     env:
       NOTARY_PROFILE: notarytool-profile
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
 
     steps:
       - name: Configure temporary paths
@@ -54,21 +59,42 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "int" ]]; then
             release_tag="$version-int.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
             prerelease="true"
+            update_channel="int"
           else
             release_tag="$version"
             prerelease="false"
+            update_channel="stable"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "Building Xe Computer $version for release $release_tag"
+          echo "update_channel=$update_channel" >> "$GITHUB_OUTPUT"
+          echo "Building XE Launcher $version for release $release_tag"
+
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "::error::Actions secret SPARKLE_PUBLIC_ED_KEY is not configured."
+            exit 1
+          fi
+          if [[ ! "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+            echo "::error::Actions secret SPARKLE_PUBLIC_ED_KEY is not a base64-encoded Ed25519 public key."
+            exit 1
+          fi
 
           plutil -replace CFBundleShortVersionString \
             -string "$version" \
             macos/Sources/macos/Info.plist
           plutil -replace CFBundleVersion \
-            -string "$GITHUB_RUN_NUMBER" \
+            -string "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+            macos/Sources/macos/Info.plist
+          plutil -replace XeReleaseVersion \
+            -string "$release_tag" \
+            macos/Sources/macos/Info.plist
+          plutil -replace SUPublicEDKey \
+            -string "$SPARKLE_PUBLIC_ED_KEY" \
+            macos/Sources/macos/Info.plist
+          plutil -replace SUFeedURL \
+            -string "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$update_channel/appcast.xml" \
             macos/Sources/macos/Info.plist
 
       - name: Install Developer ID certificate
@@ -161,10 +187,70 @@ jobs:
         working-directory: macos
         run: make
 
+      - name: Verify Sparkle bundle integration
+        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/XE Launcher.app" --release
+
       - name: Run full launcher integration test
         env:
-          DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
+          DMG_PATH: ${{ github.workspace }}/macos/dist/XE Launcher.dmg
         run: macos/Tests/Integration/install-from-dmg.sh
+
+      - name: Verify version in About dialog
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.release_tag }}
+        run: macos/Tests/Integration/about-version.sh
+
+      - name: Generate signed Sparkle appcast
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::error::Repository secret SPARKLE_PRIVATE_KEY is not configured."
+            exit 1
+          fi
+
+          update_dir="$RUNNER_TEMP/sparkle-update"
+          mkdir -p "$update_dir"
+          cp "macos/dist/XE Launcher.dmg" "$update_dir/XE-Launcher.dmg"
+
+          {
+            echo "# XE Launcher $RELEASE_TAG"
+            echo
+            echo "See the GitHub release for the complete notes:"
+            echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+          } > "$update_dir/XE-Launcher.md"
+
+          generate_appcast="macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+          if [[ ! -x "$generate_appcast" ]]; then
+            echo "::error::Sparkle generate_appcast tool was not found at $generate_appcast"
+            exit 1
+          fi
+          sign_update="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          if [[ ! -x "$sign_update" ]]; then
+            echo "::error::Sparkle sign_update tool was not found at $sign_update"
+            exit 1
+          fi
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/" \
+              --embed-release-notes \
+              --maximum-deltas 0 \
+              --link "https://github.com/$GITHUB_REPOSITORY" \
+              -o "$update_dir/appcast.xml" \
+              "$update_dir"
+
+          test -s "$update_dir/appcast.xml"
+          grep -q 'sparkle:edSignature=' "$update_dir/appcast.xml"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$sign_update" \
+              --verify \
+              --ed-key-file - \
+              "$update_dir/appcast.xml"
+          echo "SPARKLE_UPDATE_DIR=$update_dir" >> "$GITHUB_ENV"
 
       - name: Create version tag and GitHub release
         env:
@@ -181,11 +267,97 @@ jobs:
           fi
 
           gh release create "$RELEASE_TAG" \
-            "macos/.build/Xe Computer.dmg" \
+            "$SPARKLE_UPDATE_DIR/XE-Launcher.dmg" \
+            "$SPARKLE_UPDATE_DIR/appcast.xml" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Xe Computer $RELEASE_TAG" \
+            --title "XE Launcher $RELEASE_TAG" \
             "${release_flags[@]}"
+
+      - name: Publish Sparkle channel feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          if ! gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/heads/updates" \
+            --silent >/dev/null 2>&1; then
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              --field ref="refs/heads/updates" \
+              --field sha="$GITHUB_SHA" \
+              --silent
+          fi
+
+          feed_path="$UPDATE_CHANNEL/appcast.xml"
+          existing_sha="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/contents/$feed_path?ref=updates" \
+              --jq .sha 2>/dev/null || true
+          )"
+          encoded_feed="$(base64 < "$SPARKLE_UPDATE_DIR/appcast.xml" | tr -d '\n')"
+
+          api_args=(
+            --method PUT
+            "repos/$GITHUB_REPOSITORY/contents/$feed_path"
+            --field message="Publish $UPDATE_CHANNEL Sparkle feed for $RELEASE_TAG"
+            --field content="$encoded_feed"
+            --field branch=updates
+            --silent
+          )
+          if [[ -n "$existing_sha" ]]; then
+            api_args+=(--field sha="$existing_sha")
+          fi
+
+          gh api "${api_args[@]}"
+
+      - name: Verify published Sparkle channel feed
+        env:
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          feed_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml"
+          asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/XE-Launcher.dmg"
+          macos/Tests/Integration/verify-appcast.sh \
+            "$feed_url" \
+            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+            "$asset_url"
+
+      - name: Announce release on Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        shell: bash
+        run: |
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "::error::The DISCORD_WEBHOOK_URL repository secret is not configured."
+            exit 1
+          fi
+
+          release_kind="release"
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_kind="prerelease"
+          fi
+
+          release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+          payload="$(printf \
+            '{"content":"XE Launcher %s %s is available: %s"}' \
+            "$RELEASE_TAG" "$release_kind" "$release_url")"
+
+          curl --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            --output /dev/null \
+            "$DISCORD_WEBHOOK_URL"
 
       - name: Remove temporary signing material
         if: ${{ always() }}
