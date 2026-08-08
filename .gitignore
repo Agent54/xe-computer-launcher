@@ -8,3 +8,4 @@ DerivedData/
 .netrc
 macos/Helpers
 macos/.env
+macos/local-secrets
