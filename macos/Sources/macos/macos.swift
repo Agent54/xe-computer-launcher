@@ -57,15 +57,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var chromeStartItem: NSMenuItem?
     private var chromeStopItem: NSMenuItem?
     private var chromeHeadlessItem: NSMenuItem?
-    private var legacyVMItem: NSMenuItem?
-    private var legacyVMStartItem: NSMenuItem?
-    private var legacyVMStopItem: NSMenuItem?
-    private var systemVMItem: NSMenuItem?
-    private var systemVMStartItem: NSMenuItem?
-    private var systemVMStopItem: NSMenuItem?
-    private var appVMItem: NSMenuItem?
-    private var appVMStartItem: NSMenuItem?
-    private var appVMStopItem: NSMenuItem?
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
@@ -119,43 +110,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             let state = ExternalState.shared
             state.updateAll()
-
-            if !state.isColimaInstalled {
-                var installationError: String?
-
-                if state.isHomebrewInstalled {
-                    let progressReady = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        showSetupProgress(message: "Installing a required VM dependency", allowsCancellation: false)
-                        updateSetupProgress(status: "Installing Colima with Homebrew…")
-                        setSetupProgressIndeterminate(true)
-                        progressReady.signal()
-                    }
-                    progressReady.wait()
-
-                    installationError = state.installColima()
-
-                    let progressClosed = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        closeSetupProgress()
-                        progressClosed.signal()
-                    }
-                    progressClosed.wait()
-                } else {
-                    installationError = state.installColima()
-                }
-
-                if let installationError {
-                    let alertClosed = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        self.showColimaInstallationError(installationError)
-                        alertClosed.signal()
-                    }
-                    alertClosed.wait()
-                } else {
-                    state.refreshRuntimeStateFromSystemTruth(force: true)
-                }
-            }
 
             // Check for zombie Helium/Darc processes before launching
             let zombies = state.findZombieProcesses()
@@ -284,11 +238,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.newProfileItem = newProfileItem
 
         menu.addItem(.separator())
-        legacyVMItem = buildSubmenu(parent: menu, title: "Legacy VM", startSelector: #selector(legacyVMStartAction), stopSelector: #selector(legacyVMStopAction), startRef: &legacyVMStartItem, stopRef: &legacyVMStopItem)
-        systemVMItem = buildSubmenu(parent: menu, title: "System VM", startSelector: #selector(systemVMStartAction), stopSelector: #selector(systemVMStopAction), startRef: &systemVMStartItem, stopRef: &systemVMStopItem)
-        appVMItem = buildSubmenu(parent: menu, title: "App VM", startSelector: #selector(appVMStartAction), stopSelector: #selector(appVMStopAction), startRef: &appVMStartItem, stopRef: &appVMStopItem)
-
-        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
         let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
@@ -322,21 +271,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         setTargets(for: menu)
         statusItem?.menu = menu
-    }
-
-    private func buildSubmenu(parent: NSMenu, title: String, startSelector: Selector, stopSelector: Selector, startRef: inout NSMenuItem?, stopRef: inout NSMenuItem?) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        submenu.autoenablesItems = false
-        let startItem = NSMenuItem(title: "Start", action: startSelector, keyEquivalent: "")
-        let stopItem = NSMenuItem(title: "Stop", action: stopSelector, keyEquivalent: "")
-        submenu.addItem(startItem)
-        submenu.addItem(stopItem)
-        item.submenu = submenu
-        parent.addItem(item)
-        startRef = startItem
-        stopRef = stopItem
-        return item
     }
 
     private var chromeVariantItems: [NSMenuItem] = []
@@ -609,11 +543,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let optionHeld = NSEvent.modifierFlags.contains(.option)
         lastOptionKeyState = optionHeld
         updateOptionOnlyMenuItems(optionHeld: optionHeld)
-        // Refresh state in background, then start polling while menu is open
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            ExternalState.shared.refreshRuntimeStateFromSystemTruth()
-            Task { @MainActor [weak self] in self?.renderMenuLabels() }
-        }
         startStateRefreshLoop()
         // Monitor Option key press/release while menu is open to toggle variant items.
         // NSMenu runs its own event tracking loop so neither addLocalMonitor nor
@@ -711,22 +640,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let chromeSubmenu {
             refreshChromeMenuOptions(in: chromeSubmenu)
         }
-
-        // VM items
-        legacyVMItem?.title = serviceTitle("Legacy VM", key: "legacyVM", running: state.legacyVMRunning)
-        systemVMItem?.title = serviceTitle("System VM", key: "systemVM", running: state.systemVMRunning)
-        appVMItem?.title = serviceTitle("App VM", key: "appVM", running: state.appVMRunning)
-
-        let legacyPending = pendingServices.contains("legacyVM")
-        let systemPending = pendingServices.contains("systemVM")
-        let appPending = pendingServices.contains("appVM")
-
-        legacyVMStartItem?.isEnabled = !state.legacyVMRunning && !legacyPending
-        legacyVMStopItem?.isEnabled = state.legacyVMRunning && !legacyPending
-        systemVMStartItem?.isEnabled = !state.systemVMRunning && !systemPending
-        systemVMStopItem?.isEnabled = state.systemVMRunning && !systemPending
-        appVMStartItem?.isEnabled = !state.appVMRunning && !appPending
-        appVMStopItem?.isEnabled = state.appVMRunning && !appPending
 
         runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
@@ -930,30 +843,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func legacyVMStartAction() {
-        runServiceAction("legacyVM") { _ = ExternalState.shared.startLegacyVM() }
-    }
-
-    @objc private func legacyVMStopAction() {
-        runServiceAction("legacyVM") { _ = ExternalState.shared.stopLegacyVM() }
-    }
-
-    @objc private func systemVMStartAction() {
-        runServiceAction("systemVM") { _ = ExternalState.shared.startColimaVM(profileName: "system") }
-    }
-
-    @objc private func systemVMStopAction() {
-        runServiceAction("systemVM") { _ = ExternalState.shared.stopColimaVM(profileName: "system") }
-    }
-
-    @objc private func appVMStartAction() {
-        runServiceAction("appVM") { _ = ExternalState.shared.startColimaVM(profileName: "apps") }
-    }
-
-    @objc private func appVMStopAction() {
-        runServiceAction("appVM") { _ = ExternalState.shared.stopColimaVM(profileName: "apps") }
-    }
-
     @objc private func showLogsAction() {
         logPanelController.present()
     }
@@ -1052,16 +941,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Zombie process alert
 
-    private func showColimaInstallationError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Colima Installation Required"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-    }
-
     private func showZombieAlert(_ zombies: [ExternalState.ZombieProcess]) {
         guard !zombies.isEmpty else { return }
 
@@ -1098,12 +977,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startStateRefreshLoop() {
         guard stateRefreshTimer == nil else { return }
         stateRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            // Re-render from cached/computed state + refresh colima in background
+            // Re-render service state while the menu is open.
             Task { @MainActor [weak self] in self?.renderMenuLabels() }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                ExternalState.shared.refreshRuntimeStateFromSystemTruth()
-                Task { @MainActor [weak self] in self?.renderMenuLabels() }
-            }
         }
     }
 

@@ -7,12 +7,11 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
     private var currentSource: String? = nil  // nil = all
     private var lastLogCount = 0
     private var segmentedControl: NSSegmentedControl!
-    private let tabSources = ["all", "launcher", "colima", "browser", "app_shim"]
-    private let tabLabels = ["All", "Xe Launcher", "Colima", "Browser", "App Shim"]
+    private let tabSources = ["all", "launcher", "browser", "app_shim"]
+    private let tabLabels = ["All", "Xe Launcher", "Browser", "App Shim"]
 
     private static let sourceColors: [String: NSColor] = [
         "launcher": .systemPurple,
-        "colima": .systemBlue,
         "browser": .systemGreen,
         "app_shim": .systemOrange
     ]

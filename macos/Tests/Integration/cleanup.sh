@@ -76,8 +76,6 @@ stop_matching_processes() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
-command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
-
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
 stop_matching_processes \
@@ -151,11 +149,6 @@ if [[ -e "$APP_DATA" ]]; then
     rmdir "$trashed_data"
     log "moving existing app data to $trashed_data"
     mv "$APP_DATA" "$trashed_data"
-fi
-
-log "uninstalling Colima so first-run dependency installation is exercised"
-if brew list --formula colima >/dev/null 2>&1; then
-    brew uninstall --force colima
 fi
 
 log "cleanup complete"

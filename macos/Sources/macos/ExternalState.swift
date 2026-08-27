@@ -13,7 +13,6 @@ final class ExternalState: @unchecked Sendable {
 
     static var appDataFolder: String { appDataURL.path }
     static var profilesPath: String { appDataURL.appendingPathComponent("profiles", isDirectory: true).path }
-    static var vmsPath: String { appDataURL.appendingPathComponent("vms", isDirectory: true).path }
     static var settingsPath: String { appDataURL.appendingPathComponent("settings.json").path }
 
     static let xeComputerShimAppName = "Xe Computer.app"
@@ -24,7 +23,6 @@ final class ExternalState: @unchecked Sendable {
     }
 
     private static let logBufferSize = 1000
-    private static let colimaProfilePrefix = "darc-"
     private static let requiredChromeFlags = [
         "enable-desktop-pwas-additional-windowing-controls@1",
         "enable-desktop-pwas-borderless@1",
@@ -48,39 +46,10 @@ final class ExternalState: @unchecked Sendable {
         let path: String
     }
 
-    struct VMProfile {
-        let name: String
-        let path: String
-    }
-
-    struct ColimaInstance: Codable {
-        let name: String
-        let status: String
-        let arch: String?
-        let cpus: Int?
-        let memory: Int?
-        let disk: Int?
-        let runtime: String?
-        let address: String?
-    }
-
-    struct ColimaStatus {
-        let isInstalled: Bool
-        let isReachable: Bool
-        let instances: [ColimaInstance]
-        let error: String?
-    }
-
     struct LogEntry {
         let source: String
         let line: String
         let timestamp: Date
-    }
-
-    struct DependencyStatus {
-        let colima: Bool
-        let chrome: InstalledChrome?
-        let profiles: [String]
     }
 
     struct Settings: Codable {
@@ -109,13 +78,7 @@ final class ExternalState: @unchecked Sendable {
 
     private(set) var installedChromes: [InstalledChrome] = []
     private(set) var chromeProfiles: [ChromeProfile] = []
-    private(set) var vmProfiles: [VMProfile] = []
-    private(set) var colimaStatus = ColimaStatus(isInstalled: false, isReachable: false, instances: [], error: nil)
     private(set) var settings = Settings(rawData: [:])
-
-    private(set) var legacyVMRunning = false
-    private(set) var systemVMRunning = false
-    private(set) var appVMRunning = false
 
     /// Managed long-running subprocesses keyed by name
     var subprocesses: [String: Process] = [:]
@@ -203,9 +166,6 @@ final class ExternalState: @unchecked Sendable {
         return isSubprocessRunning("browser")
     }
 
-    private var lastColimaRefresh = Date.distantPast
-    private let minColimaRefreshInterval: TimeInterval = 15
-
     private var allLogs: [LogEntry] = []
 
     static let shared = ExternalState()
@@ -215,50 +175,14 @@ final class ExternalState: @unchecked Sendable {
         ensureAppDataFolderExists()
         refreshChromeAvailability()
         updateChromeProfiles()
-        updateVMProfiles()
-        refreshRuntimeStateFromSystemTruth(force: true)
         updateSettings()
-
-    }
-
-    func refreshRuntimeStateFromSystemTruth(force: Bool = false) {
-        updateColimaStatus(force: force)
     }
 
     private func ensureAppDataFolderExists() {
         let fm = FileManager.default
-        for folder in [Self.appDataFolder, Self.profilesPath, Self.vmsPath] where !fm.fileExists(atPath: folder) {
+        for folder in [Self.appDataFolder, Self.profilesPath] where !fm.fileExists(atPath: folder) {
             do { try fm.createDirectory(atPath: folder, withIntermediateDirectories: true) } catch { print("[ExternalState] mkdir failed: \(error)") }
         }
-        seedBundledAssets()
-    }
-
-    /// Seed VM profile templates and download required assets (Helium, Xe Computer) on first run.
-    private func seedBundledAssets() {
-        let fm = FileManager.default
-        let dataURL = Self.appDataURL
-
-        // --- VM profile templates (from bundle Resources/vms/) ---
-        let bundleVMs: URL? = Bundle.main.resourceURL?.appendingPathComponent("vms", isDirectory: true)
-        if let bundleVMs, fm.fileExists(atPath: bundleVMs.path) {
-            let dstVMs = dataURL.appendingPathComponent("vms", isDirectory: true)
-            if let files = try? fm.contentsOfDirectory(atPath: bundleVMs.path) {
-                for file in files where file.hasSuffix(".yaml") {
-                    let src = bundleVMs.appendingPathComponent(file)
-                    let dst = dstVMs.appendingPathComponent(file)
-                    if !fm.fileExists(atPath: dst.path) {
-                        do {
-                            try fm.copyItem(at: src, to: dst)
-                            print("[ExternalState] Seeded VM template \(file)")
-                        } catch {
-                            print("[ExternalState] Failed to seed VM template \(file): \(error)")
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Download assets from sources.json on first run ---
         downloadAssetsIfNeeded()
     }
 
@@ -326,49 +250,6 @@ final class ExternalState: @unchecked Sendable {
         chromeProfiles = getSubfolders(at: path).map { ChromeProfile(name: $0, path: "\(path)/\($0)") }
     }
 
-    func updateVMProfiles() {
-        let path = Self.vmsPath
-        vmProfiles = getYamlFiles(at: path).map {
-            let name = ($0 as NSString).deletingPathExtension
-            return VMProfile(name: name, path: "\(path)/\($0)")
-        }
-    }
-
-    func updateColimaStatus(force: Bool = false) {
-        let now = Date()
-        if !force, now.timeIntervalSince(lastColimaRefresh) < minColimaRefreshInterval {
-            return
-        }
-        lastColimaRefresh = now
-
-        guard let colimaPath = resolveExecutable(name: "colima") else {
-            colimaStatus = ColimaStatus(isInstalled: false, isReachable: false, instances: [], error: "Colima not found")
-            legacyVMRunning = false; systemVMRunning = false; appVMRunning = false
-            return
-        }
-
-        let listResult = runCommand(colimaPath, arguments: ["list", "--json"])
-        guard listResult.exitCode == 0 else {
-            colimaStatus = ColimaStatus(isInstalled: true, isReachable: false, instances: [], error: listResult.error)
-            legacyVMRunning = false; systemVMRunning = false; appVMRunning = false
-            return
-        }
-
-        var instances: [ColimaInstance] = []
-        for line in listResult.output.components(separatedBy: .newlines) {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty, let data = t.data(using: .utf8) else { continue }
-            if let instance = try? JSONDecoder().decode(ColimaInstance.self, from: data) {
-                instances.append(instance)
-            }
-        }
-
-        colimaStatus = ColimaStatus(isInstalled: true, isReachable: true, instances: instances, error: nil)
-        legacyVMRunning = isColimaProfileRunning("darc")
-        systemVMRunning = isColimaProfileRunning("\(Self.colimaProfilePrefix)system")
-        appVMRunning = isColimaProfileRunning("\(Self.colimaProfilePrefix)apps")
-    }
-
     func updateSettings() {
         let path = Self.settingsPath
         guard FileManager.default.fileExists(atPath: path) else { settings = Settings(rawData: [:]); return }
@@ -404,50 +285,6 @@ final class ExternalState: @unchecked Sendable {
         } catch {
             print("[ExternalState] save settings failed: \(error)")
         }
-    }
-
-    func checkDependencies() -> DependencyStatus {
-        refreshChromeAvailability()
-        updateChromeProfiles()
-        return DependencyStatus(
-            colima: resolveExecutable(name: "colima") != nil,
-            chrome: preferredChrome(),
-            profiles: chromeProfiles.map(\.name)
-        )
-    }
-
-    var isColimaInstalled: Bool {
-        resolveExecutable(name: "colima") != nil
-    }
-
-    var isHomebrewInstalled: Bool {
-        resolveExecutable(name: "brew") != nil
-    }
-
-    func installColima() -> String? {
-        guard !isColimaInstalled else { return nil }
-        guard let brewPath = resolveExecutable(name: "brew") else {
-            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Launcher, or install Colima manually."
-        }
-
-        appendLog("launcher", "Colima not found; installing it with Homebrew")
-        let result = runCommand(brewPath, arguments: ["install", "colima"])
-        result.output.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
-        result.error.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
-
-        guard result.exitCode == 0 else {
-            let detail = (result.error.isEmpty ? result.output : result.error)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = detail.isEmpty ? "" : "\n\nHomebrew reported:\n\(String(detail.suffix(1200)))"
-            return "Homebrew could not install Colima. Run `brew install colima` in Terminal or install Colima manually.\(suffix)"
-        }
-
-        guard isColimaInstalled else {
-            return "Homebrew finished without an error, but Colima could not be found. Run `brew install colima` in Terminal or install Colima manually."
-        }
-
-        appendLog("launcher", "Colima installed successfully with Homebrew")
-        return nil
     }
 
     func launchBrowserStack() -> String? {
@@ -949,48 +786,6 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    func startLegacyVM() -> String? { runColimaLogged(arguments: ["start", "-p", "darc"]) }
-    func stopLegacyVM() -> String? { runColimaLogged(arguments: ["stop", "-p", "darc"]) }
-
-    func startColimaVM(profileName: String) -> String? {
-        if let err = ensureColimaProfile(profileName: profileName) { return err }
-        return runColimaLogged(arguments: ["start", "-p", "\(Self.colimaProfilePrefix)\(profileName)"])
-    }
-
-    func stopColimaVM(profileName: String) -> String? {
-        runColimaLogged(arguments: ["stop", "-p", "\(Self.colimaProfilePrefix)\(profileName)"])
-    }
-
-    private func ensureColimaProfile(profileName: String) -> String? {
-        let profileDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".colima", isDirectory: true)
-            .appendingPathComponent("\(Self.colimaProfilePrefix)\(profileName)", isDirectory: true)
-        let dest = profileDir.appendingPathComponent("colima.yaml")
-        let src = Self.appDataURL.appendingPathComponent("vms/\(profileName).yaml")
-
-        guard FileManager.default.fileExists(atPath: src.path) else { return "VM config not found: \(src.path)" }
-
-        do {
-            try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
-            try FileManager.default.copyItem(at: src, to: dest)
-            return nil
-        } catch {
-            return "Failed to prepare colima profile: \(error.localizedDescription)"
-        }
-    }
-
-    private func runColimaLogged(arguments: [String]) -> String? {
-        guard let colimaPath = resolveExecutable(name: "colima") else { return "Colima not found" }
-        let result = runCommand(colimaPath, arguments: arguments)
-        result.output.split(separator: "\n").forEach { appendLog("colima", String($0)) }
-        result.error.split(separator: "\n").forEach { appendLog("colima", String($0)) }
-        updateColimaStatus(force: true)
-        return result.exitCode == 0 ? nil : (result.error.isEmpty ? "colima command failed" : result.error)
-    }
-
-
-
     /// Returns the currently selected Chrome variant.  Defaults to "helium" when no variant is saved.
     /// Returns `nil` if the selected variant is not installed — never silently falls back to another browser.
     func selectedChrome() -> InstalledChrome? {
@@ -1040,22 +835,6 @@ final class ExternalState: @unchecked Sendable {
         return versionStr.split(separator: ".").first.flatMap { Int($0) }
     }
 
-    private func resolveExecutable(name: String) -> String? {
-        for c in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] where FileManager.default.isExecutableFile(atPath: c) {
-            return c
-        }
-        let which = runCommand("/usr/bin/which", arguments: [name])
-        if which.exitCode == 0 {
-            let t = which.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.isEmpty ? nil : t
-        }
-        return nil
-    }
-
-    private func isColimaProfileRunning(_ name: String) -> Bool {
-        colimaStatus.instances.contains { $0.name == name && $0.status == "Running" }
-    }
-
     private func getSubfolders(at path: String) -> [String] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return [] }
@@ -1063,16 +842,6 @@ final class ExternalState: @unchecked Sendable {
         return contents.filter { name in
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: "\(path)/\(name)", isDirectory: &isDir) && isDir.boolValue
-        }.sorted()
-    }
-
-    private func getYamlFiles(at path: String) -> [String] {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else { return [] }
-        guard let contents = try? fm.contentsOfDirectory(atPath: path) else { return [] }
-        return contents.filter {
-            let ext = ($0 as NSString).pathExtension.lowercased()
-            return ext == "yaml" || ext == "yml"
         }.sorted()
     }
 

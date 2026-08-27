@@ -11,7 +11,7 @@
 (version 1)
 
 ;; NOTE: Using (allow default) because (deny default) causes child processes
-;; (e.g., colima) to crash in dyld's "ignition" phase on macOS 26+.
+;; to crash in dyld's "ignition" phase on macOS 26+.
 ;; The ignition security system requires permissions we haven't identified yet.
 ;;
 ;; FIXME: Identify the specific permissions needed for child process execution
@@ -41,7 +41,7 @@
 ;; ============================================================================
 
 ;; --- Application Support data ---
-;; Allow reading and writing profiles, VMs, and settings
+;; Allow reading and writing profiles, downloaded assets, and settings
 ;; Using HOME parameter for portability
 (allow file-read* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
 (allow file-write* (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
@@ -50,12 +50,13 @@
 (allow process-exec (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
 (allow file-map-executable (subpath (string-append (param "HOME") "/Library/Application Support/dev.xe.computer")))
 
-;; --- Colima/Lima data directories ---
-;; Colima stores VM state, config, and sockets in ~/.colima and ~/.lima
-(allow file-read* (subpath (string-append (param "HOME") "/.colima")))
-(allow file-write* (subpath (string-append (param "HOME") "/.colima")))
-(allow file-read* (subpath (string-append (param "HOME") "/.lima")))
-(allow file-write* (subpath (string-append (param "HOME") "/.lima")))
+;; --- Disabled VM capability reference ---
+;; These rules were used by the previous Colima/Lima integration. Keep them
+;; commented out as a starting point if the launcher gains a small VM again.
+;; (allow file-read* (subpath (string-append (param "HOME") "/.colima")))
+;; (allow file-write* (subpath (string-append (param "HOME") "/.colima")))
+;; (allow file-read* (subpath (string-append (param "HOME") "/.lima")))
+;; (allow file-write* (subpath (string-append (param "HOME") "/.lima")))
 
 ;; --- Process execution: CLI tools ---
 (allow file-read* (subpath "/usr/bin"))
@@ -72,25 +73,23 @@
 (allow process-fork)
 (allow process-exec-interpreter)
 
-;; --- Unix sockets for colima/lima communication ---
-(allow network-outbound (local unix-socket))
-(allow network-inbound (local unix-socket))
+;; VM runtimes may communicate over local Unix sockets.
+;; (allow network-outbound (local unix-socket))
+;; (allow network-inbound (local unix-socket))
 
 ;; --- TCP network for dev server URL validation ---
 (allow network-outbound (local tcp))
 (allow network-inbound (local tcp))
 
-;; --- System info colima needs ---
-;; Colima/Go runtime needs system information
-(allow sysctl-read)
-(allow sysctl-write)
+;; VM runtime system information.
+;; (allow sysctl-read)
+;; (allow sysctl-write)
 
-;; --- Process info for Go runtime ---
-;; Go needs to read info about all processes for its runtime
-(allow process-info-pidinfo)
-(allow process-info-dirtycontrol)
-(allow process-info-rusage)
-(allow process-info-codesignature)
+;; VM runtime process information.
+;; (allow process-info-pidinfo)
+;; (allow process-info-dirtycontrol)
+;; (allow process-info-rusage)
+;; (allow process-info-codesignature)
 
 ;; --- Signal handling ---
 (allow signal (target self))

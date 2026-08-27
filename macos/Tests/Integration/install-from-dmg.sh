@@ -432,8 +432,6 @@ trap cleanup_mount EXIT
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "this test must run on macOS"
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
-command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
-
 if ! run_with_timeout 8 osascript \
     -e 'tell application "System Events" to tell first application process whose frontmost is true to get count of menu bars' \
     >/dev/null 2>&1; then
@@ -575,17 +573,6 @@ if pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null; then
     fail "a copy of the app is still running from the disk image"
 fi
 
-log "waiting for the app to reinstall Colima"
-deadline=$((SECONDS + 300))
-while (( SECONDS < deadline )); do
-    if brew list --formula colima >/dev/null 2>&1; then
-        break
-    fi
-    sleep 2
-done
-brew list --formula colima >/dev/null 2>&1 \
-    || fail "Colima was not installed during first-run setup"
-
 log "waiting for the managed Xe Computer app shim"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
@@ -626,7 +613,7 @@ app_management_denials="$(
     || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
 
 if [[ "$DEV_MODE" == true ]]; then
-    log "PASS: development DMG installation, relaunch, signature, quarantine, Colima, Xe Computer, and permission checks succeeded"
+    log "PASS: development DMG installation, relaunch, signature, quarantine, Xe Computer, and permission checks succeeded"
 else
-    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Colima, Xe Computer, and permission checks succeeded"
+    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Xe Computer, and permission checks succeeded"
 fi

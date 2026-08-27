@@ -18,35 +18,32 @@ Run this only in a disposable test account or VM. `cleanup.sh`:
 - removes `/Applications/Xe Launcher.app`;
 - moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
-- detaches stale Xe Launcher disk-image mounts; and
-- runs `brew uninstall --force colima` when Colima is installed.
+- detaches stale Xe Launcher disk-image mounts.
 
-The launched app installs Colima again as part of the behavior under test. On a
-fresh VM, `tccutil` may report that the bundle is not registered; the test treats
+On a fresh VM, `tccutil` may report that the bundle is not registered; the test treats
 that as an already-clean permission state and continues.
 
 ## One-time machine setup
 
 1. Use macOS 26.2 or newer. The app declares 26.2 as its minimum version.
-2. Install Homebrew and ensure `brew` is available to the test user's shell.
-3. Log into the test user at the macOS GUI. UI scripting cannot run from a
+2. Log into the test user at the macOS GUI. UI scripting cannot run from a
    machine that only has a pre-login or SSH session.
-4. Open **System Settings → Privacy & Security → Accessibility** and enable the
+3. Open **System Settings → Privacy & Security → Accessibility** and enable the
    program that launches the script. For a manual run this is normally
    Terminal, iTerm, or the terminal application used by the VM. For CI, enable
    the runner application or its UI-test launcher. After enabling it, completely
    quit and reopen that program so its new TCC authorization takes effect.
-5. On the first manual run, macOS may also ask whether that program may control
+4. On the first manual run, macOS may also ask whether that program may control
    **System Events**. Approve it. This grants the Apple Events permission used
    to click the install alert.
-6. Ensure the test user can run `sudo` to remove the existing application. A
+5. Ensure the test user can run `sudo` to remove the existing application. A
    dedicated local test account can cache credentials before running; a CI
    account should provide non-interactive sudo.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System
-Settings so first-run setup can continue and reinstall Colima. This interaction
-is part of the integration test, not a persistent one-time machine grant.
+Settings so first-run setup can continue. This interaction is part of the
+integration test, not a persistent one-time machine grant.
 
 Accessibility and Automation grants belong to the process that invokes
 `osascript`. If the test is invoked over SSH, granting Terminal locally does
@@ -118,8 +115,7 @@ newly installed copy if macOS shows it again, and verifies:
 - the expected bundle identifier;
 - strict code-signature validity;
 - successful Gatekeeper assessment in distribution mode;
-- removal of the installed bundle's quarantine attribute; and
-- first-run reinstallation of Colima through Homebrew;
+- removal of the installed bundle's quarantine attribute;
 - provisioning and launch of the managed Xe Computer app shim; and
 - no macOS App Management request or "prevented from modifying apps" warning.
 
@@ -154,7 +150,7 @@ cleanup, artifact/build preparation, and the test invocation:
   run: macos/Tests/Integration/about-version.sh
 ```
 
-The runner still needs the Accessibility, Automation, Homebrew, sudo, signing,
+The runner still needs the Accessibility, Automation, sudo, signing,
 and GUI-session prerequisites described above. If a hosted runner cannot grant
 those UI permissions, use a preconfigured self-hosted runner; do not create a
 second CI-specific test implementation.
