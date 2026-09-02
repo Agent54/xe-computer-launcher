@@ -14,10 +14,15 @@ CONTENTS = $(APP_BUNDLE)/Contents
 MACOS_DIR = $(CONTENTS)/MacOS
 RESOURCES = $(CONTENTS)/Resources
 FRAMEWORKS = $(CONTENTS)/Frameworks
+HELPERS = $(CONTENTS)/Helpers
 SPARKLE_FRAMEWORK = $(FRAMEWORKS)/Sparkle.framework
 BUILT_SPARKLE_FRAMEWORK = $(BUILD_DIR)/$(BUILD_CONFIG)/Sparkle.framework
+SMOL_RUNTIME_STAGE = $(BUILD_DIR)/smol-runtime/SmolRuntime
+SMOL_RUNTIME = $(HELPERS)/SmolRuntime
+SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
 DMG_NAME = $(APP_NAME).dmg
 ENTITLEMENTS = Sources/macos/Entitlements.plist
+SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
 
 # Set in .env or pass on the command line
 # DEVELOPER_ID ?=
@@ -26,7 +31,7 @@ ENTITLEMENTS = Sources/macos/Entitlements.plist
 NOTARY_PROFILE ?= notarytool-profile
 NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
 
-.PHONY: all clean build package sign-sparkle bundle run release release-sign check notarize dmg dev-dmg verify-sparkle
+.PHONY: all clean build smol-runtime package sign-sparkle sign-smol-runtime verify-smol-runtime bundle run release release-sign check notarize dmg dev-dmg verify-sparkle
 
 all: release
 
@@ -37,11 +42,15 @@ zip-helpers:
 build:
 	swift build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
 
-package: build
+smol-runtime:
+	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Scripts/prepare-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
+
+package: build smol-runtime
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
 	@mkdir -p "$(FRAMEWORKS)"
+	@mkdir -p "$(HELPERS)"
 	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/macos" "$(MACOS_DIR)/bin"
 	@cp Sources/macos/Info.plist "$(CONTENTS)/Info.plist"
 	@if [ -n "$(SPARKLE_PUBLIC_ED_KEY)" ]; then \
@@ -51,6 +60,7 @@ package: build
 	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
 	@rsync -a --delete "$(BUILT_SPARKLE_FRAMEWORK)/" "$(SPARKLE_FRAMEWORK)/"
+	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@echo "App package created at $(APP_BUNDLE)"
 
 # Sparkle contains several nested signed executables. Sign from the innermost
@@ -78,8 +88,15 @@ sign-sparkle:
 		--sign "$(SIGN_IDENTITY)" \
 		"$(SPARKLE_FRAMEWORK)"
 
+sign-smol-runtime:
+	@/bin/bash Scripts/sign-smol-runtime.sh "$(SMOL_RUNTIME)" "$(SIGN_IDENTITY)" "$(SMOL_ENTITLEMENTS)"
+
+verify-smol-runtime:
+	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)"
+
 bundle: package
 	@echo "Creating app bundle..."
+	@$(MAKE) SIGN_IDENTITY=- sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY=- sign-sparkle
 	@echo "Signing app bundle (ad-hoc)..."
 	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign - "$(APP_BUNDLE)"
@@ -97,6 +114,7 @@ release-sign: package
 			echo "ERROR: Set SPARKLE_PUBLIC_ED_KEY before creating a release build." >&2; \
 			exit 1; \
 		fi
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
 	@echo "Signing with Developer ID: $(DEVELOPER_ID)"
 	@codesign --force --options runtime --timestamp --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
@@ -113,6 +131,7 @@ verify-sparkle:
 # Pre-notarization checks (catches issues locally before slow upload)
 check: release-sign
 	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)" --release
+	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
 
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"

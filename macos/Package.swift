@@ -22,6 +22,7 @@ let package = Package(
             exclude: [
                 "Info.plist",
                 "Entitlements.plist",
+                "SmolVMEntitlements.plist",
                 "Resources/app.icns",
                 "Resources/status-icon.png",
                 "sandbox"

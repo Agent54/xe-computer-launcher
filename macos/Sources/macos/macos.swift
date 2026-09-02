@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
+    private var smolVMTestItem: NSMenuItem?
     private var newProfileItem: NSMenuItem?
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
@@ -240,6 +241,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
+        let smolVMTestItem = NSMenuItem(title: "Start SmolVM Docker Test…", action: #selector(startSmolVMTestAction), keyEquivalent: "")
+        menu.addItem(smolVMTestItem)
+        self.smolVMTestItem = smolVMTestItem
         let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
         systemLogsItem.isHidden = true
         menu.addItem(systemLogsItem)
@@ -636,6 +640,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chromeStopItem?.isEnabled = state.chromeRunning && !chromePending
         chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: false) ? .on : .off
 
+        let smolVMTestPending = pendingServices.contains("smolVMTest")
+        smolVMTestItem?.title = smolVMTestPending ? "Starting SmolVM Docker Test…" : "Start SmolVM Docker Test…"
+        smolVMTestItem?.isEnabled = !smolVMTestPending
+
         // Refresh chrome variant options (only adds items when Option key is held)
         if let chromeSubmenu {
             refreshChromeMenuOptions(in: chromeSubmenu)
@@ -845,6 +853,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showLogsAction() {
         logPanelController.present()
+    }
+
+    @objc private func startSmolVMTestAction() {
+        pendingServices.insert("smolVMTest")
+        renderMenuLabels()
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                pendingServices.remove("smolVMTest")
+                renderMenuLabels()
+            }
+
+            do {
+                let result = try await SmolVMTestSetup.start()
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "SmolVM test machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
+                )
+
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = "SmolVM Docker Test Is Running"
+                alert.informativeText = "Machine: \(result.machineName)\n\nDocker socket:\n\(result.dockerSocketURL.path)\n\nTest from Terminal:\nDOCKER_HOST=unix://\(result.dockerSocketURL.path) docker info"
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            } catch {
+                ExternalState.shared.appendLog("launcher", "SmolVM test failed: \(error.localizedDescription)")
+
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "SmolVM Docker Test Failed"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "OK")
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
     }
 
     @objc private func runAtStartupAction() {
