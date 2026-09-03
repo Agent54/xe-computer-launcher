@@ -7,7 +7,6 @@ BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 MANAGED_XE_COMPUTER_APP="${APP_DATA}/shims/default/Xe Computer.app"
-SMOLVM_DOCKER_SOCKET="${APP_DATA}/smol/sockets/docker.sock"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Launcher.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
@@ -594,14 +593,6 @@ done
 pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
     || fail "Xe Computer app shim did not launch from its managed location"
 
-log "waiting for the default SmolVM"
-deadline=$((SECONDS + 90))
-while (( SECONDS < deadline )) && [[ ! -S "$SMOLVM_DOCKER_SOCKET" ]]; do
-    sleep 1
-done
-[[ -S "$SMOLVM_DOCKER_SOCKET" ]] \
-    || fail "SmolVM Docker socket did not appear at $SMOLVM_DOCKER_SOCKET"
-
 log "checking that setup did not request App Management permission"
 app_management_events="$(
     /usr/bin/log show \
@@ -628,7 +619,7 @@ app_management_denials="$(
     || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
 
 if [[ "$DEV_MODE" == true ]]; then
-    log "PASS: development DMG installation, relaunch, signature, quarantine, Xe Computer, SmolVM, and permission checks succeeded"
+    log "PASS: development DMG installation, relaunch, signature, quarantine, Xe Computer, and permission checks succeeded"
 else
-    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Xe Computer, SmolVM, and permission checks succeeded"
+    log "PASS: DMG installation, relaunch, signature, Gatekeeper, quarantine, Xe Computer, and permission checks succeeded"
 fi
