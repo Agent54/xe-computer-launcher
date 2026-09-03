@@ -37,6 +37,6 @@ rsync -a \
     --exclude agent-rootfs \
     "$source_runtime/" "$resources_destination/"
 COPYFILE_DISABLE=1 /usr/bin/tar -cf "$resources_destination/agent-rootfs.tar" \
-    -C "$source_runtime" agent-rootfs
+    -C "$source_runtime/agent-rootfs" .
 
 echo "Installed SmolVM host code and guest resources into the app bundle"

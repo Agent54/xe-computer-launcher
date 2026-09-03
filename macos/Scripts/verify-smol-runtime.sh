@@ -29,6 +29,28 @@ for required in \
     }
 done
 
+rootfs_entries="$(tar -tf "$guest_runtime/agent-rootfs.tar" | sed 's#^\./##')"
+for required in sbin/init usr/local/bin/smolvm-agent bin/busybox; do
+    if ! grep -Fxq "$required" <<<"$rootfs_entries"; then
+        echo "agent rootfs archive is missing top-level $required" >&2
+        exit 1
+    fi
+done
+if grep -Eq '^agent-rootfs/' <<<"$rootfs_entries"; then
+    echo "agent rootfs archive must contain rootfs contents, not an agent-rootfs directory" >&2
+    exit 1
+fi
+for required in usr/local/bin/smolvm-agent bin/busybox; do
+    mode_bits="$(
+        tar -tvf "$guest_runtime/agent-rootfs.tar" |
+            awk -v expected="$required" '{ name = $NF; sub(/^\.\//, "", name); if (name == expected) { print $1; exit } }'
+    )"
+    if [[ -z "$mode_bits" || "$mode_bits" != *x* ]]; then
+        echo "agent rootfs archive has a missing or non-executable file: $required" >&2
+        exit 1
+    fi
+done
+
 [[ -L "$runtime/lib/libkrun.2.dylib" ]] || {
     echo "libkrun.2.dylib must remain a symlink" >&2
     exit 1
