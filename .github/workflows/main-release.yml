@@ -184,8 +184,15 @@ jobs:
           done
 
       - name: Build complete launcher DMG
+        env:
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN }}
         working-directory: macos
-        run: make
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose."
+            exit 1
+          fi
+          make
 
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release

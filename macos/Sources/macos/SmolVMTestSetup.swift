@@ -6,8 +6,8 @@ struct SmolVMTestResult: Sendable {
 }
 
 enum SmolVMTestSetup {
-    static let machineName = "xe-launcher-smolvm-test"
-    static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("test-docker.sock")
+    static let machineName = "xe-launcher-smolvm-test-compose-1"
+    static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("test-compose-1-docker.sock")
 
     static func start() async throws -> SmolVMTestResult {
         let client = SmolVMClient.shared
@@ -26,6 +26,7 @@ enum SmolVMTestSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "embedding-test",
+                    "dev.xe.computer.smolvm-release": "v1.13.0-compose_1",
                 ]
             )
             try await client.createMachine(spec)

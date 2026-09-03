@@ -84,15 +84,24 @@ jobs:
             --key-id "$NOTARY_KEY_ID" \
             --issuer "$NOTARY_ISSUER_ID"
 
-      - name: Ensure create-dmg is installed
+      - name: Install build dependencies
         run: |
-          if ! command -v create-dmg >/dev/null 2>&1; then
-            brew install create-dmg
-          fi
+          for formula in create-dmg gh; do
+            if ! brew list --formula "$formula" >/dev/null 2>&1; then
+              brew install "$formula"
+            fi
+          done
 
       - name: Build complete launcher DMG
+        env:
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN }}
         working-directory: macos
-        run: make
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose."
+            exit 1
+          fi
+          make
 
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release

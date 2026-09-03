@@ -61,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
     private var smolVMTestItem: NSMenuItem?
+    private var saveWindowPositionsItem: NSMenuItem?
+    private var restoreWindowPositionsItem: NSMenuItem?
     private var newProfileItem: NSMenuItem?
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
@@ -239,8 +241,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.newProfileItem = newProfileItem
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
+        let saveWindowPositionsItem = NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: "")
+        saveWindowPositionsItem.isHidden = true
+        menu.addItem(saveWindowPositionsItem)
+        self.saveWindowPositionsItem = saveWindowPositionsItem
+        let restoreWindowPositionsItem = NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: "")
+        restoreWindowPositionsItem.isHidden = true
+        menu.addItem(restoreWindowPositionsItem)
+        self.restoreWindowPositionsItem = restoreWindowPositionsItem
         let smolVMTestItem = NSMenuItem(title: "Start SmolVM Docker Test…", action: #selector(startSmolVMTestAction), keyEquivalent: "")
         menu.addItem(smolVMTestItem)
         self.smolVMTestItem = smolVMTestItem
@@ -589,6 +597,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         darcOverrideItem?.isHidden = !optionHeld
         darcOverrideSeparator?.isHidden = !optionHeld
         newProfileItem?.isHidden = !optionHeld
+        saveWindowPositionsItem?.isHidden = !optionHeld
+        restoreWindowPositionsItem?.isHidden = !optionHeld
         systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
