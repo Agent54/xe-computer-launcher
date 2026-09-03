@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Sparkle
 
 @main
@@ -60,7 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
-    private var smolVMTestItem: NSMenuItem?
     private var saveWindowPositionsItem: NSMenuItem?
     private var restoreWindowPositionsItem: NSMenuItem?
     private var newProfileItem: NSMenuItem?
@@ -108,6 +108,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startBackgroundInitialization() {
+        Task {
+            do {
+                let result = try await SmolVMSetup.start()
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "SmolVM machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
+                )
+            } catch {
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "SmolVM startup failed: \(error.localizedDescription)"
+                )
+            }
+        }
+
         // Do expensive init off main thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -148,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         renderMenuLabels()
-        updateOptionOnlyMenuItems(optionHeld: NSEvent.modifierFlags.contains(.option))
+        updateOptionOnlyMenuItems(optionHeld: isOptionKeyHeld)
 
         // The Dock appends its own native Quit command. Return a snapshot of
         // the status menu without our duplicate Quit item.
@@ -182,9 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isPreparingForTermination = true
 
         let state = ExternalState.shared
-        state.setBoolSetting("darc_was_running", state.darcRunning)
-        state.setBoolSetting("chrome_was_running", state.chromeRunning)
-        state.stopChrome()  // stopChrome calls stopDarc internally
+        // The Xe Computer shim exits with its host browser.
+        state.stopChrome()
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -249,9 +263,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         restoreWindowPositionsItem.isHidden = true
         menu.addItem(restoreWindowPositionsItem)
         self.restoreWindowPositionsItem = restoreWindowPositionsItem
-        let smolVMTestItem = NSMenuItem(title: "Start SmolVM Docker Test…", action: #selector(startSmolVMTestAction), keyEquivalent: "")
-        menu.addItem(smolVMTestItem)
-        self.smolVMTestItem = smolVMTestItem
         let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
         systemLogsItem.isHidden = true
         menu.addItem(systemLogsItem)
@@ -270,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
-        bindCapslockItem = NSMenuItem(title: "Bind to Capslock", action: #selector(bindCapslockAction), keyEquivalent: "")
+        bindCapslockItem = NSMenuItem(title: "Bind to Caps Lock", action: #selector(bindCapslockAction), keyEquivalent: "")
         hideDockIconItem = NSMenuItem(title: "Hide Dock Icon", action: #selector(hideDockIconAction), keyEquivalent: "")
         if let runAtStartupItem { menu.addItem(runAtStartupItem) }
         if let bindCapslockItem { menu.addItem(bindCapslockItem) }
@@ -292,6 +303,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var chromeVariantSeparator: NSMenuItem?
 
+    /// Read modifier state for the whole login session. Dock-menu requests are
+    /// delivered across processes and do not necessarily have a current NSEvent
+    /// in this app, unlike clicks on the status item.
+    private var isOptionKeyHeld: Bool {
+        CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate)
+    }
+
     private func refreshChromeMenuOptions(in submenu: NSMenu) {
         // Remove old variant items
         for old in chromeVariantItems { submenu.removeItem(old) }
@@ -300,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let state = ExternalState.shared
         let minVersion = 145
-        let showVariants = NSEvent.modifierFlags.contains(.option)
+        let showVariants = isOptionKeyHeld
 
         // Only scan all Chrome variants once when Option key is first pressed
         if showVariants && !chromeVariantsScanned {
@@ -552,7 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         renderMenuLabels()
-        let optionHeld = NSEvent.modifierFlags.contains(.option)
+        let optionHeld = isOptionKeyHeld
         lastOptionKeyState = optionHeld
         updateOptionOnlyMenuItems(optionHeld: optionHeld)
         startStateRefreshLoop()
@@ -563,7 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let optionHeld = NSEvent.modifierFlags.contains(.option)
+                let optionHeld = self.isOptionKeyHeld
                 if optionHeld != self.lastOptionKeyState {
                     self.lastOptionKeyState = optionHeld
                     if let chromeSubmenu = self.chromeSubmenu {
@@ -650,10 +668,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chromeStopItem?.isEnabled = state.chromeRunning && !chromePending
         chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: false) ? .on : .off
 
-        let smolVMTestPending = pendingServices.contains("smolVMTest")
-        smolVMTestItem?.title = smolVMTestPending ? "Starting SmolVM Docker Test…" : "Start SmolVM Docker Test…"
-        smolVMTestItem?.isEnabled = !smolVMTestPending
-
         // Refresh chrome variant options (only adds items when Option key is held)
         if let chromeSubmenu {
             refreshChromeMenuOptions(in: chromeSubmenu)
@@ -684,14 +698,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func darcStartAction() {
         runServiceAction("darc") {
             _ = ExternalState.shared.startDarc()
-            ExternalState.shared.setBoolSetting("darc_was_running", true)
         }
     }
 
     @objc private func darcStopAction() {
         runServiceAction("darc") {
             ExternalState.shared.stopDarc()
-            ExternalState.shared.setBoolSetting("darc_was_running", false)
         }
     }
 
@@ -831,15 +843,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func chromeStartAction() {
         runServiceAction("chrome") {
             _ = ExternalState.shared.startChrome()
-            ExternalState.shared.setBoolSetting("chrome_was_running", true)
         }
     }
 
     @objc private func chromeStopAction() {
         runServiceAction("chrome") {
             ExternalState.shared.stopChrome()
-            ExternalState.shared.setBoolSetting("chrome_was_running", false)
-            ExternalState.shared.setBoolSetting("darc_was_running", false)
         }
     }
 
@@ -863,45 +872,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showLogsAction() {
         logPanelController.present()
-    }
-
-    @objc private func startSmolVMTestAction() {
-        pendingServices.insert("smolVMTest")
-        renderMenuLabels()
-
-        Task { [weak self] in
-            guard let self else { return }
-            defer {
-                pendingServices.remove("smolVMTest")
-                renderMenuLabels()
-            }
-
-            do {
-                let result = try await SmolVMTestSetup.start()
-                ExternalState.shared.appendLog(
-                    "launcher",
-                    "SmolVM test machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
-                )
-
-                let alert = NSAlert()
-                alert.alertStyle = .informational
-                alert.messageText = "SmolVM Docker Test Is Running"
-                alert.informativeText = "Machine: \(result.machineName)\n\nDocker socket:\n\(result.dockerSocketURL.path)\n\nTest from Terminal:\nDOCKER_HOST=unix://\(result.dockerSocketURL.path) docker info"
-                alert.addButton(withTitle: "OK")
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
-            } catch {
-                ExternalState.shared.appendLog("launcher", "SmolVM test failed: \(error.localizedDescription)")
-
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "SmolVM Docker Test Failed"
-                alert.informativeText = error.localizedDescription
-                alert.addButton(withTitle: "OK")
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
-            }
-        }
     }
 
     @objc private func runAtStartupAction() {
@@ -1022,11 +992,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSApp.activate(ignoringOtherApps: true)
         let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            ExternalState.shared.killZombieProcesses(zombies)
-            // Wait briefly for processes to exit
-            Thread.sleep(forTimeInterval: 1.0)
-        }
+        guard response == .alertFirstButtonReturn else { return }
+
+        ExternalState.shared.killZombieProcesses(zombies)
     }
 
     // MARK: - Background state refresh

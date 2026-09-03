@@ -25,11 +25,19 @@ ENTITLEMENTS = Sources/macos/Entitlements.plist
 SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
 
 # Set in .env or pass on the command line
+# DEVELOPMENT_ID ?=
 # DEVELOPER_ID ?=
 # APPLE_ID ?=
 # TEAM_ID ?=
 NOTARY_PROFILE ?= notarytool-profile
 NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
+
+# Local bundles need a stable signing identity so macOS can recognize rebuilt
+# versions as the same app and retain privacy permissions. Prefer an explicitly
+# configured identity, then the first Apple Development identity in the user's
+# keychain, and use ad-hoc signing only when neither is available.
+DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
+DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
 .PHONY: all clean build smol-runtime package sign-sparkle sign-smol-runtime verify-smol-runtime bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
@@ -96,10 +104,10 @@ verify-smol-runtime:
 
 bundle: package
 	@echo "Creating app bundle..."
-	@$(MAKE) SIGN_IDENTITY=- sign-smol-runtime
-	@$(MAKE) SIGN_IDENTITY=- sign-sparkle
-	@echo "Signing app bundle (ad-hoc)..."
-	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign - "$(APP_BUNDLE)"
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
+	@echo "Signing app bundle with: $(DEVELOPMENT_SIGN_IDENTITY)"
+	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPMENT_SIGN_IDENTITY)" "$(APP_BUNDLE)"
 	@echo "App bundle created at $(APP_BUNDLE)"
 
 run: bundle

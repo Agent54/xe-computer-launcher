@@ -157,10 +157,10 @@ final class ExternalState: @unchecked Sendable {
         return identifierMatches.count == 1 ? identifierMatches[0] : nil
     }
     var chromeRunning: Bool {
-        // Check posix_spawn'd browser pid
+        // The browser and its helpers are spawned as a dedicated process group.
         if _browserPid > 0 {
-            // kill(pid, 0) checks if process exists without sending a signal
-            if kill(_browserPid, 0) == 0 { return true }
+            // A negative PID addresses the complete process group.
+            if kill(-_browserPid, 0) == 0 { return true }
             _browserPid = 0
         }
         return isSubprocessRunning("browser")
@@ -288,9 +288,7 @@ final class ExternalState: @unchecked Sendable {
     }
 
     func launchBrowserStack() -> String? {
-        if boolSetting("chrome_was_running", default: true), let err = startChrome() { return err }
-        if boolSetting("darc_was_running", default: true), let err = startDarc() { return err }
-        return nil
+        startDarc()
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
@@ -332,7 +330,7 @@ final class ExternalState: @unchecked Sendable {
         // application (not as a child process of the launcher). This matches
         // the behaviour of launching from Finder / terminal `open`.
         let config = NSWorkspace.OpenConfiguration()
-        config.activates = false
+        config.activates = true
         let semaphore = DispatchSemaphore(value: 0)
         class Box: @unchecked Sendable { var error: String? }
         let box = Box()
@@ -355,15 +353,6 @@ final class ExternalState: @unchecked Sendable {
         let pid = darcApp?.processIdentifier ?? -1
         appendLog("launcher", "Xe Computer started via NSWorkspace (isRunning=\(running), pid=\(pid))")
         print("[ExternalState] Xe Computer started, isRunning=\(running)")
-
-        // Bring the Darc app to the foreground (silently — ignore if app terminated)
-        if let app = darcApp, !app.isTerminated {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                if let ref = self?.darcApp, !ref.isTerminated {
-                    ref.activate()
-                }
-            }
-        }
 
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {
@@ -698,11 +687,6 @@ final class ExternalState: @unchecked Sendable {
         if let process = subprocesses[name] {
             process.terminate()
             subprocesses.removeValue(forKey: name)
-        }
-        // Also kill posix_spawn'd browser process
-        if name == "browser" && _browserPid > 0 {
-            kill(_browserPid, SIGTERM)
-            _browserPid = 0
         }
     }
 

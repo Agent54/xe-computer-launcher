@@ -217,10 +217,42 @@ extension ExternalState {
     }
 
     func stopChrome() {
-        let wasRunning = chromeRunning
-        terminateSubprocess("browser")
+        let wasRunning = _browserPid > 0
+        terminateBrowserProcessGroup()
         appendLog("launcher", "Chrome stopped (wasRunning=\(wasRunning))")
         print("[ExternalState] Chrome stopped (wasRunning=\(wasRunning))")
+    }
+
+    private func terminateBrowserProcessGroup() {
+        let processGroup = _browserPid
+        guard processGroup > 0 else { return }
+
+        cdpWriteHandle?.closeFile()
+        cdpReadHandle?.closeFile()
+        cdpWriteHandle = nil
+        cdpReadHandle = nil
+
+        kill(-processGroup, SIGTERM)
+        waitForBrowserProcessGroupToExit(processGroup, timeout: 3.0)
+
+        if kill(-processGroup, 0) == 0 {
+            kill(-processGroup, SIGKILL)
+            waitForBrowserProcessGroupToExit(processGroup, timeout: 2.0)
+        }
+
+        if _browserPid == processGroup {
+            _browserPid = 0
+        }
+    }
+
+    private func waitForBrowserProcessGroupToExit(
+        _ processGroup: pid_t,
+        timeout: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline && kill(-processGroup, 0) == 0 {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     /// Provision the app shim in the background.
@@ -419,6 +451,17 @@ extension ExternalState {
             ])
         }
 
+        // Own the browser and all helpers as one process group. This lets app
+        // termination stop the complete browser tree before Xe Launcher exits.
+        let processGroupResult = posix_spawnattr_setpgroup(&attrs, 0)
+        let spawnFlagsResult = posix_spawnattr_setflags(&attrs, Int16(POSIX_SPAWN_SETPGROUP))
+        guard processGroupResult == 0, spawnFlagsResult == 0 else {
+            let errorCode = processGroupResult != 0 ? processGroupResult : spawnFlagsResult
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errorCode), userInfo: [
+                NSLocalizedDescriptionKey: "Could not create browser process group: \(String(cString: strerror(errorCode)))"
+            ])
+        }
+
         var pid: pid_t = 0
         let spawnResult = cArgs.withUnsafeBufferPointer { argsBuf in
             cEnv.withUnsafeBufferPointer { envBuf in
@@ -461,12 +504,19 @@ extension ExternalState {
         // Store the pid for terminateSubprocess to use
         appendLog("launcher", "\(source) spawned via posix_spawn (pid=\(pid))")
 
+        // Record ownership before monitoring so even a browser that exits
+        // immediately cannot leave a stale PID behind.
+        _browserPid = pid
+
         // Monitor child exit in background
         let capturedPid = pid
         DispatchQueue.global().async { [weak self] in
             var status: Int32 = 0
             waitpid(capturedPid, &status, 0)
             outputPipe.fileHandleForReading.readabilityHandler = nil
+            if self?._browserPid == capturedPid {
+                self?._browserPid = 0
+            }
             let exitCode = (status & 0x7f) == 0 ? Int32((status >> 8) & 0xff) : Int32(-1)
             self?.appendLog(source, "Process exited with code \(exitCode)")
             self?.appendLog("launcher", "\(source) process exited (code=\(exitCode))")
@@ -474,8 +524,6 @@ extension ExternalState {
         }
 
         // We can't return a real Process object since we used posix_spawn directly.
-        // Store the pid directly for kill management.
-        _browserPid = pid
         return process  // Placeholder — terminateSubprocess should use _browserPid
     }
 }
@@ -575,15 +623,30 @@ extension ExternalState {
     func killZombieProcesses(_ zombies: [ZombieProcess]) {
         for z in zombies {
             kill(z.pid, SIGTERM)
-            appendLog("launcher", "Killed zombie \(z.name) (pid=\(z.pid))")
+            appendLog("launcher", "Terminating zombie \(z.name) (pid=\(z.pid))")
         }
-        // Give them a moment, then SIGKILL any survivors
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            for z in zombies {
-                if kill(z.pid, 0) == 0 {
-                    kill(z.pid, SIGKILL)
-                }
+
+        waitForZombieProcessesToExit(zombies, timeout: 2.0)
+
+        let survivors = zombies.filter { kill($0.pid, 0) == 0 }
+        for z in survivors {
+            kill(z.pid, SIGKILL)
+            appendLog("launcher", "Force-terminated zombie \(z.name) (pid=\(z.pid))")
+        }
+
+        waitForZombieProcessesToExit(survivors, timeout: 2.0)
+    }
+
+    private func waitForZombieProcessesToExit(
+        _ processes: [ZombieProcess],
+        timeout: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if processes.allSatisfy({ kill($0.pid, 0) != 0 }) {
+                return
             }
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
 }
