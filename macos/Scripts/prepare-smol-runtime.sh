@@ -73,10 +73,9 @@ verify_asset() {
     fi
 }
 
-verify_compose_boot_files() {
+verify_compose_agent_boot() {
     local path="$1"
     local listing
-    local required
     local mode
 
     # A .smolmachine may have data after its tar payload, which can make the
@@ -87,23 +86,35 @@ verify_compose_boot_files() {
         set +o pipefail
         /usr/bin/tar -xOf "$path" agent-rootfs.tar 2>/dev/null |
             /usr/bin/tar -tvf - 2>/dev/null |
-            awk '{ name = $NF; sub(/^\.\//, "", name); if (name == "bin/busybox" || name == "usr/local/bin/smolvm-agent") { print $1, name } }'
+            awk '{
+                line = $0
+                if (line ~ /[[:space:]](\.\/)?sbin\/init -> \/usr\/local\/bin\/smolvm-agent$/) {
+                    print "link", "sbin/init"
+                }
+                name = $NF
+                sub(/^\.\//, "", name)
+                if (name == "usr/local/bin/smolvm-agent") {
+                    print $1, name
+                }
+            }'
     )"
 
-    for required in bin/busybox usr/local/bin/smolvm-agent; do
-        mode="$(printf '%s\n' "$listing" | awk -v expected="$required" '$2 == expected { print $1; exit }')"
-        if [[ -z "$mode" || "$mode" != *x* ]]; then
-            echo "Compose image has a missing or non-executable boot file: $required" >&2
-            exit 1
-        fi
-    done
+    if ! grep -Fxq "link sbin/init" <<<"$listing"; then
+        echo "Compose image does not link sbin/init to /usr/local/bin/smolvm-agent" >&2
+        exit 1
+    fi
+    mode="$(printf '%s\n' "$listing" | awk '$2 == "usr/local/bin/smolvm-agent" { print $1; exit }')"
+    if [[ -z "$mode" || "$mode" != *x* ]]; then
+        echo "Compose image has a missing or non-executable usr/local/bin/smolvm-agent" >&2
+        exit 1
+    fi
 }
 
 runtime_path="$(resolve_asset "$runtime_asset")"
 compose_path="$(resolve_asset "$compose_asset")"
 verify_asset "$runtime_path" "$SMOLVM_RUNTIME_SHA256"
 verify_asset "$compose_path" "$SMOLVM_COMPOSE_SHA256"
-verify_compose_boot_files "$compose_path"
+verify_compose_agent_boot "$compose_path"
 
 empty_dir="$macos_dir/.build/empty"
 mkdir -p "$destination" "$empty_dir"

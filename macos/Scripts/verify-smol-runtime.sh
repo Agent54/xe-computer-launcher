@@ -29,8 +29,8 @@ for required in \
     }
 done
 
-rootfs_entries="$(tar -tf "$guest_runtime/agent-rootfs.tar" | sed 's#^\./##')"
-for required in sbin/init usr/local/bin/smolvm-agent bin/busybox; do
+rootfs_entries="$(/usr/bin/tar -tf "$guest_runtime/agent-rootfs.tar" | sed 's#^\./##')"
+for required in sbin/init usr/local/bin/smolvm-agent; do
     if ! grep -Fxq "$required" <<<"$rootfs_entries"; then
         echo "agent rootfs archive is missing top-level $required" >&2
         exit 1
@@ -40,16 +40,19 @@ if grep -Eq '^agent-rootfs/' <<<"$rootfs_entries"; then
     echo "agent rootfs archive must contain rootfs contents, not an agent-rootfs directory" >&2
     exit 1
 fi
-for required in usr/local/bin/smolvm-agent bin/busybox; do
-    mode_bits="$(
-        tar -tvf "$guest_runtime/agent-rootfs.tar" |
-            awk -v expected="$required" '{ name = $NF; sub(/^\.\//, "", name); if (name == expected) { print $1; exit } }'
-    )"
-    if [[ -z "$mode_bits" || "$mode_bits" != *x* ]]; then
-        echo "agent rootfs archive has a missing or non-executable file: $required" >&2
-        exit 1
-    fi
-done
+rootfs_verbose="$(/usr/bin/tar -tvf "$guest_runtime/agent-rootfs.tar")"
+if ! grep -Eq '[[:space:]](\./)?sbin/init -> /usr/local/bin/smolvm-agent$' <<<"$rootfs_verbose"; then
+    echo "agent rootfs archive does not link sbin/init to /usr/local/bin/smolvm-agent" >&2
+    exit 1
+fi
+mode_bits="$(
+    awk '{ name = $NF; sub(/^\.\//, "", name); if (name == "usr/local/bin/smolvm-agent") { print $1; exit } }' \
+        <<<"$rootfs_verbose"
+)"
+if [[ -z "$mode_bits" || "$mode_bits" != *x* ]]; then
+    echo "agent rootfs archive has a missing or non-executable usr/local/bin/smolvm-agent" >&2
+    exit 1
+fi
 
 [[ -L "$runtime/lib/libkrun.2.dylib" ]] || {
     echo "libkrun.2.dylib must remain a symlink" >&2
