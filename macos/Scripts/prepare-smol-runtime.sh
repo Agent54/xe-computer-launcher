@@ -81,11 +81,13 @@ verify_compose_boot_files() {
 
     # A .smolmachine may have data after its tar payload, which can make the
     # outer tar return non-zero even though agent-rootfs.tar was read correctly.
+    # This is a Darwin-only bundle, so use the system bsdtar rather than a
+    # Homebrew/GNU tar that may appear earlier in a CI runner's PATH.
     listing="$(
         set +o pipefail
-        tar -xOf "$path" agent-rootfs.tar 2>/dev/null |
-            tar -tvf - 2>/dev/null |
-            awk '$NF == "bin/busybox" || $NF == "usr/local/bin/smolvm-agent" { print $1, $NF }'
+        /usr/bin/tar -xOf "$path" agent-rootfs.tar 2>/dev/null |
+            /usr/bin/tar -tvf - 2>/dev/null |
+            awk '{ name = $NF; sub(/^\.\//, "", name); if (name == "bin/busybox" || name == "usr/local/bin/smolvm-agent") { print $1, name } }'
     )"
 
     for required in bin/busybox usr/local/bin/smolvm-agent; do
@@ -106,7 +108,7 @@ verify_compose_boot_files "$compose_path"
 empty_dir="$macos_dir/.build/empty"
 mkdir -p "$destination" "$empty_dir"
 rsync -a --delete "$empty_dir/" "$destination/"
-tar -xzf "$runtime_path" --strip-components 1 -C "$destination"
+/usr/bin/tar -xzf "$runtime_path" --strip-components 1 -C "$destination"
 runtime_source="$destination"
 
 for required in \
