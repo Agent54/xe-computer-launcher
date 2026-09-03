@@ -171,10 +171,11 @@ dmg: notarize
 	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
 	@create-dmg \
 		--volname "$(APP_NAME)" \
-		--window-pos 510 370 \
-		--window-size 380 340 \
+		--window-pos 580 370 \
+		--window-size 640 340 \
 		--icon-size 100 \
-		--icon "$(APP_NAME).app" 180 140 \
+		--icon "$(APP_NAME).app" 170 140 \
+		--app-drop-link 470 140 \
 		--hide-extension "$(APP_NAME).app" \
 		--codesign "$(DEVELOPER_ID)" \
 		"$(DIST_DIR)/$(DMG_NAME)" \
@@ -206,10 +207,11 @@ dev-dmg:
 	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
 	@create-dmg \
 		--volname "$(APP_NAME)" \
-		--window-pos 510 370 \
-		--window-size 380 340 \
+		--window-pos 580 370 \
+		--window-size 640 340 \
 		--icon-size 100 \
-		--icon "$(APP_NAME).app" 180 140 \
+		--icon "$(APP_NAME).app" 170 140 \
+		--app-drop-link 470 140 \
 		--hide-extension "$(APP_NAME).app" \
 		"$(DIST_DIR)/$(DMG_NAME)" \
 		"$(APP_BUNDLE)"

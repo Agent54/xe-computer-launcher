@@ -459,6 +459,12 @@ volume_name="${volume_relative_path%%/*}"
 MOUNT_POINT="/Volumes/${volume_name}"
 log "found source app at $SOURCE_APP"
 
+log "verifying the Applications drag-and-drop target"
+[[ -L "$MOUNT_POINT/Applications" ]] \
+    || fail "DMG does not contain an Applications folder link"
+[[ "$(readlink "$MOUNT_POINT/Applications")" == "/Applications" ]] \
+    || fail "DMG Applications link does not target /Applications"
+
 log "verifying source signature"
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP" \
     || fail "source app has an invalid code signature: $SOURCE_APP"

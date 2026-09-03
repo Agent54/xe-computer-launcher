@@ -11,6 +11,7 @@ enum ApplicationInstaller {
 
     private enum InstallResult {
         case installed(URL)
+        case existing(URL)
         case declined
         case failed(Error)
     }
@@ -92,7 +93,7 @@ enum ApplicationInstaller {
         let systemResult = await install(in: systemApplications)
 
         switch systemResult {
-        case .installed(let destination):
+        case .installed(let destination), .existing(let destination):
             relaunchInstalledCopy(at: destination) {
                 continueFromDiskImage(onContinueFromDiskImage)
             }
@@ -101,7 +102,7 @@ enum ApplicationInstaller {
         case .failed(let error) where isPermissionError(error):
             let userResult = await offerCurrentUserInstallation()
             switch userResult {
-            case .installed(let destination):
+            case .installed(let destination), .existing(let destination):
                 relaunchInstalledCopy(at: destination) {
                     continueFromDiskImage(onContinueFromDiskImage)
                 }
@@ -142,8 +143,9 @@ enum ApplicationInstaller {
         )
 
         if FileManager.default.fileExists(atPath: destination.path) {
-            showExistingInstallation(at: destination)
-            return .declined
+            return showExistingInstallation(at: destination)
+                ? .existing(destination)
+                : .declined
         }
 
         do {
@@ -153,16 +155,20 @@ enum ApplicationInstaller {
         }
     }
 
-    private static func showExistingInstallation(at destination: URL) {
+    private static func showExistingInstallation(at destination: URL) -> Bool {
         let alert = NSAlert()
-        alert.alertStyle = .warning
+        alert.alertStyle = .informational
         alert.messageText = "Xe Launcher Is Already Installed"
-        alert.informativeText = "An app already exists at \(destination.path). It will not be replaced. Remove it manually before installing this version, or continue running this copy from the disk image."
+        alert.informativeText = "An app already exists at \(destination.path). Open the installed copy to keep using its existing permissions, or continue running this copy from the disk image."
+        alert.addButton(withTitle: "Open Installed App")
         alert.addButton(withTitle: "Run from Disk Image")
         alert.addButton(withTitle: "Show in Finder")
-        if alert.runModal() == .alertSecondButtonReturn {
+
+        let response = alert.runModal()
+        if response == .alertThirdButtonReturn {
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         }
+        return response == .alertFirstButtonReturn
     }
 
     private static func copyCurrentBundle(to destination: URL) async throws -> URL {
