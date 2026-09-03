@@ -31,7 +31,7 @@ SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
 NOTARY_PROFILE ?= notarytool-profile
 NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
 
-.PHONY: all clean build smol-runtime package sign-sparkle sign-smol-runtime verify-smol-runtime bundle run release release-sign check notarize dmg dev-dmg verify-sparkle
+.PHONY: all clean build smol-runtime package sign-sparkle sign-smol-runtime verify-smol-runtime bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
@@ -181,6 +181,18 @@ dmg: notarize
 		"$(APP_BUNDLE)"
 	@echo "DMG created at $(DIST_DIR)/$(DMG_NAME)"
 
+# Notarize the final signed container as well as the app it contains. This gives
+# Gatekeeper a stapled ticket when assessing the DMG before it is mounted.
+notarize-dmg: dmg
+	@echo "Submitting signed DMG for notarization..."
+	@xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)" \
+		--keychain-profile "$(NOTARY_PROFILE)" $(NOTARY_KEYCHAIN_ARG) \
+		--wait
+	@echo "Stapling DMG notarization ticket..."
+	@xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)"
+	@xcrun stapler validate "$(DIST_DIR)/$(DMG_NAME)"
+	@echo "DMG notarization complete!"
+
 # Development DMG: debug build, ad-hoc app signature, no Developer ID or
 # notarization. It intentionally uses the same create-dmg layout as releases.
 dev-dmg:
@@ -204,7 +216,7 @@ dev-dmg:
 	@echo "Development DMG created at $(DIST_DIR)/$(DMG_NAME)"
 
 # Full release: sign, notarize, create DMG
-release: dmg
+release: notarize-dmg
 	@echo "Release build complete!"
 	@echo "  App: $(APP_BUNDLE)"
 	@echo "  DMG: $(DIST_DIR)/$(DMG_NAME)"
