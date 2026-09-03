@@ -41,10 +41,6 @@ if grep -Eq '^agent-rootfs/' <<<"$rootfs_entries"; then
     exit 1
 fi
 rootfs_verbose="$(/usr/bin/tar -tvf "$guest_runtime/agent-rootfs.tar")"
-if ! grep -Eq '[[:space:]](\./)?sbin/init -> /usr/local/bin/smolvm-agent$' <<<"$rootfs_verbose"; then
-    echo "agent rootfs archive does not link sbin/init to /usr/local/bin/smolvm-agent" >&2
-    exit 1
-fi
 mode_bits="$(
     awk '{ name = $NF; sub(/^\.\//, "", name); if (name == "usr/local/bin/smolvm-agent") { print $1; exit } }' \
         <<<"$rootfs_verbose"

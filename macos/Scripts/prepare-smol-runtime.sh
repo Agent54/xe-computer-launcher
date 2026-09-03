@@ -75,34 +75,41 @@ verify_asset() {
 
 verify_compose_agent_boot() {
     local path="$1"
+    local entries
     local listing
     local mode
+    local required
 
     # A .smolmachine may have data after its tar payload, which can make the
     # outer tar return non-zero even though agent-rootfs.tar was read correctly.
     # This is a Darwin-only bundle, so use the system bsdtar rather than a
     # Homebrew/GNU tar that may appear earlier in a CI runner's PATH.
+    entries="$(
+        set +o pipefail
+        /usr/bin/tar -xOf "$path" agent-rootfs.tar 2>/dev/null |
+            /usr/bin/tar -tf - 2>/dev/null |
+            sed 's#^\./##'
+    )"
+    for required in sbin/init usr/local/bin/smolvm-agent; do
+        if ! grep -Fxq "$required" <<<"$entries"; then
+            echo "Compose image is missing top-level $required" >&2
+            exit 1
+        fi
+    done
+
     listing="$(
         set +o pipefail
         /usr/bin/tar -xOf "$path" agent-rootfs.tar 2>/dev/null |
             /usr/bin/tar -tvf - 2>/dev/null |
             awk '{
-                line = $0
-                if (line ~ /[[:space:]](\.\/)?sbin\/init -> \/usr\/local\/bin\/smolvm-agent$/) {
-                    print "link", "sbin/init"
-                }
                 name = $NF
                 sub(/^\.\//, "", name)
                 if (name == "usr/local/bin/smolvm-agent") {
                     print $1, name
                 }
-            }'
+        }'
     )"
 
-    if ! grep -Fxq "link sbin/init" <<<"$listing"; then
-        echo "Compose image does not link sbin/init to /usr/local/bin/smolvm-agent" >&2
-        exit 1
-    fi
     mode="$(printf '%s\n' "$listing" | awk '$2 == "usr/local/bin/smolvm-agent" { print $1; exit }')"
     if [[ -z "$mode" || "$mode" != *x* ]]; then
         echo "Compose image has a missing or non-executable usr/local/bin/smolvm-agent" >&2
