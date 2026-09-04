@@ -74,7 +74,7 @@ extension ExternalState {
             "--user-data-dir=\(profileDir.path)",
             "--remote-debugging-pipe"
         ] + Self.chromeFlags
-        if boolSetting("chrome_headless", default: false) {
+        if boolSetting("chrome_headless", default: true) {
             args.append("--headless=new")
             // Override User-Agent globally (including workers) to remove "HeadlessChrome"
             let majorVersion = chrome.version ?? 145
@@ -126,7 +126,7 @@ extension ExternalState {
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
             // Apply anti-detection patches when running in headless mode
-            if boolSetting("chrome_headless", default: false) {
+            if boolSetting("chrome_headless", default: true) {
                 preventDetection()
             }
 

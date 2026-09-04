@@ -711,7 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         darcStopItem?.isEnabled = state.darcRunning && !darcPending
         chromeStartItem?.isEnabled = !state.chromeRunning && !chromePending
         chromeStopItem?.isEnabled = state.chromeRunning && !chromePending
-        chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: false) ? .on : .off
+        chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: true) ? .on : .off
 
         // Refresh chrome variant options (only adds items when Option key is held)
         if let chromeSubmenu {
@@ -898,7 +898,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func chromeHeadlessAction() {
-        let current = ExternalState.shared.boolSetting("chrome_headless", default: false)
+        let current = ExternalState.shared.boolSetting("chrome_headless", default: true)
         let next = !current
         ExternalState.shared.setBoolSetting("chrome_headless", next)
 
