@@ -5,21 +5,21 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <title>Xe Launcher</title>
         <item>
             <title>0.0.8</title>
-            <pubDate>Thu, 03 Sep 2026 23:53:28 -0700</pubDate>
+            <pubDate>Fri, 04 Sep 2026 03:06:35 -0700</pubDate>
             <link>https://github.com/Agent54/xe-computer-launcher</link>
-            <sparkle:version>32.1</sparkle:version>
+            <sparkle:version>33.1</sparkle:version>
             <sparkle:shortVersionString>0.0.8</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.2</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.32.1
+            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.33.1
 
 See the GitHub release for the complete notes:
-https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.32.1
+https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.33.1
 ]]></description>
-            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.32.1/Xe-Launcher.dmg" length="181018931" type="application/octet-stream" sparkle:edSignature="BA35UOMAgGwHBH+rQywrs8ciCmyVORI7jbkOQZDh39I0CEMJSYhskx4i1KaYip8IYeSypac7z5BDgjxFKvaABA=="></enclosure>
+            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.33.1/Xe-Launcher.dmg" length="181018878" type="application/octet-stream" sparkle:edSignature="Dcq8KHtH1gnhYMyS4UnEqKBwCCd9rrCUBnxFM0FJvJLJxGhgpg6SJ4dBo/YRE/HQhTCiqaWoK3kv2VhTADRoCw=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: IpMfwbD53Md5K/jUlR/3zyehfKTUw+Sywfx/dRm/G7reLSnGv195CyCGLZBWA6XM2HGSGGPqXpyxgVmqFuDABQ==
+edSignature: YH/P+cSA2Ci4tiddcFLu22TjvTECXf2s09cagcYcaQ7AL82OYy0vpNUOtcnnBKSvsSXqPPgOdu+oZgf2yPSLAQ==
 length: 1448
 -->
