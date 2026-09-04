@@ -2,6 +2,34 @@ import AppKit
 import CoreGraphics
 import Sparkle
 
+private enum LauncherUpdateChannel: String {
+    case stable
+    case int
+
+    static func configured(in bundle: Bundle = .main) -> LauncherUpdateChannel {
+        if let configuredValue = bundle.object(forInfoDictionaryKey: "XeUpdateChannel") as? String,
+           let channel = LauncherUpdateChannel(rawValue: configuredValue) {
+            return channel
+        }
+
+        // Preserve the correct channel for Sparkle-enabled builds released
+        // before XeUpdateChannel was added to Info.plist.
+        let feedURL = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
+        return feedURL.contains("/updates/int/") ? .int : .stable
+    }
+
+    var displayName: String {
+        switch self {
+        case .stable: "Release (stable)"
+        case .int: "Prerelease (int)"
+        }
+    }
+
+    var feedURLString: String {
+        "https://raw.githubusercontent.com/Agent54/xe-computer-launcher/updates/\(rawValue)/appcast.xml"
+    }
+}
+
 @main
 struct MacOSApp {
     static func main() {
@@ -26,10 +54,11 @@ struct MacOSApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private var didFinishNormalStartup = false
     private var isPreparingForTermination = false
     private var statusItem: NSStatusItem?
+    private let updateChannel = LauncherUpdateChannel.configured()
     private var isUpdaterConfigured: Bool {
         guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
             return false
@@ -38,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
-        updaterDelegate: nil,
+        updaterDelegate: self,
         userDriverDelegate: nil
     )
     private let logPanelController = LogPanelController()
@@ -67,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
+    private var updateChannelItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
@@ -96,6 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // installed into /Applications or ~/Applications starts Sparkle on its
         // first normal launch instead.
         if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+            ExternalState.shared.appendLog(
+                "launcher",
+                "Sparkle update channel: \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
+            )
             _ = updaterController
         }
 
@@ -288,7 +322,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesAction), keyEquivalent: ""))
+        let updateChannelItem = NSMenuItem(
+            title: "Update Channel: \(updateChannel.displayName)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        updateChannelItem.isEnabled = false
+        updateChannelItem.isHidden = true
+        menu.addItem(updateChannelItem)
+        self.updateChannelItem = updateChannelItem
+        let updateTitle = updateChannel == .int ? "Update (int)" : "Check for Updates…"
+        menu.addItem(NSMenuItem(title: updateTitle, action: #selector(checkForUpdatesAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -620,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
+        updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
 
@@ -959,7 +1004,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         NSApp.activate(ignoringOtherApps: true)
+        ExternalState.shared.appendLog(
+            "launcher",
+            "Checking for updates on \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
+        )
         updaterController.checkForUpdates(nil)
+    }
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        updateChannel.feedURLString
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        ExternalState.shared.appendLog(
+            "launcher",
+            "Sparkle update cycle ended on \(updateChannel.displayName): \(describeUpdateError(error))"
+        )
+    }
+
+    private func describeUpdateError(_ error: Error) -> String {
+        var descriptions: [String] = []
+        var currentError: NSError? = error as NSError
+        var depth = 0
+
+        while let errorToDescribe = currentError, depth < 8 {
+            var description = "[\(errorToDescribe.domain):\(errorToDescribe.code)] \(errorToDescribe.localizedDescription)"
+            if let failingURL = errorToDescribe.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+                description += " (\(failingURL.absoluteString))"
+            }
+            descriptions.append(description)
+            currentError = errorToDescribe.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+
+        return descriptions.joined(separator: " <- ")
     }
 
     @objc private func quitAction() {

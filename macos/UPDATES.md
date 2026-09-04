@@ -14,7 +14,10 @@ Sparkle validates three things before replacing the installed application:
 Sparkle checks automatically without showing its update-check permission
 question. When a new version is available, users choose whether and when to
 install it: automatic downloading and installation are explicitly disallowed.
-Users can also choose **Check for Updates…** from the status menu at any time.
+Users can also choose **Check for Updates…** from stable builds or **Update
+(int)** from prerelease builds at any time. Holding Option while the status menu
+is open reveals the embedded channel as **Prerelease (int)** or **Release
+(stable)** so testers can confirm which feed the installed build uses.
 Development builds with the placeholder public key keep the updater disabled.
 
 ## One-time signing-key setup

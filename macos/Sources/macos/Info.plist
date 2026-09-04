@@ -29,6 +29,9 @@
         <key>XeReleaseVersion</key>
         <string>1.0</string>
 
+        <key>XeUpdateChannel</key>
+        <string>stable</string>
+
         <key>LSMinimumSystemVersion</key>
         <string>26.2</string>
 
@@ -42,7 +45,7 @@
         <string>NSAppication</string>
 
         <key>SUFeedURL</key>
-        <string>https://raw.githubusercontent.com/Agent54/xe-darc-launcher/updates/stable/appcast.xml</string>
+        <string>https://raw.githubusercontent.com/Agent54/xe-computer-launcher/updates/stable/appcast.xml</string>
 
         <key>SUEnableAutomaticChecks</key>
         <true/>

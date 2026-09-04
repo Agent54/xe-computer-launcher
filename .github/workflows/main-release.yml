@@ -90,6 +90,9 @@ jobs:
           plutil -replace XeReleaseVersion \
             -string "$release_tag" \
             macos/Sources/macos/Info.plist
+          plutil -replace XeUpdateChannel \
+            -string "$update_channel" \
+            macos/Sources/macos/Info.plist
           plutil -replace SUPublicEDKey \
             -string "$SPARKLE_PUBLIC_ED_KEY" \
             macos/Sources/macos/Info.plist
@@ -195,7 +198,7 @@ jobs:
           make
 
       - name: Verify Sparkle bundle integration
-        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release
+        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel "${{ steps.version.outputs.update_channel }}"
 
       - name: Run full launcher integration test
         env:
