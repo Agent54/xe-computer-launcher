@@ -255,6 +255,19 @@ jobs:
 
           test -s "$update_dir/appcast.xml"
           grep -q 'sparkle:edSignature=' "$update_dir/appcast.xml"
+
+          # Keep CFBundleShortVersionString numeric for macOS, but expose the
+          # fully qualified release tag (including the int build suffix) in
+          # Sparkle's update UI.
+          sed -i '' -E \
+            "s|(<sparkle:shortVersionString>)[^<]*(</sparkle:shortVersionString>)|\\1${RELEASE_TAG}\\2|g" \
+            "$update_dir/appcast.xml"
+          grep -Fq "<sparkle:shortVersionString>${RELEASE_TAG}</sparkle:shortVersionString>" \
+            "$update_dir/appcast.xml"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$sign_update" \
+              --ed-key-file - \
+              "$update_dir/appcast.xml"
           printf '%s' "$SPARKLE_PRIVATE_KEY" |
             "$sign_update" \
               --verify \
@@ -335,7 +348,8 @@ jobs:
           macos/Tests/Integration/verify-appcast.sh \
             "$feed_url" \
             "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
-            "$asset_url"
+            "$asset_url" \
+            "$RELEASE_TAG"
 
       - name: Announce release on Discord
         env:

@@ -4,7 +4,12 @@ import Darwin
 
 private let trustedXeComputerReleaseRoot = "https://github.com/Agent54/xe-darc/releases/download"
 
-private func trustedAssetURL(name: String, info: [String: Any]) -> URL? {
+private struct SourceAsset {
+    let url: URL
+    let filename: String
+}
+
+private func trustedSourceAsset(name: String, info: [String: Any]) -> SourceAsset? {
     if name == "darc" {
         guard let version = info["version"] as? [String: Any],
               let major = version["major"] as? Int,
@@ -16,13 +21,37 @@ private func trustedAssetURL(name: String, info: [String: Any]) -> URL? {
         }
 
         let versionNumber = "\(major).\(minor).\(patch)"
-        return URL(string: "\(trustedXeComputerReleaseRoot)/v\(versionNumber)/darc.swbn")
+        guard let url = URL(string: "\(trustedXeComputerReleaseRoot)/v\(versionNumber)/darc.swbn") else {
+            return nil
+        }
+        // The upstream asset has a stable name, so make the local marker
+        // version-specific. A newly pinned launcher version will then fetch and
+        // install its required bundle even when an older bundle is cached.
+        return SourceAsset(url: url, filename: "darc.\(versionNumber).swbn")
     }
 
     guard let urlString = info["url"] as? String, !urlString.isEmpty else {
         return nil
     }
-    return URL(string: urlString)
+    guard let url = URL(string: urlString) else { return nil }
+    return SourceAsset(url: url, filename: url.lastPathComponent)
+}
+
+private func sourceConfigurations(in bundle: Bundle = .main) -> [String: [String: Any]]? {
+    guard let sourcesURL = bundle.resourceURL?.appendingPathComponent("sources.json"),
+          let sourcesData = try? Data(contentsOf: sourcesURL) else {
+        return nil
+    }
+    return try? JSONSerialization.jsonObject(with: sourcesData) as? [String: [String: Any]]
+}
+
+/// Returns the version-specific local file expected for a configured source asset.
+func configuredSourceAssetURL(name: String, dataURL: URL, bundle: Bundle = .main) -> URL? {
+    guard let info = sourceConfigurations(in: bundle)?[name],
+          let asset = trustedSourceAsset(name: name, info: info) else {
+        return nil
+    }
+    return dataURL.appendingPathComponent(asset.filename)
 }
 
 /// Download and install assets defined in sources.json on first run.
@@ -31,9 +60,7 @@ private func trustedAssetURL(name: String, info: [String: Any]) -> URL? {
 func downloadSourceAssetsIfNeeded(dataURL: URL, log: @escaping (String, String) -> Void) {
     let fm = FileManager.default
 
-    guard let sourcesURL = Bundle.main.resourceURL?.appendingPathComponent("sources.json"),
-          let sourcesData = try? Data(contentsOf: sourcesURL),
-          let sources = try? JSONSerialization.jsonObject(with: sourcesData) as? [String: [String: Any]] else {
+    guard let sources = sourceConfigurations() else {
         log("launcher", "No sources.json found in bundle, skipping asset download")
         return
     }
@@ -47,19 +74,24 @@ func downloadSourceAssetsIfNeeded(dataURL: URL, log: @escaping (String, String) 
     }
     var pending: [AssetInfo] = []
     for (name, info) in sources {
-        guard let url = trustedAssetURL(name: name, info: info) else {
+        guard let sourceAsset = trustedSourceAsset(name: name, info: info) else {
             log("launcher", "Invalid source configuration for \(name), skipping asset download")
             continue
         }
         let shouldUnzip = info["unzip"] as? Bool ?? true
         let label = info["label"] as? String ?? name
-        let filename = url.lastPathComponent
         // Check if already downloaded/extracted
-        let fileMarker = dataURL.appendingPathComponent(filename)
+        let fileMarker = dataURL.appendingPathComponent(sourceAsset.filename)
         if fm.fileExists(atPath: fileMarker.path) { continue }
         // For helium, check if Helium.app exists
         if name == "helium" && fm.fileExists(atPath: dataURL.appendingPathComponent("Helium.app").path) { continue }
-        pending.append(AssetInfo(name: name, label: label, url: url, unzip: shouldUnzip, filename: filename))
+        pending.append(AssetInfo(
+            name: name,
+            label: label,
+            url: sourceAsset.url,
+            unzip: shouldUnzip,
+            filename: sourceAsset.filename
+        ))
     }
 
     guard !pending.isEmpty else { return }

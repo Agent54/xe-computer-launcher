@@ -30,6 +30,43 @@ private enum LauncherUpdateChannel: String {
     }
 }
 
+private final class LauncherVersionDisplayer: NSObject, SUVersionDisplay {
+    private let releaseVersion: String
+
+    init(releaseVersion: String) {
+        self.releaseVersion = releaseVersion
+    }
+
+    func formatUpdateVersion(
+        fromUpdate update: SUAppcastItem,
+        andBundleDisplayVersion inOutBundleDisplayVersion: AutoreleasingUnsafeMutablePointer<NSString>,
+        withBundleVersion bundleVersion: String
+    ) -> String {
+        inOutBundleDisplayVersion.pointee = releaseVersion as NSString
+        return update.displayVersionString
+    }
+
+    func formatBundleDisplayVersion(
+        _ bundleDisplayVersion: String,
+        withBundleVersion bundleVersion: String,
+        matchingUpdate: SUAppcastItem?
+    ) -> String {
+        releaseVersion
+    }
+}
+
+private final class LauncherUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate {
+    private let versionDisplayer: LauncherVersionDisplayer
+
+    init(releaseVersion: String) {
+        versionDisplayer = LauncherVersionDisplayer(releaseVersion: releaseVersion)
+    }
+
+    func standardUserDriverRequestsVersionDisplayer() -> (any SUVersionDisplay)? {
+        versionDisplayer
+    }
+}
+
 @main
 struct MacOSApp {
     static func main() {
@@ -59,6 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var isPreparingForTermination = false
     private var statusItem: NSStatusItem?
     private let updateChannel = LauncherUpdateChannel.configured()
+    private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
+        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        ?? "Unknown"
+    private lazy var updaterUserDriverDelegate = LauncherUserDriverDelegate(releaseVersion: releaseVersion)
     private var isUpdaterConfigured: Bool {
         guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
             return false
@@ -68,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
         updaterDelegate: self,
-        userDriverDelegate: nil
+        userDriverDelegate: updaterUserDriverDelegate
     )
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
@@ -962,9 +1003,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func aboutAction() {
-        let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
-            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? "Unknown"
         let options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationVersion: releaseVersion
         ]

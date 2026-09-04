@@ -20,6 +20,12 @@ is open reveals the embedded channel as **Prerelease (int)** or **Release
 (stable)** so testers can confirm which feed the installed build uses.
 Development builds with the placeholder public key keep the updater disabled.
 
+The Xe Computer source asset is stored in application support as
+`darc.VERSION.swbn` (for example, `darc.0.0.18.swbn`). The versioned filename
+acts as the download marker, so updating the launcher to a newly pinned Xe
+Computer version fetches and installs that exact bundle instead of reusing an
+older `darc.swbn` file.
+
 ## One-time signing-key setup
 
 There are two related keys, and they have different jobs:
@@ -107,7 +113,8 @@ The release workflow:
 1. assigns a monotonically increasing `CFBundleVersion`;
 2. embeds the channel feed URL and public key;
 3. builds, signs, notarizes, and tests the application and DMG;
-4. generates a signed appcast from the notarized DMG;
+4. generates a signed appcast from the notarized DMG, using the fully qualified
+   release tag as Sparkle's display version;
 5. creates the GitHub release with `Xe-Launcher.dmg` and `appcast.xml`;
 6. updates `stable/appcast.xml` or `int/appcast.xml` on the `updates` branch;
 7. downloads and validates the newly published feed; and
@@ -137,7 +144,8 @@ Verify a generated or published appcast:
 macos/Tests/Integration/verify-appcast.sh \
   /path/to/appcast.xml \
   EXPECTED_BUILD_VERSION \
-  https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/Xe-Launcher.dmg
+  https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/Xe-Launcher.dmg \
+  EXPECTED_DISPLAY_VERSION
 ```
 
 For the first end-to-end update test, install the first Sparkle-enabled release

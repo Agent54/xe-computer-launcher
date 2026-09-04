@@ -94,9 +94,9 @@ extension ExternalState {
            !devShimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
         } else if !isDevProxy {
-            let iwaPath = Self.appDataURL.appendingPathComponent("darc.swbn").path
-            if FileManager.default.fileExists(atPath: iwaPath) {
-                args.append("--install-isolated-web-app-from-file=\(iwaPath)")
+            if let iwaURL = configuredSourceAssetURL(name: "darc", dataURL: Self.appDataURL),
+               FileManager.default.fileExists(atPath: iwaURL.path) {
+                args.append("--install-isolated-web-app-from-file=\(iwaURL.path)")
             }
         }
 

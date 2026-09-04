@@ -571,6 +571,13 @@ installed_bundle_id="$(defaults read "$INSTALLED_APP/Contents/Info" CFBundleIden
 [[ "$installed_bundle_id" == "$BUNDLE_ID" ]] \
     || fail "unexpected installed bundle identifier: $installed_bundle_id"
 
+sources_manifest="$INSTALLED_APP/Contents/Resources/sources.json"
+[[ -f "$sources_manifest" ]] || fail "installed sources manifest is missing"
+darc_major="$(plutil -extract darc.version.major raw "$sources_manifest")"
+darc_minor="$(plutil -extract darc.version.minor raw "$sources_manifest")"
+darc_patch="$(plutil -extract darc.version.patch raw "$sources_manifest")"
+darc_bundle="$APP_DATA/darc.${darc_major}.${darc_minor}.${darc_patch}.swbn"
+
 if xattr -p com.apple.quarantine "$INSTALLED_APP" >/dev/null 2>&1; then
     fail "installed app still has a quarantine attribute"
 fi
@@ -590,6 +597,8 @@ while (( SECONDS < deadline )); do
 done
 [[ -d "$MANAGED_XE_COMPUTER_APP" ]] \
     || fail "Xe Computer app shim was not provisioned at $MANAGED_XE_COMPUTER_APP"
+[[ -f "$darc_bundle" ]] \
+    || fail "versioned Xe Computer bundle was not saved at $darc_bundle"
 pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
     || fail "Xe Computer app shim did not launch from its managed location"
 
