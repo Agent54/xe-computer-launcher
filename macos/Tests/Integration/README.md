@@ -3,6 +3,8 @@
 `cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
+installer test also accepts the first-run user data storage prompt using the
+default `stacks` folder when virtualization is supported. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on
@@ -154,3 +156,21 @@ The runner still needs the Accessibility, Automation, sudo, signing,
 and GUI-session prerequisites described above. If a hosted runner cannot grant
 those UI permissions, use a preconfigured self-hosted runner; do not create a
 second CI-specific test implementation.
+
+## Runners without nested virtualization
+
+The launcher checks `kern.hv_support` before storage onboarding or SmolVM
+startup. Without support, it logs **sub-VM not available** and continues
+browser/app startup without container services. The installer test skips that
+storage dialog on these machines and `verify-compose-api.sh` skips its
+Docker-backed assertion with a warning, so it never waits for a socket that
+cannot appear. Installer, signature, updater, and host-only Compose lifecycle
+tests continue to run.
+
+Both CI workflows currently set `XE_TEST_SUB_VM_AVAILABLE=0` through the
+repository variable `XE_CI_SUB_VM_AVAILABLE` (default `0`). Set that variable
+to `1` when moving to hardware runners to restore the Docker-backed assertion.
+Local runs detect virtualization automatically unless explicitly disabled with
+`XE_TEST_SUB_VM_AVAILABLE=0`. A supported machine with testing enabled still
+fails the check if Docker/Compose cannot become ready; startup errors are not
+silently converted into test skips.

@@ -94,6 +94,9 @@ struct MacOSApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private var didFinishNormalStartup = false
     private var isPreparingForTermination = false
+    private var runtimeStartupTask: Task<Void, Never>?
+    private var composeServer: ComposeServer?
+    private var isWaitingForComposeShutdown = false
     private var statusItem: NSStatusItem?
     private let updateChannel = LauncherUpdateChannel.configured()
     private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
@@ -183,17 +186,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func startBackgroundInitialization() {
-        Task {
+        guard !isPreparingForTermination, runtimeStartupTask == nil else { return }
+        runtimeStartupTask = Task {
+            guard VirtualizationSupport.isAvailable else {
+                ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
+                return
+            }
             do {
+                guard let stacksURL = try ComposeStorage.chooseIfNeeded() else {
+                    ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
+                    return
+                }
+                try Task.checkCancellation()
+                let composeServer = ComposeServer(stacksURL: stacksURL)
+                self.composeServer = composeServer
                 let result = try await SmolVMSetup.start()
                 ExternalState.shared.appendLog(
                     "launcher",
                     "SmolVM machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
                 )
+                try Task.checkCancellation()
+                try await composeServer.start(dockerSocketURL: result.dockerSocketURL)
+            } catch is CancellationError {
+                // Quit or updater relaunch cancelled runtime startup.
             } catch {
                 ExternalState.shared.appendLog(
                     "launcher",
-                    "SmolVM startup failed: \(error.localizedDescription)"
+                    "Warning: container services unavailable: \(error.localizedDescription). Xe Launcher will continue without container services."
                 )
             }
         }
@@ -264,12 +283,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // the delegate so updater-triggered termination and the Quit menu item
         // have identical service-state behavior.
         prepareForTermination()
+        if composeServer?.isRunning == true || isWaitingForComposeShutdown {
+            if !isWaitingForComposeShutdown {
+                isWaitingForComposeShutdown = true
+                Task {
+                    await composeServer?.stop()
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+            }
+            return .terminateLater
+        }
         return .terminateNow
     }
 
     private func prepareForTermination() {
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
+        runtimeStartupTask?.cancel()
+        composeServer?.requestStop()
 
         let state = ExternalState.shared
         // The Xe Computer shim exits with its host browser.

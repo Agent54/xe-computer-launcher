@@ -38,6 +38,7 @@ let package = Package(
                     "-Xlinker", "@executable_path/../Frameworks"
                 ])
             ]
-        )
+        ),
+        .testTarget(name: "RuntimeTests", dependencies: ["macos"], path: "Tests/RuntimeTests")
     ]
 )

@@ -21,6 +21,9 @@ jobs:
     env:
       NOTARY_PROFILE: notarytool-profile
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      # Current runners are VMs without nested virtualization. Set the repo
+      # variable to 1 when moving to hardware runners.
+      XE_TEST_SUB_VM_AVAILABLE: ${{ vars.XE_CI_SUB_VM_AVAILABLE || '0' }}
 
     steps:
       - name: Configure temporary paths
@@ -192,9 +195,11 @@ jobs:
         working-directory: macos
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose."
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose and Agent54/compose-server."
             exit 1
           fi
+          make compose-server
+          swift test
           make
 
       - name: Verify Sparkle bundle integration

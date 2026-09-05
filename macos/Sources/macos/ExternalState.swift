@@ -266,6 +266,17 @@ final class ExternalState: @unchecked Sendable {
         (settings.rawData?[key] as? Bool) ?? defaultValue
     }
 
+    func stringSetting(_ key: String) -> String? {
+        settings.rawData?[key] as? String
+    }
+
+    func setStringSetting(_ key: String, _ value: String) {
+        var dict = settings.rawData ?? [:]
+        dict[key] = value
+        settings = Settings(rawData: dict)
+        saveSettings()
+    }
+
     func setBoolSetting(_ key: String, _ value: Bool) {
         let current = (settings.rawData?[key] as? Bool)
         if current == value { return }

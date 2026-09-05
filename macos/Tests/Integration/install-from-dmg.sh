@@ -546,6 +546,13 @@ drain_accessibility_permission_prompts "$APP_NAME" 60
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90
 
+if [[ "$(/usr/sbin/sysctl -n kern.hv_support 2>/dev/null || true)" == "1" ]]; then
+    log "choosing the default user data storage folder"
+    press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
+fi
+
+/bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/stacks/compose.sock"
+
 log "waiting for installation and relaunch"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
