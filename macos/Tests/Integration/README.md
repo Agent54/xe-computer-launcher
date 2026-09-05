@@ -3,6 +3,8 @@
 `cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
+installer test also accepts the first-run user data storage prompt using the
+default `stacks` folder. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on

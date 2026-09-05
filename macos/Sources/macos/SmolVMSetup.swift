@@ -10,6 +10,7 @@ enum SmolVMSetup {
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
 
     static func start() async throws -> SmolVMStartupResult {
+        try Task.checkCancellation()
         let client = SmolVMClient.shared
         let machines = try await client.listMachines()
         let existing = machines.first { $0.name == machineName }
@@ -38,8 +39,11 @@ enum SmolVMSetup {
             try await client.startMachine(named: machineName)
         }
 
-        for _ in 0..<360 {
-            if FileManager.default.fileExists(atPath: dockerSocketURL.path) {
+        let deadline = ContinuousClock.now + .seconds(90)
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if await UnixSocketHTTP.isReady(at: dockerSocketURL) {
+                try Task.checkCancellation()
                 return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
             }
             try await Task.sleep(for: .milliseconds(250))
@@ -60,7 +64,7 @@ enum SmolVMSetupError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .dockerSocketUnavailable(let path):
-            return "SmolVM started, but its Docker socket did not appear at \(path)."
+            return "SmolVM started, but its Docker API did not become ready at \(path)."
         }
     }
 }

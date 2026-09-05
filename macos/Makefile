@@ -20,6 +20,8 @@ BUILT_SPARKLE_FRAMEWORK = $(BUILD_DIR)/$(BUILD_CONFIG)/Sparkle.framework
 SMOL_RUNTIME_STAGE = $(BUILD_DIR)/smol-runtime/SmolRuntime
 SMOL_RUNTIME = $(HELPERS)/SmolRuntime
 SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
+COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
+COMPOSE_SERVER = $(HELPERS)/docker-compose
 DMG_NAME = $(APP_NAME).dmg
 ENTITLEMENTS = Sources/macos/Entitlements.plist
 SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
@@ -39,7 +41,7 @@ NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYC
 DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
 DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
-.PHONY: all clean build smol-runtime package sign-sparkle sign-smol-runtime verify-smol-runtime bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
+.PHONY: all clean build smol-runtime compose-server package sign-sparkle sign-smol-runtime sign-compose-server verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
@@ -53,7 +55,10 @@ build:
 smol-runtime:
 	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Scripts/prepare-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
 
-package: build smol-runtime
+compose-server:
+	@/bin/bash Scripts/prepare-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
+
+package: build smol-runtime compose-server
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
@@ -69,6 +74,8 @@ package: build smol-runtime
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
 	@rsync -a --delete "$(BUILT_SPARKLE_FRAMEWORK)/" "$(SPARKLE_FRAMEWORK)/"
 	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
+	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
+	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
 	@echo "App package created at $(APP_BUNDLE)"
 
 # Sparkle contains several nested signed executables. Sign from the innermost
@@ -102,9 +109,16 @@ sign-smol-runtime:
 verify-smol-runtime:
 	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)"
 
+sign-compose-server:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(COMPOSE_SERVER)"
+
+verify-compose-server:
+	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)"
+
 bundle: package
 	@echo "Creating app bundle..."
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-compose-server
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
 	@echo "Signing app bundle with: $(DEVELOPMENT_SIGN_IDENTITY)"
 	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPMENT_SIGN_IDENTITY)" "$(APP_BUNDLE)"
@@ -123,6 +137,7 @@ release-sign: package
 			exit 1; \
 		fi
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-compose-server
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
 	@echo "Signing with Developer ID: $(DEVELOPER_ID)"
 	@codesign --force --options runtime --timestamp --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
@@ -140,6 +155,7 @@ verify-sparkle:
 check: release-sign
 	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)" --release
 	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
+	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
 
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"

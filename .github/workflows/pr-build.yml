@@ -98,9 +98,11 @@ jobs:
         working-directory: macos
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose."
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose and Agent54/compose-server."
             exit 1
           fi
+          make compose-server
+          swift test
           make
 
       - name: Verify Sparkle bundle integration
