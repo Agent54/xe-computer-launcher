@@ -546,22 +546,12 @@ drain_accessibility_permission_prompts "$APP_NAME" 60
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90
 
-log "choosing the default user data storage folder"
-press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
+if [[ "$(/usr/sbin/sysctl -n kern.hv_support 2>/dev/null || true)" == "1" ]]; then
+    log "choosing the default user data storage folder"
+    press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
+fi
 
-log "waiting for the Compose API backed by SmolVM"
-compose_socket="$APP_DATA/stacks/compose.sock"
-deadline=$((SECONDS + 120))
-compose_ready=false
-while (( SECONDS < deadline )); do
-    if /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
-        --unix-socket "$compose_socket" --output /dev/null 'http://localhost/ls?all=true'; then
-        compose_ready=true
-        break
-    fi
-    sleep 1
-done
-[[ "$compose_ready" == true ]] || fail "Compose API did not become ready at $compose_socket"
+/bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/stacks/compose.sock"
 
 log "waiting for installation and relaunch"
 deadline=$((SECONDS + 90))

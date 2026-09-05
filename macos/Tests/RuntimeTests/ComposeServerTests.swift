@@ -95,7 +95,12 @@ struct ComposeServerTests {
         await server.stop()
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["COMPOSE_TEST_DOCKER_SOCKET"] != nil))
+    @Test(.enabled(
+        if: ProcessInfo.processInfo.environment["XE_TEST_SUB_VM_AVAILABLE"] != "0"
+            && VirtualizationSupport.isAvailable
+            && ProcessInfo.processInfo.environment["COMPOSE_TEST_DOCKER_SOCKET"] != nil,
+        "sub-VM not available or no Docker test socket configured"
+    ))
     func forwardsRequestsToSmol() async throws {
         let path = try #require(ProcessInfo.processInfo.environment["COMPOSE_TEST_DOCKER_SOCKET"])
         let helper = URL(fileURLWithPath: #filePath)
@@ -105,23 +110,17 @@ struct ComposeServerTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let server = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
         let socket = try await server.start(dockerSocketURL: URL(fileURLWithPath: path))
-        do {
-            let responseURL = root.appendingPathComponent("response.json")
-            let request = Process()
-            request.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            request.arguments = [
-                "--disable", "--silent", "--show-error", "--fail", "--max-time", "10", "--noproxy", "*",
-                "--unix-socket", socket.path, "--output", responseURL.path, "http://localhost/ls?all=true",
-            ]
-            try request.run()
-            request.waitUntilExit()
-            try #require(request.terminationStatus == 0)
-            let projects = try JSONSerialization.jsonObject(with: Data(contentsOf: responseURL))
-            #expect(projects is [[String: Any]])
-        } catch {
-            await server.stop()
-            throw error
-        }
+        // /ls requires the Docker backend; /_ping alone does not.
+        #expect(await UnixSocketHTTP.isReady(at: socket, path: "/ls?all=true", timeout: .seconds(10)))
         await server.stop()
+    }
+
+    @Test func unavailableSubVMFailsBeforeInvokingSmol() async throws {
+        do {
+            _ = try await SmolVMSetup.start(virtualizationAvailable: false)
+            Issue.record("SmolVM must not start without hypervisor support")
+        } catch SmolVMSetupError.virtualizationUnavailable {
+            #expect(VirtualizationSupport.unavailableWarning.contains("sub-VM not available"))
+        }
     }
 }

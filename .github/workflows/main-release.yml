@@ -21,6 +21,9 @@ jobs:
     env:
       NOTARY_PROFILE: notarytool-profile
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      # Current runners are VMs without nested virtualization. Set the repo
+      # variable to 1 when moving to hardware runners.
+      XE_TEST_SUB_VM_AVAILABLE: ${{ vars.XE_CI_SUB_VM_AVAILABLE || '0' }}
 
     steps:
       - name: Configure temporary paths

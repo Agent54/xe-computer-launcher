@@ -9,10 +9,12 @@ enum SmolVMSetup {
     static let machineName = "xe-launcher"
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
 
-    static func start() async throws -> SmolVMStartupResult {
+    static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         try Task.checkCancellation()
+        guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
         let machines = try await client.listMachines()
+        try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
 
         if existing == nil {
@@ -36,6 +38,7 @@ enum SmolVMSetup {
         }
 
         if existing?.isRunning != true {
+            try Task.checkCancellation()
             try await client.startMachine(named: machineName)
         }
 
@@ -59,10 +62,13 @@ enum SmolVMSetup {
 }
 
 enum SmolVMSetupError: LocalizedError, Sendable {
+    case virtualizationUnavailable
     case dockerSocketUnavailable(String)
 
     var errorDescription: String? {
         switch self {
+        case .virtualizationUnavailable:
+            return VirtualizationSupport.unavailableWarning
         case .dockerSocketUnavailable(let path):
             return "SmolVM started, but its Docker API did not become ready at \(path)."
         }

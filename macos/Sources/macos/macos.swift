@@ -188,6 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func startBackgroundInitialization() {
         guard !isPreparingForTermination, runtimeStartupTask == nil else { return }
         runtimeStartupTask = Task {
+            guard VirtualizationSupport.isAvailable else {
+                ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
+                return
+            }
             do {
                 guard let stacksURL = try ComposeStorage.chooseIfNeeded() else {
                     ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
@@ -208,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             } catch {
                 ExternalState.shared.appendLog(
                     "launcher",
-                    "Runtime startup failed: \(error.localizedDescription)"
+                    "Warning: container services unavailable: \(error.localizedDescription). Xe Launcher will continue without container services."
                 )
             }
         }
