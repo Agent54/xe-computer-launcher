@@ -159,6 +159,13 @@ second CI-specific test implementation.
 
 ## Runners without nested virtualization
 
+Both workflows run host runtime tests with `bash macos/Scripts/test-runtime.sh`
+before packaging. The script uses the selected Apple toolchain and supplies
+framework and runtime search paths for Swift Testing when using Command Line
+Tools. This works around SwiftPM 6.3 passing library search paths for the CLT
+framework directory. The suite uses Swift Testing, so the script explicitly
+enables that runner and disables the unused XCTest runner, which CLT lacks.
+
 The launcher checks `kern.hv_support` before storage onboarding or SmolVM
 startup. Without support, it logs **sub-VM not available** and continues
 browser/app startup without container services. The installer test skips that
