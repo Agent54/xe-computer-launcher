@@ -105,7 +105,10 @@ jobs:
             exit 1
           fi
           make compose-server
-          swift test
+          /usr/bin/xcode-select --print-path
+          /usr/bin/xcrun --find swift
+          /usr/bin/xcrun swift --version
+          /usr/bin/xcrun swift test
           make
 
       - name: Verify Sparkle bundle integration
