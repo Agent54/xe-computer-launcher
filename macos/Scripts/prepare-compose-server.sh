@@ -24,7 +24,14 @@ else
         if ! gh release download "$COMPOSE_SERVER_RELEASE_TAG" \
             --repo "$COMPOSE_SERVER_GITHUB_REPOSITORY" \
             --pattern "$COMPOSE_SERVER_ASSET" --output "$temporary_path" --clobber; then
-            echo "Could not download Compose server. Provide GH_TOKEN with read access to $COMPOSE_SERVER_GITHUB_REPOSITORY, authenticate gh, or set COMPOSE_SERVER_ASSET_DIR." >&2
+            echo "Could not download Compose server release $COMPOSE_SERVER_RELEASE_TAG from $COMPOSE_SERVER_GITHUB_REPOSITORY." >&2
+            echo "Checking releases visible to the build's GitHub credentials (no token values are printed):" >&2
+            if ! gh release list --repo "$COMPOSE_SERVER_GITHUB_REPOSITORY" --limit 10 \
+                --json tagName,isDraft --jq '.[] | {tagName, isDraft}' >&2; then
+                echo "Could not list releases. Check that the token selects this repository and has Contents read permission." >&2
+            fi
+            echo "Draft releases are visible only to users with push access. Selecting a public repository alone does not grant access to its draft assets." >&2
+            echo "Verify that CI's SMOLVM_GITHUB_TOKEN contains the intended token, or set COMPOSE_SERVER_ASSET_DIR for an offline build." >&2
             exit 1
         fi
         mv "$temporary_path" "$asset_path"

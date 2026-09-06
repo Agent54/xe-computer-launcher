@@ -14,7 +14,7 @@ jobs:
 
     # Available to every step in this job.
     env:
-      DEVELOPER_ID: ${{ vars.MACOS_DEVELOPER_ID }}
+      DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
       NOTARY_PROFILE: notarytool-profile
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
       # Current runners are VMs without nested virtualization. Set the repo
