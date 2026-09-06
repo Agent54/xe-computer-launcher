@@ -6,6 +6,9 @@ APP_NAME = Xe Launcher
 BUNDLE_ID = dev.xe.computer
 BUILD_DIR = .build
 BUILD_CONFIG ?= release
+# Resolve Swift through the selected developer directory, just like the SDK
+# and testing frameworks. A different Swift first in PATH can miss Testing.
+SWIFT ?= /usr/bin/xcrun swift
 SWIFT_BUILD_FLAGS ?=
 SPARKLE_PUBLIC_ED_KEY ?=
 DIST_DIR = dist
@@ -50,7 +53,7 @@ zip-helpers:
 	@ditto -c -k --keepParent $(BUILD_DIR)/Helium.zip Sources/macos/helpers/Helium.app
 
 build:
-	swift build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
+	$(SWIFT) build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
 
 smol-runtime:
 	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Scripts/prepare-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
@@ -248,6 +251,6 @@ release: notarize-dmg
 	@echo "  DMG: $(DIST_DIR)/$(DMG_NAME)"
 
 clean:
-	swift package clean
+	$(SWIFT) package clean
 	rm -rf "$(APP_BUNDLE)"
 	rm -f "$(DIST_DIR)/$(DMG_NAME)"

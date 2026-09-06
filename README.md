@@ -64,7 +64,7 @@ To verify the helper and runtime lifecycle locally:
 
 ```sh
 make -C macos compose-server
-cd macos && swift test
+cd macos && /usr/bin/xcrun swift test
 ```
 
 
