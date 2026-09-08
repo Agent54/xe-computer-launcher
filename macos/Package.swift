@@ -23,6 +23,7 @@ let package = Package(
                 "Info.plist",
                 "Entitlements.plist",
                 "SmolVMEntitlements.plist",
+                "WorkerdEntitlements.plist",
                 "Resources/app.icns",
                 "Resources/status-icon.png",
                 "sandbox"

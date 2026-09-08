@@ -1,0 +1,30 @@
+{
+  "name": "darc-worker",
+  "version": "1.0.0",
+  "description": "darc worker agent",
+  "type": "module",
+  "scripts": {
+    "build:guest": "mkdir -p dist && ./node_modules/workerd/bin/workerd compile --config-only docker/config.capnp > dist/guest-worker.bin.tmp && mv dist/guest-worker.bin.tmp dist/guest-worker.bin",
+    "build:runtime": "deno task build:guest && bash docker/package-runtime.sh",
+    "build": "mkdir -p dist && ./node_modules/workerd/bin/workerd compile --config-only config.capnp > dist/worker.bin.tmp && mv dist/worker.bin.tmp dist/worker.bin",
+    "dev": "bash ./dev.sh",
+    "test:unit": "deno test --no-config --no-lock tests/routing_test.ts",
+    "test:integration": "deno run --no-config --no-lock --allow-read --allow-write=/tmp --allow-env --allow-net=127.0.0.1 --allow-run tests/integration.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.12",
+    "@cloudflare/vite-plugin": "^1.31.0",
+    "agents": "^0.0.109",
+    "ai": "^4.3.19",
+    "js-yaml": "^4.1.0",
+    "workerd": "1.20260910.1",
+    "wrangler": "4.80.0",
+    "miniflare": "4.20260401.0"
+  },
+  "overrides": {
+    "workerd": "1.20260910.1"
+  }
+}

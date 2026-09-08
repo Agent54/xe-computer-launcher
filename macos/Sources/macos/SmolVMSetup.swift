@@ -8,6 +8,7 @@ struct SmolVMStartupResult: Sendable {
 enum SmolVMSetup {
     static let machineName = "xe-launcher"
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
+    static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
 
     static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         try Task.checkCancellation()
@@ -16,6 +17,7 @@ enum SmolVMSetup {
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
+        try await GuestRouter.shared.prepare()
 
         if existing == nil {
             removeStaleSocketIfPresent()
@@ -23,13 +25,16 @@ enum SmolVMSetup {
                 name: machineName,
                 artifactURL: SmolVMPaths.composeArtifactURL,
                 networkBackend: "virtio-net",
+                volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"],
                 exposedSockets: [
-                    "/var/run/docker.sock:\(dockerSocketURL.path)"
+                    "/var/run/docker.sock:\(dockerSocketURL.path)",
+                    "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
                 ],
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
                     "dev.xe.computer.smolvm-release": "v1.13.0-compose_1",
+                    GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ]
             )
             try await client.createMachine(spec)
@@ -56,8 +61,10 @@ enum SmolVMSetup {
     }
 
     private static func removeStaleSocketIfPresent() {
-        guard FileManager.default.fileExists(atPath: dockerSocketURL.path) else { return }
-        try? FileManager.default.removeItem(at: dockerSocketURL)
+        for socket in [dockerSocketURL, routerSocketURL] {
+            guard FileManager.default.fileExists(atPath: socket.path) else { continue }
+            try? FileManager.default.removeItem(at: socket)
+        }
     }
 }
 

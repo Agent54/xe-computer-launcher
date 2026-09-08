@@ -137,8 +137,8 @@ actor SmolVMClient {
         _ = try invoke(["machine", "stop", "--name", name])
     }
 
-    func execute(in name: String, command: [String]) throws -> SmolVMCommandResult {
-        try invoke(["machine", "exec", "--name", name, "--"] + command)
+    func execute(in name: String, command: [String], detached: Bool = false) throws -> SmolVMCommandResult {
+        try invoke(["machine", "exec", "--name", name] + (detached ? ["--detach"] : []) + ["--"] + command)
     }
 
     @discardableResult

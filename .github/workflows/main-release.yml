@@ -15,10 +15,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  guest-worker:
+    uses: ./.github/workflows/guest-worker.yml
   release:
+    needs: guest-worker
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
     timeout-minutes: 60
     env:
+      GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist
       NOTARY_PROFILE: notarytool-profile
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
       # Current runners are VMs without nested virtualization. Set the repo
@@ -36,6 +40,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-worker
+          path: workerd/dist
 
       - name: Reset launcher integration environment
         run: bash macos/Tests/Integration/cleanup.sh
@@ -180,6 +189,15 @@ jobs:
             --issuer "$NOTARY_ISSUER_ID" \
             --keychain "$NOTARY_KEYCHAIN"
 
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check worker types
+        working-directory: workerd
+        run: deno check --no-config --no-lock tests/integration.ts
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -195,10 +213,10 @@ jobs:
         working-directory: macos
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose and Agent54/compose-server."
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
             exit 1
           fi
-          make compose-server
+          make workerd compose-ui compose-server
           /bin/bash Scripts/test-runtime.sh
           make
 

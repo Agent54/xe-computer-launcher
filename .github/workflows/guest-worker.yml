@@ -1,0 +1,24 @@
+name: Build guest worker runtime
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Compile and package Linux ARM64 worker
+        working-directory: workerd
+        run: |
+          deno install --frozen
+          deno task test:unit
+          deno task build:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-worker
+          path: workerd/dist/guest-runtime/
+          if-no-files-found: error

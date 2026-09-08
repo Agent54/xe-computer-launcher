@@ -25,6 +25,10 @@ SMOL_RUNTIME = $(HELPERS)/SmolRuntime
 SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
 COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
 COMPOSE_SERVER = $(HELPERS)/docker-compose
+WORKERD_STAGE = $(BUILD_DIR)/workerd/workerd
+WORKERD = $(HELPERS)/workerd
+COMPOSE_UI_STAGE = $(BUILD_DIR)/compose-ui
+GUEST_ROUTER_ASSET_DIR ?=
 DMG_NAME = $(APP_NAME).dmg
 ENTITLEMENTS = Sources/macos/Entitlements.plist
 SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
@@ -44,7 +48,7 @@ NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYC
 DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
 DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
-.PHONY: all clean build smol-runtime compose-server package sign-sparkle sign-smol-runtime sign-compose-server verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
+.PHONY: all clean build smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd verify-workerd verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
@@ -61,7 +65,28 @@ smol-runtime:
 compose-server:
 	@/bin/bash Scripts/prepare-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
 
-package: build smol-runtime compose-server
+workerd:
+	cd ../workerd && deno install --frozen
+	cd ../workerd && deno task build
+	cd ../workerd && deno task build:guest
+	@file ../workerd/node_modules/workerd/bin/workerd | grep -q 'Mach-O 64-bit executable arm64'
+	@mkdir -p "$(BUILD_DIR)/workerd/resources"
+	@cp ../workerd/node_modules/workerd/bin/workerd "$(WORKERD_STAGE)"
+	@cp ../workerd/dist/worker.bin "$(BUILD_DIR)/workerd/resources/worker.bin"
+	@cp ../workerd/node_modules/workerd/README.md "$(BUILD_DIR)/workerd/resources/WORKERD-README.md"
+
+compose-ui:
+	@/bin/bash Scripts/prepare-compose-ui.sh "$(COMPOSE_UI_STAGE)"
+
+.PHONY: guest-worker
+guest-worker:
+	@test -f "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/checksums.txt" || { echo 'Provide the Linux ARM64 guest-worker CI artifact via GUEST_ROUTER_ASSET_DIR.' >&2; exit 1; }
+	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
+	@mkdir -p "$(BUILD_DIR)/guest-worker"
+	@rsync -a --delete "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
+	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
+
+package: build smol-runtime compose-server workerd guest-worker compose-ui
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
@@ -79,6 +104,12 @@ package: build smol-runtime compose-server
 	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
+	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
+	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
+	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
+	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"
+	@cp ComposeUI.lock "$(RESOURCES)/"
+	@rm -f "$(RESOURCES)/Workerd.lock"
 	@echo "App package created at $(APP_BUNDLE)"
 
 # Sparkle contains several nested signed executables. Sign from the innermost
@@ -118,10 +149,17 @@ sign-compose-server:
 verify-compose-server:
 	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)"
 
+sign-workerd:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --entitlements Sources/macos/WorkerdEntitlements.plist --sign "$(SIGN_IDENTITY)" "$(WORKERD)"
+
+verify-workerd:
+	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)"
+
 bundle: package
 	@echo "Creating app bundle..."
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-workerd
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
 	@echo "Signing app bundle with: $(DEVELOPMENT_SIGN_IDENTITY)"
 	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPMENT_SIGN_IDENTITY)" "$(APP_BUNDLE)"
@@ -141,6 +179,7 @@ release-sign: package
 		fi
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-workerd
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
 	@echo "Signing with Developer ID: $(DEVELOPER_ID)"
 	@codesign --force --options runtime --timestamp --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
@@ -159,6 +198,7 @@ check: release-sign
 	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)" --release
 	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
 	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
+	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)" --release
 
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"

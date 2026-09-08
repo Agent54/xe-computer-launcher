@@ -1,5 +1,7 @@
 .DS_Store
 macos/.build
+macos/Worker/node_modules/
+macos/Worker/dist/
 macos/dist/
 macos/Packages
 xcuserdata/

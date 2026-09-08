@@ -96,6 +96,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var isPreparingForTermination = false
     private var runtimeStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
+    private let workerdServer = WorkerdServer()
+    private var hostServicesTask: Task<Void, Never>?
+    private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
     private var isWaitingForComposeShutdown = false
     private var statusItem: NSStatusItem?
     private let updateChannel = LauncherUpdateChannel.configured()
@@ -177,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             _ = updaterController
         }
 
+        startHostServices()
         // Permission onboarding must not depend on whether downloadable assets
         // or an existing Xe Computer app shim are already present.
         Task { @MainActor [weak self] in
@@ -188,25 +192,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func startBackgroundInitialization() {
         guard !isPreparingForTermination, runtimeStartupTask == nil else { return }
         runtimeStartupTask = Task {
-            guard VirtualizationSupport.isAvailable else {
-                ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
-                return
-            }
             do {
+                // Host UI is already running, even on machines without a hypervisor.
+                guard VirtualizationSupport.isAvailable else {
+                    ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
+                    return
+                }
                 guard let stacksURL = try ComposeStorage.chooseIfNeeded() else {
                     ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
                     return
                 }
                 try Task.checkCancellation()
-                let composeServer = ComposeServer(stacksURL: stacksURL)
-                self.composeServer = composeServer
+                if composeServer == nil { composeServer = ComposeServer(stacksURL: stacksURL) }
+                composeSocketURL = stacksURL.appendingPathComponent("compose.sock")
+                // The host supervisor starts Compose without waiting for Docker.
                 let result = try await SmolVMSetup.start()
                 ExternalState.shared.appendLog(
                     "launcher",
                     "SmolVM machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
                 )
                 try Task.checkCancellation()
-                try await composeServer.start(dockerSocketURL: result.dockerSocketURL)
             } catch is CancellationError {
                 // Quit or updater relaunch cancelled runtime startup.
             } catch {
@@ -236,6 +241,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
             _ = state.launchBrowserStack()
             Task { @MainActor in self.renderMenuLabels() }
+        }
+    }
+
+    private func startHostServices() {
+        if let path = ExternalState.shared.stringSetting("compose_storage_path"), !path.isEmpty {
+            composeSocketURL = URL(fileURLWithPath: path).appendingPathComponent("compose.sock")
+            composeServer = ComposeServer(stacksURL: URL(fileURLWithPath: path))
+        }
+        hostServicesTask = Task {
+            var activeComposeSocket: URL?
+            while !Task.isCancelled {
+                if activeComposeSocket != composeSocketURL {
+                    await workerdServer.stop()
+                    activeComposeSocket = composeSocketURL
+                }
+                do {
+                    try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
+                } catch is CancellationError { break }
+                catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
+                do { try await GuestRouter.shared.reconcile() }
+                catch is CancellationError { break }
+                catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
+                if let composeServer {
+                    do { try await composeServer.start(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
+                    catch is CancellationError { break }
+                    catch { ExternalState.shared.appendLog("compose", error.localizedDescription) }
+                }
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
         }
     }
 
@@ -283,10 +317,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // the delegate so updater-triggered termination and the Quit menu item
         // have identical service-state behavior.
         prepareForTermination()
-        if composeServer?.isRunning == true || isWaitingForComposeShutdown {
+        if composeServer?.isRunning == true || workerdServer.isRunning || hostServicesTask != nil || isWaitingForComposeShutdown {
             if !isWaitingForComposeShutdown {
                 isWaitingForComposeShutdown = true
                 Task {
+                    await hostServicesTask?.value
+                    await workerdServer.stop()
                     await composeServer?.stop()
                     sender.reply(toApplicationShouldTerminate: true)
                 }
@@ -300,6 +336,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
         runtimeStartupTask?.cancel()
+        hostServicesTask?.cancel()
+        workerdServer.requestStop()
         composeServer?.requestStop()
 
         let state = ExternalState.shared
