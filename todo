@@ -98,4 +98,16 @@ stale helium detection  + kill test
 use firefox store to extension screening
 
 
+" claude architecture reference:
+trait: the operator lives inside your tenant space, and a lot of engineering goes into sealing it off (PID 1 is non-dumpable, /proc/1/mem is denied even with CAP_SYS_PTRACE, your shell is missing CAP_SYS_RESOURCE).
 
+The harness is the thing running your tool calls and is a 324 MB compiled Bun binary on a read-only disk
+The disks split cleanly into yours (writable, persistent) and theirs (read-only, shared):
+
+$ lsblk -o NAME,SIZE,RO,MOUNTPOINT
+vda   256G  0  /                    # yours: writable, survives reclaim
+vdc   341M  1  /opt/claude-code     # theirs: the 324 MB `claude` harness (Bun)
+vdd  45.6M  1  /opt/env-runner      # theirs: the task launcher
+vde/vdf ... 1  /mnt/skills/...      # theirs: skills
+, through an egress gateway that is 443-only and MITM'd (CN = Egress Gateway ... (production)), with api.anthropic.com pinned in /etc/hosts. There is no inbound at all (192.0.2.2, an RFC-5737 test address). Auth is a host-minted OAuth token, cached root-only on disk and rotated per boot.
+"
