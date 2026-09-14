@@ -38,14 +38,16 @@ enum SmolVMSetup {
                 ]
             )
             try await client.createMachine(spec)
-        } else if existing?.isRunning == false {
+        } else {
+            // The launcher owns this machine. A running instance here survived an
+            // earlier launcher crash or predates lifecycle-managed shutdown, so
+            // restart it with the runtime bundled in the current app.
+            try await client.stopMachine(named: machineName)
             removeStaleSocketIfPresent()
         }
 
-        if existing?.isRunning != true {
-            try Task.checkCancellation()
-            try await client.startMachine(named: machineName)
-        }
+        try Task.checkCancellation()
+        try await client.startMachine(named: machineName)
 
         let deadline = ContinuousClock.now + .seconds(90)
         while ContinuousClock.now < deadline {
@@ -58,6 +60,15 @@ enum SmolVMSetup {
         }
 
         throw SmolVMSetupError.dockerSocketUnavailable(dockerSocketURL.path)
+    }
+
+    static func stop() async throws {
+        let client = SmolVMClient.shared
+        let machineExists = try await client.listMachines().contains { $0.name == machineName }
+        if machineExists {
+            try await client.stopMachine(named: machineName)
+        }
+        removeStaleSocketIfPresent()
     }
 
     private static func removeStaleSocketIfPresent() {

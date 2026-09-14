@@ -299,7 +299,13 @@ final class ExternalState: @unchecked Sendable {
     }
 
     func launchBrowserStack() -> String? {
-        startDarc()
+        if boolSetting("darc_was_running", default: true) {
+            return startDarc()
+        }
+        if boolSetting("chrome_was_running", default: true) {
+            return startChrome()
+        }
+        return nil
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
@@ -375,12 +381,24 @@ final class ExternalState: @unchecked Sendable {
     func stopDarc() {
         let wasRunning = darcRunning
         if let app = darcApp, !app.isTerminated {
-            app.terminate()
+            _ = app.terminate()
+            waitForApplicationToExit(app, timeout: 3.0)
+            if !app.isTerminated {
+                _ = app.forceTerminate()
+                waitForApplicationToExit(app, timeout: 2.0)
+            }
         }
         darcApp = nil
         terminateSubprocess("darc_log")
         appendLog("launcher", "Xe Computer stopped (wasRunning=\(wasRunning))")
         print("[ExternalState] Xe Computer stopped (wasRunning=\(wasRunning))")
+    }
+
+    private func waitForApplicationToExit(_ app: NSRunningApplication, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline && !app.isTerminated {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     private func desktopForWindow(_ windowID: UInt32) -> Int? {

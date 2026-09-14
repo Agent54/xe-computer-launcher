@@ -95,11 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var didFinishNormalStartup = false
     private var isPreparingForTermination = false
     private var runtimeStartupTask: Task<Void, Never>?
+    private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
     private let workerdServer = WorkerdServer()
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
-    private var isWaitingForComposeShutdown = false
+    private var isWaitingForRuntimeShutdown = false
     private var statusItem: NSStatusItem?
     private let updateChannel = LauncherUpdateChannel.configured()
     private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
@@ -190,7 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func startBackgroundInitialization() {
-        guard !isPreparingForTermination, runtimeStartupTask == nil else { return }
+        guard !isPreparingForTermination, runtimeStartupTask == nil, browserStartupTask == nil else { return }
         runtimeStartupTask = Task {
             do {
                 // Host UI is already running, even on machines without a hypervisor.
@@ -222,25 +223,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
         }
 
-        // Do expensive init off main thread.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        browserStartupTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let state = ExternalState.shared
-            state.updateAll()
+            let zombies = await Task.detached(priority: .userInitiated) {
+                state.updateAll()
+                return state.findZombieProcesses()
+            }.value
+            guard !Task.isCancelled else { return }
 
             // Check for zombie Helium/Darc processes before launching
-            let zombies = state.findZombieProcesses()
             if !zombies.isEmpty {
-                let sem = DispatchSemaphore(value: 0)
-                Task { @MainActor in
-                    self.showZombieAlert(zombies)
-                    sem.signal()
-                }
-                sem.wait()
+                showZombieAlert(zombies)
             }
+            guard !Task.isCancelled else { return }
 
-            _ = state.launchBrowserStack()
-            Task { @MainActor in self.renderMenuLabels() }
+            let launchError = await Task.detached(priority: .userInitiated) {
+                state.launchBrowserStack()
+            }.value
+            if let launchError {
+                state.appendLog("launcher", "Xe Computer state restoration failed: \(launchError)")
+            }
+            guard !Task.isCancelled else { return }
+            renderMenuLabels()
         }
     }
 
@@ -317,32 +322,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // the delegate so updater-triggered termination and the Quit menu item
         // have identical service-state behavior.
         prepareForTermination()
-        if composeServer?.isRunning == true || workerdServer.isRunning || hostServicesTask != nil || isWaitingForComposeShutdown {
-            if !isWaitingForComposeShutdown {
-                isWaitingForComposeShutdown = true
-                Task {
-                    await hostServicesTask?.value
-                    await workerdServer.stop()
-                    await composeServer?.stop()
-                    sender.reply(toApplicationShouldTerminate: true)
+        guard didFinishNormalStartup else { return .terminateNow }
+
+        if !isWaitingForRuntimeShutdown {
+            isWaitingForRuntimeShutdown = true
+            Task {
+                // A cancelled startup may still be waiting for a synchronous
+                // `smolvm-bin machine start` command. Let it finish before stop
+                // so start and stop cannot race each other.
+                await runtimeStartupTask?.value
+                await browserStartupTask?.value
+                await hostServicesTask?.value
+                await workerdServer.stop()
+                await composeServer?.stop()
+
+                await Task.detached(priority: .userInitiated) {
+                    let state = ExternalState.shared
+                    state.stopDarc()
+                    state.stopChrome()
+                }.value
+
+                do {
+                    try await SmolVMSetup.stop()
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "SmolVM machine '\(SmolVMSetup.machineName)' stopped"
+                    )
+                } catch {
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)': \(error.localizedDescription)"
+                    )
                 }
+
+                sender.reply(toApplicationShouldTerminate: true)
             }
-            return .terminateLater
         }
-        return .terminateNow
+        return .terminateLater
     }
 
     private func prepareForTermination() {
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
         runtimeStartupTask?.cancel()
+        browserStartupTask?.cancel()
         hostServicesTask?.cancel()
         workerdServer.requestStop()
         composeServer?.requestStop()
 
         let state = ExternalState.shared
-        // The Xe Computer shim exits with its host browser.
-        state.stopChrome()
+        state.setBoolSetting("darc_was_running", state.darcRunning)
+        state.setBoolSetting("chrome_was_running", state.chromeRunning)
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -852,13 +882,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func darcStartAction() {
         runServiceAction("darc") {
-            _ = ExternalState.shared.startDarc()
+            let state = ExternalState.shared
+            if state.startDarc() == nil {
+                state.setBoolSetting("darc_was_running", true)
+                state.setBoolSetting("chrome_was_running", true)
+            }
         }
     }
 
     @objc private func darcStopAction() {
         runServiceAction("darc") {
-            ExternalState.shared.stopDarc()
+            let state = ExternalState.shared
+            state.stopDarc()
+            state.setBoolSetting("darc_was_running", false)
         }
     }
 
@@ -997,13 +1033,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func chromeStartAction() {
         runServiceAction("chrome") {
-            _ = ExternalState.shared.startChrome()
+            let state = ExternalState.shared
+            if state.startChrome() == nil {
+                state.setBoolSetting("chrome_was_running", true)
+            }
         }
     }
 
     @objc private func chromeStopAction() {
         runServiceAction("chrome") {
-            ExternalState.shared.stopChrome()
+            let state = ExternalState.shared
+            state.stopDarc()
+            state.stopChrome()
+            state.setBoolSetting("darc_was_running", false)
+            state.setBoolSetting("chrome_was_running", false)
         }
     }
 
