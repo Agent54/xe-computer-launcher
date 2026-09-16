@@ -84,6 +84,8 @@ final class ExternalState: @unchecked Sendable {
     var subprocesses: [String: Process] = [:]
     /// PID for the browser process spawned via posix_spawn (not tracked by Process)
     var _browserPid: pid_t = 0
+    private let browserLifecycleLock = NSLock()
+    private var _browserStackStopRequested = false
     private var darcApp: NSRunningApplication?
     /// Public read-only access to the Darc NSRunningApplication reference for activation.
     var darcAppRef: NSRunningApplication? {
@@ -299,16 +301,21 @@ final class ExternalState: @unchecked Sendable {
     }
 
     func launchBrowserStack() -> String? {
-        if boolSetting("darc_was_running", default: true) {
+        guard !isBrowserStackStopRequested else { return "Browser startup cancelled because Xe Launcher is shutting down" }
+        if boolSetting("darc_should_run", default: true) {
             return startDarc()
         }
-        if boolSetting("chrome_was_running", default: true) {
+        if boolSetting("chrome_should_run", default: true) {
             return startChrome()
         }
         return nil
     }
 
     func requestBrowserStackStop() {
+        browserLifecycleLock.lock()
+        _browserStackStopRequested = true
+        browserLifecycleLock.unlock()
+
         if let app = darcApp, !app.isTerminated {
             _ = app.terminate()
         }
@@ -317,6 +324,12 @@ final class ExternalState: @unchecked Sendable {
         if processGroup > 0 {
             kill(-processGroup, SIGTERM)
         }
+    }
+
+    var isBrowserStackStopRequested: Bool {
+        browserLifecycleLock.lock()
+        defer { browserLifecycleLock.unlock() }
+        return _browserStackStopRequested
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
@@ -343,7 +356,16 @@ final class ExternalState: @unchecked Sendable {
 
 
     func startDarc() -> String? {
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
         if !chromeRunning, let err = startChrome() { return err }
+
+        let chromeReady = sendCDP(method: "Browser.getVersion", timeout: 10) != nil
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
+        guard chromeReady else {
+            let msg = "Chrome did not become ready before opening Xe Computer"
+            appendLog("launcher", msg)
+            return msg
+        }
 
         let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
@@ -366,21 +388,67 @@ final class ExternalState: @unchecked Sendable {
             if let error {
                 box.error = "Xe Computer open failed: \(error.localizedDescription)"
             } else if let app {
-                self?.darcApp = app
+                if self?.isBrowserStackStopRequested == true {
+                    _ = app.terminate()
+                } else {
+                    self?.darcApp = app
+                }
             }
             semaphore.signal()
         }
-        _ = semaphore.wait(timeout: .now() + 10)
+
+        let openDeadline = Date().addingTimeInterval(10)
+        var openCompleted = false
+        while Date() < openDeadline {
+            if semaphore.wait(timeout: .now() + 0.1) == .success {
+                openCompleted = true
+                break
+            }
+            if isBrowserStackStopRequested {
+                return "Xe Computer startup cancelled because Xe Launcher is shutting down"
+            }
+        }
+        guard openCompleted else {
+            let msg = "Xe Computer open timed out"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        if isBrowserStackStopRequested {
+            if let app = darcApp, !app.isTerminated { _ = app.terminate() }
+            return "Xe Computer startup cancelled because Xe Launcher is shutting down"
+        }
 
         if let err = box.error {
             appendLog("launcher", err)
             print("[ExternalState] \(err)")
             return err
         }
-        let running = darcRunning
+        let runningDeadline = Date().addingTimeInterval(5)
+        while Date() < runningDeadline && !darcRunning {
+            if isBrowserStackStopRequested {
+                return "Xe Computer startup cancelled because Xe Launcher is shutting down"
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard darcRunning else {
+            let msg = "Xe Computer was opened but did not remain running"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        // Give an app shim that fails during its initial browser connection a
+        // moment to exit before recording the restore as successful.
+        Thread.sleep(forTimeInterval: 0.25)
+        guard darcRunning else {
+            let msg = "Xe Computer exited while connecting to Chrome"
+            appendLog("launcher", msg)
+            return msg
+        }
+
         let pid = darcApp?.processIdentifier ?? -1
-        appendLog("launcher", "Xe Computer started via NSWorkspace (isRunning=\(running), pid=\(pid))")
-        print("[ExternalState] Xe Computer started, isRunning=\(running)")
+        appendLog("launcher", "Xe Computer started via NSWorkspace (pid=\(pid))")
+        print("[ExternalState] Xe Computer started, pid=\(pid)")
 
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {
@@ -395,6 +463,7 @@ final class ExternalState: @unchecked Sendable {
             _ = app.terminate()
             waitForApplicationToExit(app, timeout: 3.0)
             if !app.isTerminated {
+                appendLog("launcher", "Xe Computer did not exit after 3.0s; force terminating it")
                 _ = app.forceTerminate()
                 waitForApplicationToExit(app, timeout: 2.0)
             }

@@ -17,6 +17,13 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         "compose": .systemBlue
     ]
 
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
     init() {
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 500),
@@ -134,6 +141,14 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         for entry in entries {
             let sourceColor = Self.sourceColors[entry.source] ?? .systemGray
 
+            let timestamp = NSAttributedString(
+                string: "[\(Self.timestampFormatter.string(from: entry.timestamp))] ",
+                attributes: [
+                    .font: defaultFont,
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]
+            )
+
             let prefix = NSAttributedString(string: "[\(entry.source)] ", attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
                 .foregroundColor: sourceColor
@@ -144,6 +159,7 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
                 .foregroundColor: defaultColor
             ])
 
+            attributed.append(timestamp)
             attributed.append(prefix)
             attributed.append(line)
         }

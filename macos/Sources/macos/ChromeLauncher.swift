@@ -55,6 +55,10 @@ extension ExternalState {
     }
 
     func startChrome() -> String? {
+        guard !isBrowserStackStopRequested else {
+            return "Chrome startup cancelled because Xe Launcher is shutting down"
+        }
+
         // Re-check if the configured chrome is available (it may have been downloaded since last check)
         refreshChromeAvailability()
 
@@ -85,13 +89,13 @@ extension ExternalState {
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
         let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
         let shimDir = Self.appDataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
-        let devShimExists = FileManager.default.fileExists(
-            atPath: shimDir.appendingPathComponent(Self.xeComputerDevelopmentShimAppName).path
-        )
+        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
+        let shimApp = shimDir.appendingPathComponent(shimAppName)
+        let shimExists = FileManager.default.fileExists(atPath: shimApp.path)
 
         if let overrideURL = darcOverrideURL(forProfile: profileName),
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
-           !devShimExists {
+           !shimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
         } else if !isDevProxy {
             if let iwaURL = configuredSourceAssetURL(name: "darc", dataURL: Self.appDataURL),
@@ -122,6 +126,11 @@ extension ExternalState {
             cdpWriteHandle = toChrome.fileHandleForWriting
             cdpReadHandle = fromChrome.fileHandleForReading
 
+            if isBrowserStackStopRequested {
+                terminateBrowserProcessGroup()
+                return "Chrome startup cancelled because Xe Launcher is shutting down"
+            }
+
             appendLog("launcher", "Chrome started with debug pipe (\(chrome.name), pid=\(_browserPid), isRunning=\(chromeRunning))")
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
@@ -131,9 +140,7 @@ extension ExternalState {
             }
 
             // Check if app shim needs provisioning (in parallel)
-            let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
-            let shimApp = shimDir.appendingPathComponent(shimAppName)
-            if !FileManager.default.fileExists(atPath: shimApp.path) {
+            if !shimExists {
                 provisionAppShim(profileName: profileName, profileDir: profileDir, shimApp: shimApp, chrome: chrome)
             }
 
@@ -187,6 +194,7 @@ extension ExternalState {
         let fd = readHandle.fileDescriptor
 
         while Date() < deadline {
+            if isBrowserStackStopRequested { return nil }
             while let zeroIdx = Self._cdpReadBuffer.firstIndex(of: 0) {
                 let messageData = Self._cdpReadBuffer[Self._cdpReadBuffer.startIndex..<zeroIdx]
                 Self._cdpReadBuffer = Data(Self._cdpReadBuffer[Self._cdpReadBuffer.index(after: zeroIdx)...])
@@ -236,6 +244,7 @@ extension ExternalState {
         waitForBrowserProcessGroupToExit(processGroup, timeout: 3.0)
 
         if kill(-processGroup, 0) == 0 {
+            appendLog("launcher", "Chrome process group did not exit after 3.0s; sending SIGKILL")
             kill(-processGroup, SIGKILL)
             waitForBrowserProcessGroupToExit(processGroup, timeout: 2.0)
         }
@@ -272,6 +281,7 @@ extension ExternalState {
             // Poll for the shim to appear with a valid code signature (max ~20s)
             var found = false
             for _ in 0..<40 {
+                if self.isBrowserStackStopRequested { return }
                 if fm.fileExists(atPath: shimCodeSignature) {
                     found = true
                     break
@@ -351,6 +361,7 @@ extension ExternalState {
             }
 
             // Restart Chrome
+            guard !self.isBrowserStackStopRequested else { return }
             self.appendLog("launcher", "Restarting Chrome and Xe Computer after shim provisioning...")
             let err = self.startDarc()
             if let err {

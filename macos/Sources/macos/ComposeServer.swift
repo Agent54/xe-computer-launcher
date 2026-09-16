@@ -153,14 +153,17 @@ final class ComposeServer {
         requestStop()
         // The fork allows five seconds for HTTP shutdown. Allow some margin
         // before forcing this owned child to exit, including during updates.
-        await Task.detached {
+        let forced = await Task.detached {
             let deadline = ContinuousClock.now + .seconds(8)
             while child.isRunning && ContinuousClock.now < deadline {
                 try? await Task.sleep(for: .milliseconds(50))
             }
-            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            let forced = child.isRunning
+            if forced { kill(child.processIdentifier, SIGKILL) }
             child.waitUntilExit()
+            return forced
         }.value
+        if forced { log("Compose server did not exit after 8.0s; sent SIGKILL.") }
         if process === child { process = nil }
     }
 }

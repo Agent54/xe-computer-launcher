@@ -149,12 +149,15 @@ final class WorkerdServer {
     func stop() async {
         requestStop()
         if let child = process {
-            await Task.detached {
+            let forced = await Task.detached {
                 let deadline = ContinuousClock.now + .seconds(5)
                 while child.isRunning && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(50)) }
-                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+                let forced = child.isRunning
+                if forced { kill(child.processIdentifier, SIGKILL) }
                 child.waitUntilExit()
+                return forced
             }.value
+            if forced { log("workerd did not exit after 5.0s; sent SIGKILL.") }
             if process === child { process = nil }
         }
         if lockDescriptor >= 0 {

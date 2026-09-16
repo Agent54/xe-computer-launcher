@@ -104,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var terminationTimeoutTask: Task<Void, Never>?
     private var didReplyToTermination = false
     private var statusItem: NSStatusItem?
+    private var statusMessageItem: NSMenuItem?
+    private var shutdownProgressIndicator: NSProgressIndicator?
     private let updateChannel = LauncherUpdateChannel.configured()
     private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
         ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -251,10 +253,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let launchError = await Task.detached(priority: .userInitiated) {
                 state.launchBrowserStack()
             }.value
+            guard !Task.isCancelled else { return }
             if let launchError {
                 state.appendLog("launcher", "Xe Computer state restoration failed: \(launchError)")
             }
-            guard !Task.isCancelled else { return }
             renderMenuLabels()
         }
     }
@@ -336,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         if !isWaitingForRuntimeShutdown {
             isWaitingForRuntimeShutdown = true
+            let shutdownStartedAt = Date()
             ExternalState.shared.appendLog("launcher", "Shutdown started")
 
             let runtimeStartupTask = runtimeStartupTask
@@ -343,25 +346,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let hostServicesTask = hostServicesTask
 
             let vmCleanup = Task { @MainActor in
+                let phaseStartedAt = Date()
                 ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
                 await runtimeStartupTask?.value
                 do {
                     try await SmolVMSetup.stop()
                     ExternalState.shared.appendLog(
                         "launcher",
-                        "SmolVM machine '\(SmolVMSetup.machineName)' stopped"
+                        "SmolVM machine '\(SmolVMSetup.machineName)' stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
                     )
                 } catch is CancellationError {
-                    ExternalState.shared.appendLog("launcher", "SmolVM shutdown cancelled")
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "SmolVM shutdown cancelled after \(Self.elapsedDescription(since: phaseStartedAt))"
+                    )
                 } catch {
                     ExternalState.shared.appendLog(
                         "launcher",
-                        "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)': \(error.localizedDescription)"
+                        "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)' after \(Self.elapsedDescription(since: phaseStartedAt)): \(error.localizedDescription)"
                     )
                 }
             }
 
             let browserCleanup = Task { @MainActor in
+                let phaseStartedAt = Date()
                 ExternalState.shared.appendLog("launcher", "Stopping Xe Computer and browser")
                 await browserStartupTask?.value
                 await Task.detached(priority: .userInitiated) {
@@ -369,15 +377,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     state.stopDarc()
                     state.stopChrome()
                 }.value
-                ExternalState.shared.appendLog("launcher", "Xe Computer and browser stopped")
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Xe Computer and browser stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
+                )
             }
 
             let hostCleanup = Task { @MainActor in
+                let phaseStartedAt = Date()
                 ExternalState.shared.appendLog("launcher", "Stopping host services")
                 await workerdServer.stop()
                 await composeServer?.stop()
                 await hostServicesTask?.value
-                ExternalState.shared.appendLog("launcher", "Host services stopped")
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
+                )
             }
 
             terminationTimeoutTask = Task { @MainActor [weak self] in
@@ -397,7 +412,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 await vmCleanup.value
                 await browserCleanup.value
                 await hostCleanup.value
-                ExternalState.shared.appendLog("launcher", "Shutdown complete")
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Shutdown complete in \(Self.elapsedDescription(since: shutdownStartedAt))"
+                )
                 finishTermination(sender)
             }
         }
@@ -411,9 +429,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         sender.reply(toApplicationShouldTerminate: true)
     }
 
+    private static func elapsedDescription(since start: Date) -> String {
+        String(format: "%.2fs", Date().timeIntervalSince(start))
+    }
+
     private func prepareForTermination() {
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
+        beginShutdownPresentation()
         runtimeStartupTask?.cancel()
         browserStartupTask?.cancel()
         hostServicesTask?.cancel()
@@ -421,9 +444,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         composeServer?.requestStop()
 
         let state = ExternalState.shared
-        state.setBoolSetting("darc_was_running", state.darcRunning)
-        state.setBoolSetting("chrome_was_running", state.chromeRunning)
+        // Preserve positive observations at quit. Explicit Stop actions record
+        // the off state when the user requests it; an unreliable process lookup
+        // during termination must never erase the requested restore state.
+        if state.darcRunning {
+            state.setBoolSetting("darc_should_run", true)
+            state.setBoolSetting("chrome_should_run", true)
+        } else if state.chromeRunning {
+            state.setBoolSetting("chrome_should_run", true)
+        }
         state.requestBrowserStackStop()
+    }
+
+    private func beginShutdownPresentation() {
+        statusMessageItem?.title = "Status: Shutting down…"
+        if let menu = statusItem?.menu {
+            disableMenuItemsForShutdown(in: menu)
+            menu.update()
+        }
+
+        guard shutdownProgressIndicator == nil, let button = statusItem?.button else { return }
+        statusItem?.length = NSStatusItem.squareLength
+        button.image = nil
+        button.toolTip = "Xe Launcher is shutting down"
+
+        let indicator = NSProgressIndicator(frame: NSRect(x: 4, y: 4, width: 14, height: 14))
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = true
+        indicator.isDisplayedWhenStopped = false
+        indicator.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        button.addSubview(indicator)
+        indicator.startAnimation(nil)
+        shutdownProgressIndicator = indicator
+    }
+
+    private func disableMenuItemsForShutdown(in menu: NSMenu) {
+        for item in menu.items {
+            if item !== statusMessageItem && !item.isSeparatorItem {
+                item.isEnabled = false
+            }
+            if let submenu = item.submenu {
+                disableMenuItemsForShutdown(in: submenu)
+            }
+        }
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -466,7 +530,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
-        menu.addItem(NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: ""))
+        let statusMessageItem = NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: "")
+        menu.addItem(statusMessageItem)
+        self.statusMessageItem = statusMessageItem
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -805,6 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     func menuWillOpen(_ menu: NSMenu) {
         renderMenuLabels()
+        guard !isPreparingForTermination else { return }
         let optionHeld = isOptionKeyHeld
         lastOptionKeyState = optionHeld
         updateOptionOnlyMenuItems(optionHeld: optionHeld)
@@ -867,6 +934,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func renderMenuLabels() {
+        if isPreparingForTermination {
+            statusMessageItem?.title = "Status: Shutting down…"
+            if let menu = statusItem?.menu {
+                disableMenuItemsForShutdown(in: menu)
+                menu.update()
+            }
+            return
+        }
+
         let state = ExternalState.shared
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
@@ -935,8 +1011,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runServiceAction("darc") {
             let state = ExternalState.shared
             if state.startDarc() == nil {
-                state.setBoolSetting("darc_was_running", true)
-                state.setBoolSetting("chrome_was_running", true)
+                state.setBoolSetting("darc_should_run", true)
+                state.setBoolSetting("chrome_should_run", true)
             }
         }
     }
@@ -945,7 +1021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runServiceAction("darc") {
             let state = ExternalState.shared
             state.stopDarc()
-            state.setBoolSetting("darc_was_running", false)
+            state.setBoolSetting("darc_should_run", false)
         }
     }
 
@@ -1086,7 +1162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runServiceAction("chrome") {
             let state = ExternalState.shared
             if state.startChrome() == nil {
-                state.setBoolSetting("chrome_was_running", true)
+                state.setBoolSetting("chrome_should_run", true)
             }
         }
     }
@@ -1096,8 +1172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let state = ExternalState.shared
             state.stopDarc()
             state.stopChrome()
-            state.setBoolSetting("darc_was_running", false)
-            state.setBoolSetting("chrome_was_running", false)
+            state.setBoolSetting("darc_should_run", false)
+            state.setBoolSetting("chrome_should_run", false)
         }
     }
 
