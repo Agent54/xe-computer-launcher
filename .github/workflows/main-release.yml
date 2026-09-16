@@ -366,7 +366,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         shell: bash
         run: |
-          feed_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml"
+          feed_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg"
           macos/Tests/Integration/verify-appcast.sh \
             "$feed_url" \

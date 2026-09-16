@@ -122,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         updaterDelegate: self,
         userDriverDelegate: updaterUserDriverDelegate
     )
+    private var updateFeedCacheKey = UUID().uuidString
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
     private var specialKeyCheck: Any?
@@ -149,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
     private var updateChannelItem: NSMenuItem?
+    private var checkForUpdatesItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
@@ -589,7 +591,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(updateChannelItem)
         self.updateChannelItem = updateChannelItem
         let updateTitle = updateChannel == .int ? "Update (int)" : "Check for Updates…"
-        menu.addItem(NSMenuItem(title: updateTitle, action: #selector(checkForUpdatesAction), keyEquivalent: ""))
+        let checkForUpdatesItem = NSMenuItem(
+            title: updateTitle,
+            action: #selector(checkForUpdatesAction),
+            keyEquivalent: ""
+        )
+        menu.addItem(checkForUpdatesItem)
+        self.checkForUpdatesItem = checkForUpdatesItem
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -988,6 +996,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
         hideDockIconItem?.state = state.boolSetting("hide_dock_icon", default: false) ? .on : .off
+        if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+            checkForUpdatesItem?.isEnabled = updaterController.updater.canCheckForUpdates
+        } else {
+            checkForUpdatesItem?.isEnabled = true
+        }
 
         // Force menu to notice title changes
         statusItem?.menu?.update()
@@ -1281,6 +1294,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         NSApp.activate(ignoringOtherApps: true)
+        guard updaterController.updater.canCheckForUpdates else {
+            ExternalState.shared.appendLog("launcher", "An update check is already in progress")
+            return
+        }
         ExternalState.shared.appendLog(
             "launcher",
             "Checking for updates on \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
@@ -1289,7 +1306,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     func feedURLString(for updater: SPUUpdater) -> String? {
-        updateChannel.feedURLString
+        guard var components = URLComponents(string: updateChannel.feedURLString) else {
+            return updateChannel.feedURLString
+        }
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "check", value: updateFeedCacheKey)
+        ]
+        return components.string
+    }
+
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        // raw.githubusercontent.com serves the channel feed with a five-minute
+        // CDN lifetime. A unique URL for every Sparkle cycle prevents a newly
+        // published appcast from being hidden behind the previous CDN entry.
+        updateFeedCacheKey = UUID().uuidString
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
