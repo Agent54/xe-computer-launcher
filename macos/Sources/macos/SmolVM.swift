@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct SmolVMCommandResult: Sendable {
     let standardOutput: String
@@ -84,14 +85,15 @@ actor SmolVMClient {
     private let fileManager = FileManager.default
     private let runtimeURL: URL
     private let dataURL: URL
+    private var activeProcess: Process?
 
     init(runtimeURL: URL = SmolVMPaths.runtimeURL, dataURL: URL = SmolVMPaths.dataURL) {
         self.runtimeURL = runtimeURL
         self.dataURL = dataURL
     }
 
-    func listMachines() throws -> [SmolVMMachine] {
-        let result = try invoke(["machine", "ls", "--json"])
+    func listMachines() async throws -> [SmolVMMachine] {
+        let result = try await invoke(["machine", "ls", "--json"])
         guard let data = result.standardOutput.data(using: .utf8) else {
             throw SmolVMError.invalidMachineList("output was not UTF-8")
         }
@@ -102,7 +104,7 @@ actor SmolVMClient {
         }
     }
 
-    func createMachine(_ spec: SmolVMMachineSpec) throws {
+    func createMachine(_ spec: SmolVMMachineSpec) async throws {
         var arguments = [
             "machine", "create",
             "--name", spec.name,
@@ -126,23 +128,27 @@ actor SmolVMClient {
         for (key, value) in spec.labels.sorted(by: { $0.key < $1.key }) {
             arguments += ["--label", "\(key)=\(value)"]
         }
-        _ = try invoke(arguments)
+        _ = try await invoke(arguments)
     }
 
-    func startMachine(named name: String) throws {
-        _ = try invoke(["machine", "start", "--name", name])
+    func startMachine(named name: String) async throws {
+        _ = try await invoke(["machine", "start", "--name", name])
     }
 
-    func stopMachine(named name: String) throws {
-        _ = try invoke(["machine", "stop", "--name", name])
+    func stopMachine(named name: String) async throws {
+        _ = try await invoke(["machine", "stop", "--name", name])
     }
 
-    func execute(in name: String, command: [String], detached: Bool = false) throws -> SmolVMCommandResult {
-        try invoke(["machine", "exec", "--name", name] + (detached ? ["--detach"] : []) + ["--"] + command)
+    func execute(in name: String, command: [String], detached: Bool = false) async throws -> SmolVMCommandResult {
+        try await invoke(["machine", "exec", "--name", name] + (detached ? ["--detach"] : []) + ["--"] + command)
     }
 
     @discardableResult
-    func invoke(_ arguments: [String]) throws -> SmolVMCommandResult {
+    func invoke(_ arguments: [String]) async throws -> SmolVMCommandResult {
+        while activeProcess != nil {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(25))
+        }
         try prepareStateDirectories()
 
         let executableURL = runtimeURL.appendingPathComponent("smolvm-bin")
@@ -188,10 +194,27 @@ actor SmolVMClient {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             throw SmolVMError.commandLaunchFailed(error.localizedDescription)
         }
+        activeProcess = process
+        defer {
+            if activeProcess === process { activeProcess = nil }
+        }
+
+        await withTaskCancellationHandler {
+            await Task.detached {
+                process.waitUntilExit()
+            }.value
+        } onCancel: {
+            guard process.isRunning else { return }
+            let pid = process.processIdentifier
+            process.terminate()
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+        try Task.checkCancellation()
 
         try outputHandle.close()
         try errorHandle.close()

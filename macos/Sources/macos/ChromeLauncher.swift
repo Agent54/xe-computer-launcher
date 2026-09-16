@@ -539,9 +539,8 @@ extension ExternalState {
         let profileDir: String? // extracted from --user-data-dir if present
     }
 
-    /// Find running Helium / Darc (app_mode_loader) processes that were NOT
-    /// spawned by this launcher instance.  These are "zombies" left over from
-    /// a previous crash or unclean shutdown.
+    /// Find browser and IWA processes using the launcher's private profiles and
+    /// shims. These can only belong to an earlier launcher process.
     func findZombieProcesses() -> [ZombieProcess] {
         // Get all running args via `ps`
         let pipe = Pipe()
@@ -559,11 +558,15 @@ extension ExternalState {
             return []
         }
 
+        let profilesRoot = URL(fileURLWithPath: Self.profilesPath, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        let shimsRoot = Self.appDataURL.appendingPathComponent("shims", isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path
+
         // Our own managed PIDs
         let ownBrowserPid = _browserPid
-        let ownDarcPid = darcAppRef?.processIdentifier ?? -1
         let ownPid = ProcessInfo.processInfo.processIdentifier
-        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownXEComputerPid=\(ownDarcPid), ownPid=\(ownPid)")
+        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownPid=\(ownPid)")
 
         var zombies: [ZombieProcess] = []
 
@@ -582,12 +585,24 @@ extension ExternalState {
             let isDarc = comm.hasSuffix("/app_mode_loader") || comm == "app_mode_loader"
 
             guard isHelium || isDarc else { continue }
-            guard pid != ownBrowserPid && pid != ownDarcPid else { continue }
+            guard pid != ownBrowserPid else { continue }
             // Don't include our own launcher process
             guard pid != ownPid else { continue }
 
-            // Try to get command-line args to extract --user-data-dir
             let profileDir = Self.extractUserDataDir(pid: pid)
+            if isHelium {
+                guard let profileDir else { continue }
+                let normalizedProfile = URL(fileURLWithPath: profileDir, isDirectory: true)
+                    .standardizedFileURL.resolvingSymlinksInPath().path
+                guard normalizedProfile == profilesRoot || normalizedProfile.hasPrefix(profilesRoot + "/") else {
+                    continue
+                }
+            } else {
+                let executablePath = URL(fileURLWithPath: comm)
+                    .standardizedFileURL.resolvingSymlinksInPath().path
+                guard executablePath.hasPrefix(shimsRoot + "/") else { continue }
+            }
+
             let name = isHelium ? "Helium" : "Xe Computer (app_mode_loader)"
             zombies.append(ZombieProcess(pid: pid, name: name, profileDir: profileDir))
         }
@@ -595,7 +610,8 @@ extension ExternalState {
         return zombies
     }
 
-    /// Extract the --user-data-dir value from a process's command-line arguments using sysctl.
+    /// Extract the --user-data-dir value from a process's command line. The path
+    /// can contain spaces, so read until the following command-line flag.
     private static func extractUserDataDir(pid: pid_t) -> String? {
         // Use ps to get full command line
         let pipe = Pipe()
@@ -610,13 +626,12 @@ extension ExternalState {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let args = String(data: data, encoding: .utf8) else { return nil }
 
-        // Find --user-data-dir=...
-        for part in args.components(separatedBy: " ") {
-            if part.hasPrefix("--user-data-dir=") {
-                return String(part.dropFirst("--user-data-dir=".count))
-            }
-        }
-        return nil
+        let marker = "--user-data-dir="
+        guard let markerRange = args.range(of: marker) else { return nil }
+        let value = args[markerRange.upperBound...]
+        let end = value.range(of: " --")?.lowerBound ?? value.endIndex
+        let path = value[..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 
     /// Kill the given zombie processes.

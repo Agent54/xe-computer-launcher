@@ -308,6 +308,17 @@ final class ExternalState: @unchecked Sendable {
         return nil
     }
 
+    func requestBrowserStackStop() {
+        if let app = darcApp, !app.isTerminated {
+            _ = app.terminate()
+        }
+        terminateSubprocess("darc_log")
+        let processGroup = _browserPid
+        if processGroup > 0 {
+            kill(-processGroup, SIGTERM)
+        }
+    }
+
     func getLogs(source: String? = nil) -> [LogEntry] {
         if let source {
             return allLogs.filter { $0.source == source }

@@ -101,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
     private var isWaitingForRuntimeShutdown = false
+    private var terminationTimeoutTask: Task<Void, Never>?
+    private var didReplyToTermination = false
     private var statusItem: NSStatusItem?
     private let updateChannel = LauncherUpdateChannel.configured()
     private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
@@ -182,11 +184,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         startHostServices()
-        // Permission onboarding must not depend on whether downloadable assets
-        // or an existing Xe Computer app shim are already present.
-        Task { @MainActor [weak self] in
+        startBackgroundInitialization()
+
+        // Accessibility onboarding is independent from browser and VM startup.
+        // Waiting for the user here used to delay state restoration by up to a
+        // minute even though launching the browser requires no AX permission.
+        Task { @MainActor in
             _ = await AccessibilityPermission.requestIfNeeded()
-            self?.startBackgroundInitialization()
         }
     }
 
@@ -226,17 +230,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         browserStartupTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let state = ExternalState.shared
-            let zombies = await Task.detached(priority: .userInitiated) {
+            state.appendLog("launcher", "Recovering saved Xe Computer and browser state")
+            let recoveredProcessCount = await Task.detached(priority: .userInitiated) {
                 state.updateAll()
-                return state.findZombieProcesses()
+                state.stopDarc()
+                let staleProcesses = state.findZombieProcesses()
+                state.killZombieProcesses(staleProcesses)
+                return staleProcesses.count
             }.value
             guard !Task.isCancelled else { return }
 
-            // Check for zombie Helium/Darc processes before launching
-            if !zombies.isEmpty {
-                showZombieAlert(zombies)
+            if recoveredProcessCount > 0 {
+                state.appendLog(
+                    "launcher",
+                    "Stopped \(recoveredProcessCount) browser process(es) left by an earlier launcher"
+                )
             }
-            guard !Task.isCancelled else { return }
+            state.appendLog("launcher", "Restoring saved Xe Computer and browser running state")
 
             let launchError = await Task.detached(priority: .userInitiated) {
                 state.launchBrowserStack()
@@ -326,39 +336,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         if !isWaitingForRuntimeShutdown {
             isWaitingForRuntimeShutdown = true
-            Task {
-                // A cancelled startup may still be waiting for a synchronous
-                // `smolvm-bin machine start` command. Let it finish before stop
-                // so start and stop cannot race each other.
+            ExternalState.shared.appendLog("launcher", "Shutdown started")
+
+            let runtimeStartupTask = runtimeStartupTask
+            let browserStartupTask = browserStartupTask
+            let hostServicesTask = hostServicesTask
+
+            let vmCleanup = Task { @MainActor in
+                ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
                 await runtimeStartupTask?.value
-                await browserStartupTask?.value
-                await hostServicesTask?.value
-                await workerdServer.stop()
-                await composeServer?.stop()
-
-                await Task.detached(priority: .userInitiated) {
-                    let state = ExternalState.shared
-                    state.stopDarc()
-                    state.stopChrome()
-                }.value
-
                 do {
                     try await SmolVMSetup.stop()
                     ExternalState.shared.appendLog(
                         "launcher",
                         "SmolVM machine '\(SmolVMSetup.machineName)' stopped"
                     )
+                } catch is CancellationError {
+                    ExternalState.shared.appendLog("launcher", "SmolVM shutdown cancelled")
                 } catch {
                     ExternalState.shared.appendLog(
                         "launcher",
                         "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)': \(error.localizedDescription)"
                     )
                 }
+            }
 
-                sender.reply(toApplicationShouldTerminate: true)
+            let browserCleanup = Task { @MainActor in
+                ExternalState.shared.appendLog("launcher", "Stopping Xe Computer and browser")
+                await browserStartupTask?.value
+                await Task.detached(priority: .userInitiated) {
+                    let state = ExternalState.shared
+                    state.stopDarc()
+                    state.stopChrome()
+                }.value
+                ExternalState.shared.appendLog("launcher", "Xe Computer and browser stopped")
+            }
+
+            let hostCleanup = Task { @MainActor in
+                ExternalState.shared.appendLog("launcher", "Stopping host services")
+                await workerdServer.stop()
+                await composeServer?.stop()
+                await hostServicesTask?.value
+                ExternalState.shared.appendLog("launcher", "Host services stopped")
+            }
+
+            terminationTimeoutTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                guard let self else { return }
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Shutdown exceeded 30 seconds; terminating after forced process cleanup"
+                )
+                vmCleanup.cancel()
+                browserCleanup.cancel()
+                hostCleanup.cancel()
+                finishTermination(sender)
+            }
+
+            Task {
+                await vmCleanup.value
+                await browserCleanup.value
+                await hostCleanup.value
+                ExternalState.shared.appendLog("launcher", "Shutdown complete")
+                finishTermination(sender)
             }
         }
         return .terminateLater
+    }
+
+    private func finishTermination(_ sender: NSApplication) {
+        guard !didReplyToTermination else { return }
+        didReplyToTermination = true
+        terminationTimeoutTask?.cancel()
+        sender.reply(toApplicationShouldTerminate: true)
     }
 
     private func prepareForTermination() {
@@ -373,6 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let state = ExternalState.shared
         state.setBoolSetting("darc_was_running", state.darcRunning)
         state.setBoolSetting("chrome_was_running", state.chromeRunning)
+        state.requestBrowserStackStop()
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -1192,37 +1243,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func quitAction() {
         NSApp.terminate(nil)
-    }
-
-    // MARK: - Zombie process alert
-
-    private func showZombieAlert(_ zombies: [ExternalState.ZombieProcess]) {
-        guard !zombies.isEmpty else { return }
-
-        let descriptions = zombies.map { z in
-            var desc = "\(z.name) (pid \(z.pid))"
-            if let profile = z.profileDir {
-                // Show just the profile folder name for brevity
-                let profileName = (profile as NSString).lastPathComponent
-                desc += " — profile: \(profileName)"
-            }
-            return desc
-        }
-
-        let alert = NSAlert()
-        alert.messageText = "Stale Browser Processes Found"
-        alert.informativeText = "The following Helium/Xe Computer processes from a previous session are still running:\n\n"
-            + descriptions.joined(separator: "\n")
-            + "\n\nWould you like to terminate them before launching?"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Kill All")
-        alert.addButton(withTitle: "Ignore")
-
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-
-        ExternalState.shared.killZombieProcesses(zombies)
     }
 
     // MARK: - Background state refresh
