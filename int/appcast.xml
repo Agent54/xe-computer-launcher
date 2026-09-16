@@ -5,21 +5,21 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <title>Xe Launcher</title>
         <item>
             <title>0.0.8</title>
-            <pubDate>Wed, 16 Sep 2026 01:46:54 -0700</pubDate>
+            <pubDate>Wed, 16 Sep 2026 03:15:50 -0700</pubDate>
             <link>https://github.com/Agent54/xe-computer-launcher</link>
-            <sparkle:version>43.1</sparkle:version>
-            <sparkle:shortVersionString>0.0.8-int.43.1</sparkle:shortVersionString>
+            <sparkle:version>44.1</sparkle:version>
+            <sparkle:shortVersionString>0.0.8-int.44.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.2</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.43.1
+            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.44.1
 
 See the GitHub release for the complete notes:
-https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.43.1
+https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.44.1
 ]]></description>
-            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.43.1/Xe-Launcher.dmg" length="264920622" type="application/octet-stream" sparkle:edSignature="lLZRHyjc6sKl1iQRXUqOmn/G9KvFNf3lqEdeDWIC1ZJ7ZU7gHLPhyn4dur6fG7B7E+U7Fdmmmb+ubXqUTdTBDw=="></enclosure>
+            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.44.1/Xe-Launcher.dmg" length="264899245" type="application/octet-stream" sparkle:edSignature="VoqxJVVXAXX5azEOaIx7gAJkSC7AAPowo7d+NR8AWqTvR9xKQ5+Iz0XLGKvuvzsotDQNvH1Ar6TcRZyR/UMuBA=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: jpTv13C1rFQ5ABkywyGQLNu/ZGV60mjxKmMmaowxwuVkUtgz5mKsrmehSCx1FotiCEYtCw4BL74j205NL7ZGBg==
+edSignature: XCWf1p1ALHdeH5BkFSHzgf55g5l9ZysWDkhY1BEU4gVRxs+J1dMQfGFSJyPtAPibjkk2KrWwjL90w+zZbMbrBg==
 length: 1457
 -->
