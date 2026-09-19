@@ -55,7 +55,7 @@ final class WorkerdServer {
         self.log = log
     }
 
-    func start(composeSocketURL: URL, routerSocketURL: URL) async throws {
+    func start(composeSocketURL: URL, routerAddress: String) async throws {
         try Task.checkCancellation()
         if isRunning { return }
         for url in [executableURL, configURL, assetsURL.appendingPathComponent("index.html")] {
@@ -84,7 +84,7 @@ final class WorkerdServer {
             "--socket-addr", "ingest=127.0.0.1:\(routingPort)",
             "--directory-path", "assets=\(assetsURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",
-            "--external-addr", "router=unix:\(routerSocketURL.path)"]
+            "--external-addr", "router=\(routerAddress)"]
         // No inherited inspector flags, npm paths, or proxy settings.
         child.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
         child.standardInput = FileHandle.nullDevice

@@ -11,5 +11,5 @@ const config :Workerd.Config = (
     (name = "docker", external = (address = "unix:/var/run/docker.sock", http = ())),
     (name = "containers", network = (allow = ["private", "127.0.0.1/32"])),
   ],
-  sockets = [(name = "router", address = "unix:/run/xe-router/workerd.sock", http = (), service = "router")],
+  sockets = [(name = "router", address = "0.0.0.0:5197", http = (), service = "router")],
 );

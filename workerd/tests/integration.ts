@@ -20,7 +20,6 @@ const [binary, workerDir, assets, composeBinary] = (args.length === 4 ? args :
 const root = await Deno.makeTempDir({ dir: '/tmp', prefix: 'xe-worker-' });
 const composePath = join(root, 'compose.sock');
 const dockerPath = join(root, 'docker.sock');
-const routerPath = join(root, 'workerd.sock');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const processes: Deno.ChildProcess[] = [];
 const outputs: Promise<Deno.CommandOutput>[] = [];
@@ -49,6 +48,8 @@ function freePort() {
 const managementPort = freePort();
 let routingPort = freePort();
 while (routingPort === managementPort) routingPort = freePort();
+let routerPort = freePort();
+while (routerPort === managementPort || routerPort === routingPort) routerPort = freePort();
 
 interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean }
 function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
@@ -163,11 +164,11 @@ try {
   startProcess(binary, ['serve', ...(compiled ? ['--binary'] : []), configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
     '--directory-path', `assets=${assets}`,
-    '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`]);
+    '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=127.0.0.1:${routerPort}`]);
   const guestPath = compiled ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (compiled) await Deno.copyFile(guestConfig!, guestPath);
   const startRouter = () => startProcess(binary, ['serve', ...(compiled ? ['--binary'] : []), guestPath,
-    '--socket-addr', `router=unix:${routerPath}`, '--external-addr', `docker=unix:${dockerPath}`]);
+    '--socket-addr', `router=127.0.0.1:${routerPort}`, '--external-addr', `docker=unix:${dockerPath}`]);
   let ready = false;
   for (let i = 0; i < 80; i++) {
     try { if ((await request()).status === 200) { ready = true; break; } } catch { /* starting */ }
@@ -229,12 +230,11 @@ try {
   assert.equal((await request('/', { app: true, host: 'web.1.localhost:5196' })).status, 404);
   assert.equal((await request('/', { app: true, host: 'missing.localhost:5196' })).status, 404);
   await verifyWebSocket();
-  console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
+  console.log('PASS: Compose forwarding, SSE, guest private-port routing over TCP bridge, WebSocket echo, and redirects');
 
   await stopProcess(guest);
   assert.equal((await request('/', appOptions)).status, 503);
   assert.equal((await request()).status, 200);
-  try { await Deno.remove(routerPath); } catch (error) { if (!(error instanceof Deno.errors.NotFound)) throw error; }
   guest = startRouter();
   await sleep(500);
   assert.equal((await request('/', appOptions)).status, 200);

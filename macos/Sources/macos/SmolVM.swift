@@ -131,6 +131,21 @@ actor SmolVMClient {
         _ = try await invoke(arguments)
     }
 
+    func updateMachine(named name: String, volumes: [String] = [], ports: [String] = []) async throws {
+        _ = try await invoke(Self.updateArguments(name: name, volumes: volumes, ports: ports))
+    }
+
+    static func updateArguments(name: String, volumes: [String], ports: [String]) -> [String] {
+        var arguments = ["machine", "update", "--name", name]
+        for volume in volumes {
+            arguments += ["--volume", volume]
+        }
+        for port in ports {
+            arguments += ["--port", port]
+        }
+        return arguments
+    }
+
     func startMachine(named name: String) async throws {
         _ = try await invoke(["machine", "start", "--name", name])
     }

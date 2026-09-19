@@ -79,12 +79,15 @@ compose-ui:
 	@/bin/bash Scripts/prepare-compose-ui.sh "$(COMPOSE_UI_STAGE)"
 
 .PHONY: guest-worker
-guest-worker:
+guest-worker: workerd
 	@test -f "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/checksums.txt" || { echo 'Provide the Linux ARM64 guest-worker CI artifact via GUEST_ROUTER_ASSET_DIR.' >&2; exit 1; }
 	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
 	@mkdir -p "$(BUILD_DIR)/guest-worker"
 	@rsync -a --delete "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
+	@cp ../workerd/dist/guest-worker.bin ../workerd/docker/run.sh ../workerd/docker/stop.sh "$(BUILD_DIR)/guest-worker/"
 	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 --check checksums.txt
 
 package: build smol-runtime compose-server workerd guest-worker compose-ui
 	@echo "Creating app package..."
