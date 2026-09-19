@@ -36,7 +36,7 @@ export default {
     if (url.pathname === '/__xe_router_health' && url.hostname === 'localhost') {
       return new Response('ready');
     }
-    // Only the host worker can use this lookup over the private router bridge. The
+    // Only the host worker can use this lookup over the guest socket. The
     // public gateway rejects localhost and never exposes this response itself.
     const lookup = url.origin === 'http://localhost' && url.pathname === '/__xe_router_service' && request.method === 'GET';
     if (!lookup && (url.protocol !== 'http:' || url.port !== '5196' ||

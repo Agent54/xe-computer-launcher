@@ -5,8 +5,7 @@ Two workers connect the launcher UI to Compose and running containers:
 - **Host:** `gateway.js` checks access; `management.js` serves the UI and forwards
   API requests to the Compose server on macOS.
 - **Guest:** `router.js` runs inside SmolVM and routes `.localhost` requests to
-  containers. The host connects to it through SmolVM's loopback-only TCP port
-  forwarding.
+  containers. The host connects to it through a Unix socket exposed by SmolVM.
 
 The launcher starts the Compose UI server but does not open it or provide a
 session token. The IWA UI handles access to Compose.
@@ -87,9 +86,9 @@ VM using bundled runtime files mounted read-only. Its logs are at
 `/run/xe-router/workerd.log`. During VM restarts, the host UI stays available and
 container routes return 503 until the guest is ready.
 
-The launcher adds the guest worker mount and router port to existing stopped VMs
-with `machine update` before restarting them. This keeps their disks and Docker
-data intact while migrating VMs created before application routing was added.
+Existing VMs created before application routing still need the socket and mount
+configuration. Until SmolVM can update exposed sockets, recreate those development
+VMs to opt into routing; the launcher never deletes their data automatically.
 
 ## Development and verification
 

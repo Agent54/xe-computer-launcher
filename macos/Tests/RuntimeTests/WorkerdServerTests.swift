@@ -23,11 +23,11 @@ struct WorkerdServerTests {
         let server = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets, stateURL: root,
                                   managementPort: managementPort, routingPort: routingPort, log: { _ in })
         let absent = root.appendingPathComponent("missing.sock")
-        try await server.start(composeSocketURL: absent, routerAddress: "127.0.0.1:1")
+        try await server.start(composeSocketURL: absent, routerSocketURL: absent)
         do {
             #expect(server.isRunning)
             let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets, stateURL: root, log: { _ in })
-            await #expect(throws: WorkerdError.self) { try await second.start(composeSocketURL: absent, routerAddress: "127.0.0.1:1") }
+            await #expect(throws: WorkerdError.self) { try await second.start(composeSocketURL: absent, routerSocketURL: absent) }
             await second.stop()
             let session = URLSession(configuration: .ephemeral)
             defer { session.invalidateAndCancel() }
@@ -41,7 +41,7 @@ struct WorkerdServerTests {
             #expect((apiResponse as? HTTPURLResponse)?.statusCode == 503)
             await server.stop()
             #expect(!server.isRunning)
-            try await server.start(composeSocketURL: absent, routerAddress: "127.0.0.1:1")
+            try await server.start(composeSocketURL: absent, routerSocketURL: absent)
             #expect(server.isRunning)
         } catch {
             await server.stop()

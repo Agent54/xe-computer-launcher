@@ -8,18 +8,7 @@ struct SmolVMStartupResult: Sendable {
 enum SmolVMSetup {
     static let machineName = "xe-launcher"
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
-    static let routerHostPort: UInt16 = 5197
-    static let routerGuestPort: UInt16 = 5197
-    static let routerAddress = "127.0.0.1:\(routerHostPort)"
-    private static let legacyRouterSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
-
-    private static var guestWorkerVolume: String {
-        "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"
-    }
-
-    private static var routerPortMapping: String {
-        "\(routerHostPort):\(routerGuestPort)"
-    }
+    static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
 
     static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         try Task.checkCancellation()
@@ -36,9 +25,11 @@ enum SmolVMSetup {
                 name: machineName,
                 artifactURL: SmolVMPaths.composeArtifactURL,
                 networkBackend: "virtio-net",
-                volumes: [guestWorkerVolume],
-                ports: [routerPortMapping],
-                exposedSockets: ["/var/run/docker.sock:\(dockerSocketURL.path)"],
+                volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"],
+                exposedSockets: [
+                    "/var/run/docker.sock:\(dockerSocketURL.path)",
+                    "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
+                ],
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
@@ -50,14 +41,8 @@ enum SmolVMSetup {
         } else {
             // The launcher owns this machine. A running instance here survived an
             // earlier launcher crash or predates lifecycle-managed shutdown, so
-            // stop it and idempotently add the guest router mount and loopback-only
-            // port before restarting it with the runtime bundled in the current app.
+            // restart it with the runtime bundled in the current app.
             try await client.stopMachine(named: machineName)
-            try await client.updateMachine(
-                named: machineName,
-                volumes: [guestWorkerVolume],
-                ports: [routerPortMapping]
-            )
             removeStaleSocketIfPresent()
         }
 
@@ -87,7 +72,7 @@ enum SmolVMSetup {
     }
 
     private static func removeStaleSocketIfPresent() {
-        for socket in [dockerSocketURL, legacyRouterSocketURL] {
+        for socket in [dockerSocketURL, routerSocketURL] {
             guard FileManager.default.fileExists(atPath: socket.path) else { continue }
             try? FileManager.default.removeItem(at: socket)
         }

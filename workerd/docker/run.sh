@@ -9,7 +9,6 @@ exec 9>"$state/owner.lock"
 flock -n 9 || exit 0
 printf '%s\n' "$$" > "$state/pid"
 printf '%s\n' "$runtime" > "$state/runtime"
-# Clean up the socket left by pre-TCP router releases.
 rm -f "$state/workerd.sock"
 exec "$runtime/lib/ld-linux-aarch64.so.1" --library-path "$runtime/lib" \
     "$runtime/workerd" serve --binary "$runtime/guest-worker.bin" >"$state/workerd.log" 2>&1

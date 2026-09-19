@@ -276,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     activeComposeSocket = composeSocketURL
                 }
                 do {
-                    try await workerdServer.start(composeSocketURL: composeSocketURL, routerAddress: SmolVMSetup.routerAddress)
+                    try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
                 } catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
                 do { try await GuestRouter.shared.reconcile() }
