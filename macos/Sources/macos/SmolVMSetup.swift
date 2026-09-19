@@ -33,7 +33,7 @@ enum SmolVMSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
-                    "dev.xe.computer.smolvm-release": "v1.13.0-compose_1",
+                    "dev.xe.computer.smolvm-release": "v1.16.2-compose_1",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ]
             )
