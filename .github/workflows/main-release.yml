@@ -366,13 +366,35 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         shell: bash
         run: |
-          feed_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          feed_base_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml"
           asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg"
-          macos/Tests/Integration/verify-appcast.sh \
-            "$feed_url" \
-            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
-            "$asset_url" \
-            "$RELEASE_TAG"
+          verification_log="$(mktemp "${RUNNER_TEMP:-/tmp}/xe-appcast-verification.XXXXXX")"
+          trap 'rm -f "$verification_log"' EXIT
+
+          # The Git contents API can accept the update before raw.githubusercontent.com
+          # observes the new branch tip. Poll the public endpoint the application uses,
+          # changing the query on every attempt so a stale response is never reused.
+          max_attempts=30
+          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            feed_url="$feed_base_url?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$attempt"
+            if macos/Tests/Integration/verify-appcast.sh \
+              "$feed_url" \
+              "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+              "$asset_url" \
+              "$RELEASE_TAG" >"$verification_log" 2>&1; then
+              cat "$verification_log"
+              exit 0
+            fi
+
+            if ((attempt == max_attempts)); then
+              cat "$verification_log" >&2
+              echo "::error::Published Sparkle feed did not converge after $max_attempts attempts."
+              exit 1
+            fi
+
+            echo "Published Sparkle feed is not current yet (attempt $attempt/$max_attempts); retrying in 2 seconds."
+            sleep 2
+          done
 
       - name: Announce release on Discord
         env:
