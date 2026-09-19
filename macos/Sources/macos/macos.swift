@@ -398,11 +398,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
 
             terminationTimeoutTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: .seconds(30)) } catch { return }
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
                 guard let self else { return }
                 ExternalState.shared.appendLog(
                     "launcher",
-                    "Shutdown exceeded 30 seconds; terminating after forced process cleanup"
+                    "Shutdown exceeded 60 seconds; terminating after forced process cleanup"
                 )
                 vmCleanup.cancel()
                 browserCleanup.cancel()
@@ -445,17 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         workerdServer.requestStop()
         composeServer?.requestStop()
 
-        let state = ExternalState.shared
-        // Preserve positive observations at quit. Explicit Stop actions record
-        // the off state when the user requests it; an unreliable process lookup
-        // during termination must never erase the requested restore state.
-        if state.darcRunning {
-            state.setBoolSetting("darc_should_run", true)
-            state.setBoolSetting("chrome_should_run", true)
-        } else if state.chromeRunning {
-            state.setBoolSetting("chrome_should_run", true)
-        }
-        state.requestBrowserStackStop()
+        ExternalState.shared.requestBrowserStackStop()
     }
 
     private func beginShutdownPresentation() {
@@ -1022,19 +1012,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func darcStartAction() {
         runServiceAction("darc") {
-            let state = ExternalState.shared
-            if state.startDarc() == nil {
-                state.setBoolSetting("darc_should_run", true)
-                state.setBoolSetting("chrome_should_run", true)
-            }
+            _ = ExternalState.shared.startDarc()
         }
     }
 
     @objc private func darcStopAction() {
         runServiceAction("darc") {
-            let state = ExternalState.shared
-            state.stopDarc()
-            state.setBoolSetting("darc_should_run", false)
+            ExternalState.shared.stopDarc()
         }
     }
 
@@ -1173,10 +1157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func chromeStartAction() {
         runServiceAction("chrome") {
-            let state = ExternalState.shared
-            if state.startChrome() == nil {
-                state.setBoolSetting("chrome_should_run", true)
-            }
+            _ = ExternalState.shared.startChrome()
         }
     }
 
@@ -1185,8 +1166,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let state = ExternalState.shared
             state.stopDarc()
             state.stopChrome()
-            state.setBoolSetting("darc_should_run", false)
-            state.setBoolSetting("chrome_should_run", false)
         }
     }
 

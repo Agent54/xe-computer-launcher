@@ -302,13 +302,7 @@ final class ExternalState: @unchecked Sendable {
 
     func launchBrowserStack() -> String? {
         guard !isBrowserStackStopRequested else { return "Browser startup cancelled because Xe Launcher is shutting down" }
-        if boolSetting("darc_should_run", default: true) {
-            return startDarc()
-        }
-        if boolSetting("chrome_should_run", default: true) {
-            return startChrome()
-        }
-        return nil
+        return startDarc()
     }
 
     func requestBrowserStackStop() {
