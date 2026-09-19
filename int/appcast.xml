@@ -5,21 +5,21 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <title>Xe Launcher</title>
         <item>
             <title>0.0.8</title>
-            <pubDate>Sat, 19 Sep 2026 05:20:29 -0700</pubDate>
+            <pubDate>Sat, 19 Sep 2026 05:39:59 -0700</pubDate>
             <link>https://github.com/Agent54/xe-computer-launcher</link>
-            <sparkle:version>48.1</sparkle:version>
-            <sparkle:shortVersionString>0.0.8-int.48.1</sparkle:shortVersionString>
+            <sparkle:version>49.1</sparkle:version>
+            <sparkle:shortVersionString>0.0.8-int.49.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.2</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.48.1
+            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.49.1
 
 See the GitHub release for the complete notes:
-https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.48.1
+https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.49.1
 ]]></description>
-            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.48.1/Xe-Launcher.dmg" length="265587667" type="application/octet-stream" sparkle:edSignature="w3pUl5Zv0ZwECo0bXb2sMl9aM82T5LR1UZO+dUniZPexOxZV+qQz64SemHXKkSI2KMQLwHPANtQogl2TFee6Bw=="></enclosure>
+            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.49.1/Xe-Launcher.dmg" length="265587669" type="application/octet-stream" sparkle:edSignature="eW7hoGArWW1dcLfofVqyYk4GNhgCx8HIeQG7mCOPhVDN04h8aUFAlfB8T14vqUoq1iK/FyXZ7oSz+4DTxuNUAw=="></enclosure>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: ayUM25EVKveFh4nkMeyUroh3+72KH1Ob+GjmXiQ437rATQY2EDYtDjZINo3Hf47hzW2gUItLhzXa/Teu9KAJDg==
+edSignature: HXst82YcoiV7dVSL/cDlcvNvhlCC654OdoYZyAtPM8dslYC2xCBd/QQMQ7tBh4h9THeiclgazaWjRQwCGN0/Dg==
 length: 1457
 -->
