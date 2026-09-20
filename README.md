@@ -36,6 +36,13 @@ TCP port in the Compose `ports` list. Select a specific published port with
 `<service>.8080.localhost`, or a [named port](workerd/README.md#port-routes) with
 `<service>.web.localhost` (both on port 5196).
 
+The container VM uses at least 4096 MiB of elastic memory. Advanced users can
+raise the limit by setting `container_vm_memory_mib` in
+`~/Library/Application Support/dev.xe.computer/settings.json` (up to 32768) and
+restarting Xe Launcher. The launcher monitors Docker after startup and performs
+a bounded VM restart if the daemon becomes unavailable; the menu status and
+Compose API expose whether recovery was caused by an out-of-memory event.
+
 ## Building from source
 
 Follow the [development setup](https://github.com/Agent54/xe-darc/blob/main/INSTALL.md).

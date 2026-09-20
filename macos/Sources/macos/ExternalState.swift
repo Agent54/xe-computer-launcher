@@ -272,6 +272,13 @@ final class ExternalState: @unchecked Sendable {
         settings.rawData?[key] as? String
     }
 
+    func integerSetting(_ key: String, default defaultValue: Int = 0) -> Int {
+        if let value = settings.rawData?[key] as? Int { return value }
+        if let value = settings.rawData?[key] as? NSNumber { return value.intValue }
+        if let value = settings.rawData?[key] as? String, let parsed = Int(value) { return parsed }
+        return defaultValue
+    }
+
     func setStringSetting(_ key: String, _ value: String) {
         var dict = settings.rawData ?? [:]
         dict[key] = value

@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import gateway from '../gateway.js';
 import router from '../router.js';
+import { surfaceRuntimeFailure } from '../runtime-status.js';
 
 Deno.test('management UI does not require a launcher session token', async () => {
   const env = {
@@ -11,6 +12,22 @@ Deno.test('management UI does not require a launcher session token', async () =>
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'compose-ui');
   assert.equal(response.headers.get('set-cookie'), null);
+});
+
+Deno.test('runtime failures are enriched only while the supervisor reports an outage', async () => {
+  let phase = 'healthy';
+  const env = { RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({
+    phase,
+    message: phase === 'healthy' ? 'Container runtime ready' : 'Container VM ran out of memory; restarting…',
+    reason: phase === 'healthy' ? null : 'oom',
+  })) } };
+  const applicationFailure = Response.json({ error: 'build_failed' }, { status: 500 });
+  const healthyFailure = await surfaceRuntimeFailure(applicationFailure, env);
+  assert.equal((await healthyFailure.json()).error, 'build_failed');
+  phase = 'restarting';
+  const runtimeFailure = await surfaceRuntimeFailure(Response.json({ error: 'backend EOF' }, { status: 500 }), env);
+  assert.equal(runtimeFailure.status, 503);
+  assert.equal((await runtimeFailure.json()).error, 'container_runtime_oom');
 });
 
 Deno.test('application port selection', async t => {

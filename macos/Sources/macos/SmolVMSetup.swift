@@ -7,8 +7,17 @@ struct SmolVMStartupResult: Sendable {
 
 enum SmolVMSetup {
     static let machineName = "xe-launcher"
+    static let minimumMemoryMiB: UInt32 = 4096
+    static let maximumMemoryMiB: UInt32 = 32768
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
     static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
+
+    static var memoryMiB: UInt32 {
+        let configured = ExternalState.shared.integerSetting(
+            "container_vm_memory_mib", default: Int(minimumMemoryMiB)
+        )
+        return UInt32(clamping: min(Int(maximumMemoryMiB), max(Int(minimumMemoryMiB), configured)))
+    }
 
     static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         try Task.checkCancellation()
@@ -24,6 +33,7 @@ enum SmolVMSetup {
             let spec = SmolVMMachineSpec(
                 name: machineName,
                 artifactURL: SmolVMPaths.composeArtifactURL,
+                memoryMiB: memoryMiB,
                 networkBackend: "virtio-net",
                 volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"],
                 exposedSockets: [
@@ -33,7 +43,7 @@ enum SmolVMSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
-                    "dev.xe.computer.smolvm-release": "v1.16.2-compose_1",
+                    "dev.xe.computer.smolvm-release": "v1.16.2-compose_3",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ]
             )
@@ -44,6 +54,7 @@ enum SmolVMSetup {
             // restart it with the runtime bundled in the current app.
             try await client.stopMachine(named: machineName)
             removeStaleSocketIfPresent()
+            try await client.updateMachine(named: machineName, memoryMiB: memoryMiB)
         }
 
         try Task.checkCancellation()

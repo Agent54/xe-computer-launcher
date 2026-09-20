@@ -20,13 +20,16 @@ struct WorkerdServerTests {
         let managementPort = try freePort()
         var routingPort = try freePort()
         while routingPort == managementPort { routingPort = try freePort() }
+        let runtimeStatus = root.appendingPathComponent("runtime-status", isDirectory: true)
         let server = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets, stateURL: root,
+                                  runtimeStatusURL: runtimeStatus,
                                   managementPort: managementPort, routingPort: routingPort, log: { _ in })
         let absent = root.appendingPathComponent("missing.sock")
         try await server.start(composeSocketURL: absent, routerSocketURL: absent)
         do {
             #expect(server.isRunning)
-            let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets, stateURL: root, log: { _ in })
+            let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets,
+                                       stateURL: root, runtimeStatusURL: runtimeStatus, log: { _ in })
             await #expect(throws: WorkerdError.self) { try await second.start(composeSocketURL: absent, routerSocketURL: absent) }
             await second.stop()
             let session = URLSession(configuration: .ephemeral)
