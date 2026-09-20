@@ -18,7 +18,7 @@ fi
 
 runtime_asset="smolvm-${SMOLVM_VERSION}-darwin-arm64.tar.gz"
 compose_asset="smolvm-${SMOLVM_VERSION}-docker-compose-darwin-arm64.smolmachine"
-cache_dir="${SMOLVM_CACHE_DIR:-$macos_dir/.build/smolvm-assets}"
+cache_dir="${SMOLVM_CACHE_DIR:-$macos_dir/.build/smolvm-assets/$SMOLVM_RELEASE_TAG}"
 asset_dir="${SMOLVM_ASSET_DIR:-}"
 
 mkdir -p "$cache_dir"
