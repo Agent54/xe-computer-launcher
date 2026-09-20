@@ -1,4 +1,5 @@
 import { routeApplication } from './app-routing.js';
+import { runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 
 // The gateway is the only public worker. Backends have no listener of their own.
 const managementOrigin = 'http://127.0.0.1:8094';
@@ -33,11 +34,10 @@ export default {
         !/^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost$/.test(url.hostname) ||
         url.hostname === 'api.moby.localhost') return denied();
     try {
-      return await routeApplication(request, env);
+      const response = await routeApplication(request, env);
+      return response.status >= 500 ? await surfaceRuntimeFailure(response, env) : response;
     } catch {
-      return new Response('Application routing unavailable. Retry when Compose and the VM are ready.', {
-        status: 503, headers: { 'Retry-After': '2', 'Cache-Control': 'no-store' },
-      });
+      return await runtimeUnavailable(env);
     }
   },
 };

@@ -11,15 +11,50 @@ struct SmolVMMachine: Decodable, Sendable {
     let name: String
     let state: String
     let labels: [String: String]?
+    let memory: SmolVMMemoryStatus?
+    let workload: SmolVMWorkloadStatus?
 
     var isRunning: Bool {
         state.caseInsensitiveCompare("running") == .orderedSame
     }
 }
 
+struct SmolVMMemoryStatus: Decodable, Sendable {
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+    let freeBytes: UInt64
+    let buffersBytes: UInt64
+    let cachedBytes: UInt64
+    let oomKillCount: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case totalBytes = "total_bytes"
+        case availableBytes = "available_bytes"
+        case freeBytes = "free_bytes"
+        case buffersBytes = "buffers_bytes"
+        case cachedBytes = "cached_bytes"
+        case oomKillCount = "oom_kill_count"
+    }
+}
+
+struct SmolVMWorkloadStatus: Decodable, Sendable {
+    let state: String
+    let lastExitCode: Int32?
+    let lastExitReason: String?
+    let oomKilled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case lastExitCode = "last_exit_code"
+        case lastExitReason = "last_exit_reason"
+        case oomKilled = "oom_killed"
+    }
+}
+
 struct SmolVMMachineSpec: Sendable {
     let name: String
     let artifactURL: URL
+    var memoryMiB: UInt32? = nil
     var networkBackend: String? = nil
     var volumes: [String] = []
     var ports: [String] = []
@@ -110,6 +145,9 @@ actor SmolVMClient {
             "--name", spec.name,
             "--from", spec.artifactURL.path,
         ]
+        if let memoryMiB = spec.memoryMiB {
+            arguments += ["--mem", String(memoryMiB)]
+        }
         if let networkBackend = spec.networkBackend {
             arguments += ["--net-backend", networkBackend]
         }
@@ -129,6 +167,22 @@ actor SmolVMClient {
             arguments += ["--label", "\(key)=\(value)"]
         }
         _ = try await invoke(arguments)
+    }
+
+    func updateMachine(named name: String, memoryMiB: UInt32) async throws {
+        _ = try await invoke(["machine", "update", "--name", name, "--mem", String(memoryMiB)])
+    }
+
+    func machineStatus(named name: String) async throws -> SmolVMMachine {
+        let result = try await invoke(["machine", "status", "--name", name, "--json"])
+        guard let data = result.standardOutput.data(using: .utf8) else {
+            throw SmolVMError.invalidMachineList("status output was not UTF-8")
+        }
+        do {
+            return try JSONDecoder().decode(SmolVMMachine.self, from: data)
+        } catch {
+            throw SmolVMError.invalidMachineList(error.localizedDescription)
+        }
     }
 
     func startMachine(named name: String) async throws {

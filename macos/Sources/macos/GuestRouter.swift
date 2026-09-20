@@ -41,19 +41,23 @@ actor GuestRouter {
 
     func reconcile() async throws {
         guard Date() >= nextCheck else { return }
-        nextCheck = Date().addingTimeInterval(15)
         // Wait for discovery and for any legacy Docker-managed router to be
         // removable before claiming its socket. The host UI never waits here.
         guard await UnixSocketHTTP.isReady(at: SmolVMSetup.dockerSocketURL) else {
             deployed = false
+            nextCheck = Date().addingTimeInterval(1)
             return
         }
         if deployed {
-            if await UnixSocketHTTP.isReady(at: SmolVMSetup.routerSocketURL, path: "/__xe_router_health") { return }
+            if await UnixSocketHTTP.isReady(at: SmolVMSetup.routerSocketURL, path: "/__xe_router_health") {
+                nextCheck = Date().addingTimeInterval(15)
+                return
+            }
         }
         let client = SmolVMClient.shared
         guard let machine = try await client.listMachines().first(where: { $0.name == SmolVMSetup.machineName }), machine.isRunning else {
             deployed = false
+            nextCheck = Date().addingTimeInterval(1)
             return
         }
         guard machine.labels?[Self.configurationLabel] == Self.configurationVersion else {
@@ -66,6 +70,12 @@ actor GuestRouter {
         try Task.checkCancellation()
         _ = try await client.execute(in: machine.name, command: ["/bin/sh", "\(runtimeDirectory)/run.sh"], detached: true)
         deployed = true
+        nextCheck = Date().addingTimeInterval(15)
+    }
+
+    func reset() {
+        deployed = false
+        nextCheck = .distantPast
     }
 }
 

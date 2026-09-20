@@ -21,6 +21,7 @@ const root = await Deno.makeTempDir({ dir: '/tmp', prefix: 'xe-worker-' });
 const composePath = join(root, 'compose.sock');
 const dockerPath = join(root, 'docker.sock');
 const routerPath = join(root, 'workerd.sock');
+const statusPath = join(root, 'status');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const processes: Deno.ChildProcess[] = [];
 const outputs: Promise<Deno.CommandOutput>[] = [];
@@ -78,6 +79,8 @@ async function startUnix(path: string) {
     const headers = { 'Connection': 'close', 'Content-Type': 'application/json' };
     if (requestPath === '/v1.24/config/demo?format=json') {
       return Response.json({ services: { web: { ports: [{ name: 'web', target: appPort, published: '32000', protocol: 'tcp' }] } } });
+    } else if (requestPath === '/v1.24/failure') {
+      return Response.json({ error: 'backend EOF' }, { status: 500 });
     } else if (requestPath === '/containers/json') {
       return new Response(JSON.stringify([{ Id: 'test', Labels: {
         'com.docker.compose.service': 'web', 'com.docker.compose.project': 'demo',
@@ -157,12 +160,17 @@ async function verifyWebSocket() {
 }
 
 try {
+  await Deno.mkdir(statusPath);
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'healthy', message: 'Container runtime ready', reason: null,
+  }));
   // Run the release config from a temporary directory containing no worker source.
   const configPath = compiled ? join(root, 'worker.bin') : join(workerDir, 'config.capnp');
   if (compiled) await Deno.copyFile(workerDir, configPath);
   startProcess(binary, ['serve', ...(compiled ? ['--binary'] : []), configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
     '--directory-path', `assets=${assets}`,
+    '--directory-path', `status=${statusPath}`,
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`]);
   const guestPath = compiled ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (compiled) await Deno.copyFile(guestConfig!, guestPath);
@@ -184,6 +192,7 @@ try {
     assert.equal((await request('/', options)).status, 403);
   }
   assert.equal((await request('/v1.24/ls', { app: true, host: 'api.moby.localhost:5196' })).status, 403);
+  assert.equal(JSON.parse((await request('/v1.24/runtime-status')).body.toString()).phase, 'healthy');
   assert.equal((await request('/v1.24/ls')).status, 503);
   for (const path of ['/api/unknown', '/_app/immutable/missing.js', '/_app/']) {
     assert.equal((await request(path)).status, 404, path);
@@ -212,6 +221,19 @@ try {
   assert.equal(seen.at(-1)!.method, 'POST');
   assert.equal(seen.at(-1)!.headers.cookie, undefined);
   assert.equal(seen.at(-1)!.headers.authorization, undefined);
+  const healthyFailure = await request('/v1.24/failure');
+  assert.equal(healthyFailure.status, 500);
+  assert.equal(JSON.parse(healthyFailure.body.toString()).error, 'backend EOF');
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'restarting', message: 'Container VM ran out of memory; restarting…', reason: 'oom',
+  }));
+  const unavailable = await request('/v1.24/failure');
+  assert.equal(unavailable.status, 503);
+  assert.equal(JSON.parse(unavailable.body.toString()).error, 'container_runtime_oom');
+  assert.match(JSON.parse(unavailable.body.toString()).message, /ran out of memory/);
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'healthy', message: 'Container runtime ready', reason: null,
+  }));
   const sse = await response('/v1.24/events');
   assert.equal(sse.headers['content-type'], 'text/event-stream');
   const [first] = await once(sse, 'data');

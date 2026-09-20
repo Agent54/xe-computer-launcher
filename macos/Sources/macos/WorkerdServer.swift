@@ -33,6 +33,7 @@ final class WorkerdServer {
     private let configURL: URL
     private let assetsURL: URL
     private let stateURL: URL
+    private let runtimeStatusURL: URL
     private let managementPort: UInt16
     private let routingPort: UInt16
     private let log: @MainActor @Sendable (String) -> Void
@@ -44,12 +45,14 @@ final class WorkerdServer {
     var uiURL: URL { URL(string: "http://127.0.0.1:\(managementPort)/")! }
     init(executableURL: URL = WorkerdPaths.executableURL, configURL: URL = WorkerdPaths.configURL,
          assetsURL: URL = WorkerdPaths.assetsURL, stateURL: URL = WorkerdPaths.stateURL,
+         runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
          managementPort: UInt16 = 8094, routingPort: UInt16 = 5196,
          log: @escaping @MainActor @Sendable (String) -> Void = { ExternalState.shared.appendLog("workerd", $0) }) {
         self.executableURL = executableURL
         self.configURL = configURL
         self.assetsURL = assetsURL
         self.stateURL = stateURL
+        self.runtimeStatusURL = runtimeStatusURL
         self.managementPort = managementPort
         self.routingPort = routingPort
         self.log = log
@@ -62,6 +65,7 @@ final class WorkerdServer {
             guard FileManager.default.fileExists(atPath: url.path) else { throw WorkerdError.missingResource(url.path) }
         }
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: runtimeStatusURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateURL.path)
         // An exited child may leave this instance's ownership lock held.
         if lockDescriptor >= 0 { close(lockDescriptor); lockDescriptor = -1 }
@@ -83,6 +87,7 @@ final class WorkerdServer {
             "--socket-addr", "management=127.0.0.1:\(managementPort)",
             "--socket-addr", "ingest=127.0.0.1:\(routingPort)",
             "--directory-path", "assets=\(assetsURL.path)",
+            "--directory-path", "status=\(runtimeStatusURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",
             "--external-addr", "router=unix:\(routerSocketURL.path)"]
         // No inherited inspector flags, npm paths, or proxy settings.

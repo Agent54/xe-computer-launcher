@@ -1,3 +1,5 @@
+import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
+
 const mimeTypes = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
   css: 'text/css; charset=utf-8', json: 'application/json; charset=utf-8',
@@ -8,6 +10,9 @@ const mimeTypes = {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === '/v1.24/runtime-status' && request.method === 'GET') {
+      return Response.json(await readRuntimeStatus(env), { headers: { 'Cache-Control': 'no-store' } });
+    }
     if (/^\/v1\.24\//.test(url.pathname)) {
       const headers = new Headers(request.headers);
       // Browser credentials do not belong to the local Compose API.
@@ -18,12 +23,10 @@ export default {
         resultHeaders.set('Cache-Control', 'no-store');
         resultHeaders.delete('set-cookie');
         resultHeaders.delete('access-control-allow-origin');
+        if (response.status >= 500) return await surfaceRuntimeFailure(response, env);
         // Passing the body through preserves SSE and cancellation; never .text().
         return new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
-      } catch {
-        return Response.json({ error: 'compose_unavailable', message: 'Compose is unavailable. The UI will reconnect.' },
-          { status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '2' } });
-      }
+      } catch { return await runtimeUnavailable(env); }
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });

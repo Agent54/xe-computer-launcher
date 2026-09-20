@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
     private let workerdServer = WorkerdServer()
+    private let runtimeSupervisor = ContainerRuntimeSupervisor()
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
     private var isWaitingForRuntimeShutdown = false
@@ -215,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 if composeServer == nil { composeServer = ComposeServer(stacksURL: stacksURL) }
                 composeSocketURL = stacksURL.appendingPathComponent("compose.sock")
                 // The host supervisor starts Compose without waiting for Docker.
-                let result = try await SmolVMSetup.start()
+                let result = try await runtimeSupervisor.start()
                 ExternalState.shared.appendLog(
                     "launcher",
                     "SmolVM machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
@@ -282,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 do { try await GuestRouter.shared.reconcile() }
                 catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
+                await runtimeSupervisor.reconcile()
                 if let composeServer {
                     do { try await composeServer.start(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
                     catch is CancellationError { break }
@@ -352,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
                 await runtimeStartupTask?.value
                 do {
-                    try await SmolVMSetup.stop()
+                    try await runtimeSupervisor.stop()
                     ExternalState.shared.appendLog(
                         "launcher",
                         "SmolVM machine '\(SmolVMSetup.machineName)' stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
@@ -942,6 +944,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         let state = ExternalState.shared
+        statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
