@@ -67,6 +67,20 @@ private final class LauncherUserDriverDelegate: NSObject, SPUStandardUserDriverD
     }
 }
 
+private enum ShutdownComponent: CaseIterable, Hashable {
+    case containerVM
+    case browserStack
+    case hostServices
+
+    var title: String {
+        switch self {
+        case .containerVM: "container VM"
+        case .browserStack: "Xe Computer and browser"
+        case .hostServices: "host services"
+        }
+    }
+}
+
 @main
 struct MacOSApp {
     static func main() {
@@ -107,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
     private var shutdownProgressIndicator: NSProgressIndicator?
+    private var pendingShutdownComponents = Set<ShutdownComponent>()
     private let updateChannel = LauncherUpdateChannel.configured()
     private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
         ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -295,17 +310,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // When the app is launched again while already running, bring Darc to foreground or start it
+        // Opening a running app shim sends it the macOS reopen event. Merely
+        // activating a windowless shim does not create or restore a window.
         let state = ExternalState.shared
-        if state.darcRunning {
-            if let app = state.darcAppRef {
-                app.activate()
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let error = state.reopenDarc() {
+                state.appendLog("launcher", "Xe Computer reopen failed: \(error)")
             }
-        } else {
-            DispatchQueue.global(qos: .userInitiated).async {
-                _ = state.launchBrowserStack()
-                Task { @MainActor in self.renderMenuLabels() }
-            }
+            Task { @MainActor in self.renderMenuLabels() }
         }
         return false
     }
@@ -345,14 +357,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let shutdownStartedAt = Date()
             ExternalState.shared.appendLog("launcher", "Shutdown started")
 
-            let runtimeStartupTask = runtimeStartupTask
-            let browserStartupTask = browserStartupTask
-            let hostServicesTask = hostServicesTask
-
             let vmCleanup = Task { @MainActor in
                 let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.containerVM) }
                 ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
-                await runtimeStartupTask?.value
                 do {
                     try await runtimeSupervisor.stop()
                     ExternalState.shared.appendLog(
@@ -374,8 +382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
             let browserCleanup = Task { @MainActor in
                 let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.browserStack) }
                 ExternalState.shared.appendLog("launcher", "Stopping Xe Computer and browser")
-                await browserStartupTask?.value
                 await Task.detached(priority: .userInitiated) {
                     let state = ExternalState.shared
                     state.stopDarc()
@@ -389,10 +397,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
             let hostCleanup = Task { @MainActor in
                 let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.hostServices) }
                 ExternalState.shared.appendLog("launcher", "Stopping host services")
-                await workerdServer.stop()
-                await composeServer?.stop()
-                await hostServicesTask?.value
+                let workerdCleanup = Task { @MainActor in await workerdServer.stop() }
+                let composeCleanup = Task { @MainActor in await composeServer?.stop() }
+                await workerdCleanup.value
+                await composeCleanup.value
                 ExternalState.shared.appendLog(
                     "launcher",
                     "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
@@ -451,7 +461,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func beginShutdownPresentation() {
-        statusMessageItem?.title = "Status: Shutting down…"
+        pendingShutdownComponents = Set(ShutdownComponent.allCases)
+        updateShutdownStatus()
         if let menu = statusItem?.menu {
             disableMenuItemsForShutdown(in: menu)
             menu.update()
@@ -471,6 +482,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         button.addSubview(indicator)
         indicator.startAnimation(nil)
         shutdownProgressIndicator = indicator
+    }
+
+    private func shutdownComponentFinished(_ component: ShutdownComponent) {
+        pendingShutdownComponents.remove(component)
+        updateShutdownStatus()
+    }
+
+    private func updateShutdownStatus() {
+        let pending = ShutdownComponent.allCases.filter { pendingShutdownComponents.contains($0) }
+        let detail: String
+        switch pending.count {
+        case 0:
+            detail = "Finishing shutdown…"
+        case 1:
+            detail = "Stopping \(pending[0].title)…"
+        default:
+            detail = "Stopping " + pending.map(\.title).joined(separator: ", ") + "…"
+        }
+        statusMessageItem?.title = "Status: \(detail)"
+        statusItem?.menu?.update()
     }
 
     private func disableMenuItemsForShutdown(in menu: NSMenu) {
@@ -935,7 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func renderMenuLabels() {
         if isPreparingForTermination {
-            statusMessageItem?.title = "Status: Shutting down…"
+            updateShutdownStatus()
             if let menu = statusItem?.menu {
                 disableMenuItemsForShutdown(in: menu)
                 menu.update()

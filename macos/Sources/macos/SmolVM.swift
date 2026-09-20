@@ -7,6 +7,48 @@ struct SmolVMCommandResult: Sendable {
     let exitCode: Int32
 }
 
+/// Records process termination even when the child exits before the awaiting
+/// task starts to suspend. `Process.waitUntilExit()` can otherwise remain
+/// blocked on its private run loop after a concurrently cancelled command has
+/// already exited.
+final class ProcessExitObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didExit = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func install(on process: Process) {
+        process.terminationHandler = { [weak self] _ in
+            self?.processDidExit()
+        }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if didExit {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func processDidExit() {
+        lock.lock()
+        guard !didExit else {
+            lock.unlock()
+            return
+        }
+        didExit = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
 struct SmolVMMachine: Decodable, Sendable {
     let name: String
     let state: String
@@ -246,9 +288,13 @@ actor SmolVMClient {
             "DYLD_LIBRARY_PATH": runtimeURL.appendingPathComponent("lib", isDirectory: true).path,
         ]
 
+        let exitObserver = ProcessExitObserver()
+        exitObserver.install(on: process)
+
         do {
             try process.run()
         } catch {
+            process.terminationHandler = nil
             throw SmolVMError.commandLaunchFailed(error.localizedDescription)
         }
         activeProcess = process
@@ -257,9 +303,7 @@ actor SmolVMClient {
         }
 
         await withTaskCancellationHandler {
-            await Task.detached {
-                process.waitUntilExit()
-            }.value
+            await exitObserver.wait()
         } onCancel: {
             guard process.isRunning else { return }
             let pid = process.processIdentifier
@@ -268,6 +312,7 @@ actor SmolVMClient {
                 if process.isRunning { kill(pid, SIGKILL) }
             }
         }
+        process.terminationHandler = nil
         try Task.checkCancellation()
 
         try outputHandle.close()

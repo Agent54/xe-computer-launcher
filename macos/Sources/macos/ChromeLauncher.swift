@@ -553,17 +553,22 @@ extension ExternalState {
     /// Find browser and IWA processes using the launcher's private profiles and
     /// shims. These can only belong to an earlier launcher process.
     func findZombieProcesses() -> [ZombieProcess] {
-        // Get all running args via `ps`
-        let pipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-eo", "pid,comm"]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return [] }
-        proc.waitUntilExit()
+        let result: ProcessCaptureResult
+        do {
+            result = try ProcessCapture.standardOutput(
+                executableURL: URL(fileURLWithPath: "/bin/ps"),
+                arguments: ["-eo", "pid,comm"]
+            )
+        } catch {
+            appendLog("launcher", "findZombieProcesses: could not run ps: \(error.localizedDescription)")
+            return []
+        }
+        guard result.exitCode == 0 else {
+            appendLog("launcher", "findZombieProcesses: ps exited with code \(result.exitCode)")
+            return []
+        }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let data = result.standardOutput
         guard let output = String(data: data, encoding: .utf8) else {
             appendLog("launcher", "findZombieProcesses: failed to decode ps output")
             return []
@@ -624,17 +629,12 @@ extension ExternalState {
     /// Extract the --user-data-dir value from a process's command line. The path
     /// can contain spaces, so read until the following command-line flag.
     private static func extractUserDataDir(pid: pid_t) -> String? {
-        // Use ps to get full command line
-        let pipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-p", "\(pid)", "-o", "args="]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return nil }
-        proc.waitUntilExit()
+        guard let result = try? ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-p", "\(pid)", "-o", "args="]
+        ), result.exitCode == 0 else { return nil }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let data = result.standardOutput
         guard let args = String(data: data, encoding: .utf8) else { return nil }
 
         let marker = "--user-data-dir="

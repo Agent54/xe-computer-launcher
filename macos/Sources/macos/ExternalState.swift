@@ -87,10 +87,6 @@ final class ExternalState: @unchecked Sendable {
     private let browserLifecycleLock = NSLock()
     private var _browserStackStopRequested = false
     private var darcApp: NSRunningApplication?
-    /// Public read-only access to the Darc NSRunningApplication reference for activation.
-    var darcAppRef: NSRunningApplication? {
-        darcRunning ? darcApp : nil
-    }
 
     /// Check if a named subprocess is currently running
     func isSubprocessRunning(_ name: String) -> Bool {
@@ -368,6 +364,20 @@ final class ExternalState: @unchecked Sendable {
             return msg
         }
 
+        return openDarcShim()
+    }
+
+    /// Ask Launch Services to reopen the managed app shim. Activating an
+    /// already-running shim is insufficient when its last window was closed;
+    /// opening the app again sends the normal macOS reopen event.
+    func reopenDarc() -> String? {
+        guard darcRunning else { return startDarc() }
+        return openDarcShim()
+    }
+
+    private func openDarcShim() -> String? {
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
+        let wasRunning = darcRunning
         let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
@@ -448,8 +458,9 @@ final class ExternalState: @unchecked Sendable {
         }
 
         let pid = darcApp?.processIdentifier ?? -1
-        appendLog("launcher", "Xe Computer started via NSWorkspace (pid=\(pid))")
-        print("[ExternalState] Xe Computer started, pid=\(pid)")
+        let action = wasRunning ? "reopened" : "started"
+        appendLog("launcher", "Xe Computer \(action) via NSWorkspace (pid=\(pid))")
+        print("[ExternalState] Xe Computer \(action), pid=\(pid)")
 
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {
