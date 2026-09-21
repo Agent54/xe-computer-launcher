@@ -6,7 +6,7 @@ APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
-PERMANENT_CLEANUP="${XE_INSTALLER_CLEANUP_PERMANENT:-0}"
+PERMANENT_CLEANUP=0
 
 log() {
     printf '[installer-cleanup] %s\n' "$*"
@@ -15,6 +15,74 @@ log() {
 fail() {
     printf '[installer-cleanup] ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+require_ci_context() {
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] \
+        || fail "permanent cleanup requires GitHub Actions"
+    [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] \
+        || fail "permanent cleanup requires a self-hosted runner"
+    [[ "${RUNNER_OS:-}" == "macOS" && "${RUNNER_ARCH:-}" == "ARM64" ]] \
+        || fail "permanent cleanup requires the macOS ARM64 runner"
+    [[ "${GITHUB_REPOSITORY:-}" == "Agent54/xe-computer-launcher" ]] \
+        || fail "permanent cleanup requires the launcher repository"
+    [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]] \
+        || fail "permanent cleanup requires the release workflow"
+    [[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
+        || fail "permanent cleanup requires the release job triggered by a push"
+    [[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
+        || fail "permanent cleanup requires the int or main release branch"
+}
+
+configure_cleanup_mode() {
+    case "$#:${1:-}" in
+        0:)
+            PERMANENT_CLEANUP=0
+            ;;
+        1:--ci-permanent)
+            require_ci_context
+            PERMANENT_CLEANUP=1
+            ;;
+        *)
+            fail "usage: cleanup.sh [--ci-permanent]"
+            ;;
+    esac
+}
+
+refuse_mounted_cleanup_target() {
+    local path="$1"
+    local parent_device
+    local path_device
+    local descendant
+    local descendant_device
+    local mount_output
+    local mount_record
+    local mount_point
+
+    [[ -d "$path" && ! -L "$path" ]] || return 0
+
+    mount_output="$(mount)" || fail "could not inspect mounted filesystems"
+    while IFS= read -r mount_record; do
+        mount_point="${mount_record#* on }"
+        [[ "$mount_point" != "$mount_record" ]] || continue
+        mount_point="${mount_point% (*}"
+        [[ "$mount_point" == "$path" || "$mount_point" == "$path/"* ]] \
+            && fail "refusing to remove cleanup target containing a mount point: $mount_point"
+    done <<<"$mount_output"
+
+    path_device="$(stat -f '%d' "$path")" \
+        || fail "could not inspect cleanup target filesystem: $path"
+    parent_device="$(stat -f '%d' "$(dirname "$path")")" \
+        || fail "could not inspect cleanup target parent filesystem: $path"
+    [[ "$path_device" == "$parent_device" ]] \
+        || fail "refusing to remove mounted cleanup target: $path"
+
+    while IFS= read -r -d '' descendant; do
+        descendant_device="$(stat -f '%d' "$descendant")" \
+            || fail "could not inspect cleanup target descendant: $descendant"
+        [[ "$descendant_device" == "$path_device" ]] \
+            || fail "refusing to cross nested mount during cleanup: $descendant"
+    done < <(find -x "$path" -type d -print0)
 }
 
 permanently_remove_owned_path() {
@@ -33,6 +101,7 @@ permanently_remove_owned_path() {
             ;;
     esac
 
+    refuse_mounted_cleanup_target "$path"
     rm -rf -- "$path"
 }
 
@@ -101,8 +170,7 @@ stop_matching_processes() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
-[[ "$PERMANENT_CLEANUP" == "0" || "$PERMANENT_CLEANUP" == "1" ]] \
-    || fail "XE_INSTALLER_CLEANUP_PERMANENT must be 0 or 1"
+configure_cleanup_mode "$@"
 
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"

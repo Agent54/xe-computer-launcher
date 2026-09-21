@@ -24,9 +24,12 @@ Run this only in a disposable test account or VM. `cleanup.sh`:
 
 The release workflow runs `cleanup-ci.sh`, which explicitly disables Trash and
 permanently removes only the exact current Xe test installation, data, and
-owned generated-shim paths at the start of a run. Manual runs use `cleanup.sh`
-and retain the recoverable behavior described above. Failed workspace build
-artifacts remain available until the next checkout cleans the workspace.
+owned generated-shim paths at the start of a run. It refuses to run outside
+the launcher's release job on the self-hosted macOS ARM64 GitHub Actions runner,
+and permanent removal refuses targets that contain mounted filesystems. Manual
+runs use `cleanup.sh` and retain the recoverable behavior described above;
+ambient environment variables cannot enable permanent cleanup. Failed workspace
+build artifacts remain available until the next checkout cleans the workspace.
 Timestamped entries created by older workflow versions are not touched and
 require one-time runner maintenance.
 
