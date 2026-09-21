@@ -25,8 +25,8 @@ permanently_remove_owned_path() {
         "${HOME}/Library/Application Support/dev.xe.computer" | \
         "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" | \
         "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" | \
-        "${HOME}/Applications/Chromium Apps.localized/Darc.app" | \
-        "${HOME}/Applications/Chrome Canary Apps.localized/Darc.app")
+        "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app" | \
+        "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app")
             ;;
         *)
             fail "refusing permanent removal of unowned path: $path"
@@ -113,9 +113,6 @@ stop_matching_processes \
     "Xe Computer app shims" \
     "/Library/Application Support/${bundle_id_pattern}/shims/.*/Xe Computer[^/]*[.]app/Contents/MacOS/app_mode_loader"
 stop_matching_processes \
-    "legacy app shims" \
-    "/Library/Application Support/${bundle_id_pattern}/shims/.*/Darc[^/]*[.]app/Contents/MacOS/app_mode_loader"
-stop_matching_processes \
     "Xe Computer app shims launched by Xe Launcher's Helium" \
     "app_mode_loader .*--launched-by-chrome-bundle-path=.*/Library/Application Support/${bundle_id_pattern}/Helium[.]app"
 stop_matching_processes \
@@ -128,9 +125,9 @@ trash_generated_shim_if_owned \
 trash_generated_shim_if_owned \
     "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app"
 trash_generated_shim_if_owned \
-    "${HOME}/Applications/Chromium Apps.localized/Darc.app"
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app"
 trash_generated_shim_if_owned \
-    "${HOME}/Applications/Chrome Canary Apps.localized/Darc.app"
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app"
 
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do

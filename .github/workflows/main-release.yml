@@ -212,13 +212,33 @@ jobs:
           GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN }}
         working-directory: macos
         run: |
+          report_storage() {
+            echo "::group::Runner storage diagnostics"
+            df -h "$PWD" "$RUNNER_TEMP" "${TMPDIR:-/private/tmp}" || true
+            df -i "$PWD" "$RUNNER_TEMP" "${TMPDIR:-/private/tmp}" || true
+            quota -v || true
+            ulimit -a
+            du -sh .build dist "dist/Xe Launcher.app" dist/rw.*.dmg ../workerd/dist 2>/dev/null || true
+            ls -lh dist 2>/dev/null || true
+            for image in dist/rw.*.dmg; do
+              [[ -e "$image" ]] || continue
+              echo "Writable DMG limits: $image"
+              hdiutil resize -limits "$image" || true
+            done
+            echo "::endgroup::"
+          }
+
           if [[ -z "$GH_TOKEN" ]]; then
             echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
             exit 1
           fi
           make workerd compose-ui compose-server
           /bin/bash Scripts/test-runtime.sh
-          make
+          report_storage
+          if ! make; then
+            report_storage
+            exit 1
+          fi
 
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel "${{ steps.version.outputs.update_channel }}"
