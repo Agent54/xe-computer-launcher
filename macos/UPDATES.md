@@ -8,7 +8,7 @@ Release assets.
 Sparkle validates three things before replacing the installed application:
 
 1. the HTTPS appcast feed signature;
-2. the Ed25519 signature on the downloaded DMG; and
+2. the Ed25519 signature on the downloaded full DMG or delta; and
 3. the application's Apple Developer ID signature.
 
 Sparkle checks automatically without showing its update-check permission
@@ -113,17 +113,21 @@ The release workflow:
 1. assigns a monotonically increasing `CFBundleVersion`;
 2. embeds the channel feed URL and public key;
 3. builds, signs, notarizes, and tests the application and DMG;
-4. generates a signed appcast from the notarized DMG, using the fully qualified
-   release tag as Sparkle's display version;
-5. creates the GitHub release with `Xe-Launcher.dmg` and `appcast.xml`;
-6. updates `stable/appcast.xml` or `int/appcast.xml` on the `updates` branch;
-7. downloads and validates the newly published feed; and
-8. announces the release only after feed validation succeeds.
+4. downloads up to three prior DMGs from the same update channel and generates
+   direct, signed deltas from those builds to the new notarized application;
+5. generates a signed appcast using the fully qualified release tag as
+   Sparkle's display version;
+6. creates the GitHub release with `Xe-Launcher.dmg`, `appcast.xml`, and every
+   generated `.delta` file;
+7. updates `stable/appcast.xml` or `int/appcast.xml` on the `updates` branch;
+8. downloads and validates the newly published feed; and
+9. announces the release only after feed validation succeeds.
 
 Stable and prerelease feeds are deliberately separate, so a stable install can
-never discover an `int` build. The generated appcast contains only the newest
-full DMG for that channel. Delta updates can be added later by retaining prior
-archives during appcast generation.
+never discover an `int` build or use one as a delta base. The generated appcast
+contains the newest full DMG as a fallback plus up to three deltas from recent
+same-channel builds. Sparkle may omit a delta when the source build is
+incompatible or the patch would not be meaningfully smaller than the full DMG.
 
 ## Verification
 
@@ -145,7 +149,8 @@ macos/Tests/Integration/verify-appcast.sh \
   /path/to/appcast.xml \
   EXPECTED_BUILD_VERSION \
   https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/Xe-Launcher.dmg \
-  EXPECTED_DISPLAY_VERSION
+  EXPECTED_DISPLAY_VERSION \
+  EXPECTED_DELTA_COUNT
 ```
 
 For the first end-to-end update test, install the first Sparkle-enabled release

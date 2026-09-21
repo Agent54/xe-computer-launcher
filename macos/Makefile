@@ -108,6 +108,7 @@ package: build smol-runtime compose-server workerd guest-worker compose-ui
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
 	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
+	@cp ../workerd/package.json "$(RESOURCES)/Workerd.package.json"
 	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
 	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
 	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"

@@ -29,6 +29,15 @@ jobs:
       - name: Check out pull request
         uses: actions/checkout@v4
 
+      - name: Verify Sparkle delta appcast fixture
+        run: |
+          macos/Tests/Integration/verify-appcast.sh \
+            macos/Tests/Fixtures/appcast.xml \
+            123.1 \
+            https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/Xe-Launcher.dmg \
+            1.2.3 \
+            1
+
       - uses: actions/download-artifact@v4
         with:
           name: guest-worker

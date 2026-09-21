@@ -1268,8 +1268,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func aboutAction() {
+        let components = ComponentVersions.bundled(
+            resourceURL: Bundle.main.resourceURL,
+            contentsURL: Bundle.main.bundleURL.appendingPathComponent("Contents"),
+            heliumAppURL: ExternalState.resolveHelperApp(name: "Helium.app")
+        )
         let options: [NSApplication.AboutPanelOptionKey: Any] = [
-            .applicationVersion: releaseVersion
+            .applicationVersion: releaseVersion,
+            .credits: NSAttributedString(
+                string: ComponentVersions.aboutText(for: components),
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]
+            )
         ]
 
         NSApp.activate(ignoringOtherApps: true)

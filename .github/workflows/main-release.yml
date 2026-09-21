@@ -20,7 +20,9 @@ jobs:
   release:
     needs: guest-worker
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
-    timeout-minutes: 60
+    # Delta generation extracts and compares up to four complete application
+    # bundles in addition to the normal signed/notarized release build.
+    timeout-minutes: 90
     env:
       GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist
       NOTARY_PROFILE: notarytool-profile
@@ -253,9 +255,11 @@ jobs:
           EXPECTED_VERSION: ${{ steps.version.outputs.release_tag }}
         run: macos/Tests/Integration/about-version.sh
 
-      - name: Generate signed Sparkle appcast
+      - name: Generate signed Sparkle appcast and deltas
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         shell: bash
         run: |
@@ -264,8 +268,8 @@ jobs:
             exit 1
           fi
 
-          update_dir="$RUNNER_TEMP/sparkle-update"
-          mkdir -p "$update_dir"
+          update_dir="$(mktemp -d "$RUNNER_TEMP/sparkle-update.XXXXXX")"
+          echo "SPARKLE_UPDATE_DIR=$update_dir" >> "$GITHUB_ENV"
           cp "macos/dist/Xe Launcher.dmg" "$update_dir/Xe-Launcher.dmg"
 
           {
@@ -286,12 +290,56 @@ jobs:
             exit 1
           fi
 
+          # A Sparkle delta upgrades one exact CFBundleVersion to the newest
+          # build. Download at most three full DMGs from the same channel as
+          # generation inputs. They are not uploaded to the new release.
+          base_count=0
+          while IFS=$'\t' read -r tag is_prerelease is_draft; do
+            [[ "$is_draft" == "false" ]] || continue
+
+            if [[ "$UPDATE_CHANNEL" == "stable" ]]; then
+              [[ "$is_prerelease" == "false" && "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            else
+              [[ "$is_prerelease" == "true" && "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]+\.[0-9]+$ ]] || continue
+            fi
+
+            base_path="$update_dir/Xe-Launcher-base-$((base_count + 1))-$tag.dmg"
+            if gh release download "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "Xe-Launcher.dmg" \
+              --output "$base_path" \
+              --clobber; then
+              base_count=$((base_count + 1))
+              echo "Using $tag as Sparkle delta base $base_count/3"
+            else
+              rm -f "$base_path"
+              echo "::warning::Release $tag has no downloadable Xe-Launcher.dmg; trying an older release."
+            fi
+
+            ((base_count >= 3)) && break
+          done < <(
+            gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 100 \
+              --json tagName,isPrerelease,isDraft \
+              --jq '.[] | [.tagName, .isPrerelease, .isDraft] | @tsv'
+          )
+
+          echo "Prepared $base_count same-channel archive(s) for delta generation."
+          # Keep Sparkle's extracted-archive cache scoped to this release. Its
+          # default user cache would otherwise grow by another full app bundle
+          # on every run of this persistent self-hosted runner.
+          sparkle_cache_root="$update_dir/.sparkle-cache-root"
+          mkdir -p "$sparkle_cache_root"
+
           printf '%s' "$SPARKLE_PRIVATE_KEY" |
-            "$generate_appcast" \
+            CFFIXED_USER_HOME="$sparkle_cache_root" "$generate_appcast" \
               --ed-key-file - \
               --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/" \
               --embed-release-notes \
-              --maximum-deltas 0 \
+              --maximum-versions 1 \
+              --maximum-deltas 3 \
+              --versions "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
               --link "https://github.com/$GITHUB_REPOSITORY" \
               -o "$update_dir/appcast.xml" \
               "$update_dir"
@@ -316,7 +364,24 @@ jobs:
               --verify \
               --ed-key-file - \
               "$update_dir/appcast.xml"
-          echo "SPARKLE_UPDATE_DIR=$update_dir" >> "$GITHUB_ENV"
+
+          delta_count="$(find "$update_dir" -maxdepth 1 -type f -name '*.delta' | wc -l | tr -d '[:space:]')"
+          if ((delta_count > 3 || delta_count > base_count)); then
+            echo "::error::Generated $delta_count deltas from $base_count bases; expected at most three."
+            exit 1
+          fi
+          if ((base_count > 0 && delta_count == 0)); then
+            echo "::warning::Sparkle did not produce an efficient compatible delta from the available base archives."
+          fi
+
+          macos/Tests/Integration/verify-appcast.sh \
+            "$update_dir/appcast.xml" \
+            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg" \
+            "$RELEASE_TAG" \
+            "$delta_count"
+
+          echo "SPARKLE_DELTA_COUNT=$delta_count" >> "$GITHUB_ENV"
 
       - name: Create version tag and GitHub release
         env:
@@ -332,13 +397,32 @@ jobs:
             release_flags+=(--latest)
           fi
 
+          release_assets=(
+            "$SPARKLE_UPDATE_DIR/Xe-Launcher.dmg"
+            "$SPARKLE_UPDATE_DIR/appcast.xml"
+          )
+          for delta in "$SPARKLE_UPDATE_DIR"/*.delta; do
+            [[ -f "$delta" ]] || continue
+            release_assets+=("$delta")
+          done
+
           gh release create "$RELEASE_TAG" \
-            "$SPARKLE_UPDATE_DIR/Xe-Launcher.dmg" \
-            "$SPARKLE_UPDATE_DIR/appcast.xml" \
+            "${release_assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Xe Launcher $RELEASE_TAG" \
             "${release_flags[@]}"
+
+          published_delta_count="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '[.assets[].name | select(endswith(".delta"))] | length'
+          )"
+          if [[ "$published_delta_count" != "$SPARKLE_DELTA_COUNT" ]]; then
+            echo "::error::Expected $SPARKLE_DELTA_COUNT published deltas, found $published_delta_count."
+            exit 1
+          fi
 
       - name: Publish Sparkle channel feed
         env:
@@ -401,7 +485,8 @@ jobs:
               "$feed_url" \
               "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
               "$asset_url" \
-              "$RELEASE_TAG" >"$verification_log" 2>&1; then
+              "$RELEASE_TAG" \
+              "$SPARKLE_DELTA_COUNT" >"$verification_log" 2>&1; then
               cat "$verification_log"
               exit 0
             fi
@@ -448,7 +533,7 @@ jobs:
             --output /dev/null \
             "$DISCORD_WEBHOOK_URL"
 
-      - name: Remove temporary signing material
+      - name: Remove temporary release and signing material
         if: ${{ always() }}
         shell: bash
         run: |
@@ -463,6 +548,11 @@ jobs:
           fi
 
           security delete-keychain "$NOTARY_KEYCHAIN" 2>/dev/null || true
+          if [[ -n "${SPARKLE_UPDATE_DIR:-}" \
+            && "$SPARKLE_UPDATE_DIR" == "$RUNNER_TEMP"/sparkle-update.* \
+            && -d "$SPARKLE_UPDATE_DIR" ]]; then
+            rm -rf -- "$SPARKLE_UPDATE_DIR"
+          fi
           rm -f \
             "$RUNNER_TEMP/developer-id.p12" \
             "$RUNNER_TEMP/AuthKey.p8" \
