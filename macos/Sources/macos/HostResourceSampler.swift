@@ -13,14 +13,25 @@ struct HostResourceSnapshot: Codable, Equatable, Sendable {
 actor HostResourceSampler {
     static let shared = HostResourceSampler()
 
+    private static let refreshInterval: Duration = .seconds(60)
+
     private struct CPUTicks {
         let busy: UInt64
         let total: UInt64
     }
 
     private var previousCPUTicks: CPUTicks?
+    private var cachedSnapshot: HostResourceSnapshot?
+    private var lastSampledAt: ContinuousClock.Instant?
 
     func snapshot() -> HostResourceSnapshot {
+        // Status can be published frequently; keep host sampling demand-driven and infrequent.
+        let now = ContinuousClock.now
+        if let cachedSnapshot, let lastSampledAt,
+           now - lastSampledAt < Self.refreshInterval {
+            return cachedSnapshot
+        }
+
         let currentCPUTicks = Self.cpuTicks()
         let cpuPercent: Double?
         if let previousCPUTicks, let currentCPUTicks {
@@ -38,7 +49,7 @@ actor HostResourceSampler {
 
         let memoryTotal = ProcessInfo.processInfo.physicalMemory
         let disk = Self.diskUsage()
-        return HostResourceSnapshot(
+        let snapshot = HostResourceSnapshot(
             cpuPercent: cpuPercent,
             cpuCount: ProcessInfo.processInfo.activeProcessorCount,
             memoryUsedBytes: Self.memoryUsedBytes(totalBytes: memoryTotal),
@@ -46,6 +57,9 @@ actor HostResourceSampler {
             diskUsedBytes: disk?.used,
             diskTotalBytes: disk?.total
         )
+        cachedSnapshot = snapshot
+        lastSampledAt = now
+        return snapshot
     }
 
     private static func cpuTicks() -> CPUTicks? {
