@@ -580,6 +580,24 @@ installed_bundle_id="$(defaults read "$INSTALLED_APP/Contents/Info" CFBundleIden
 
 sources_manifest="$INSTALLED_APP/Contents/Resources/sources.json"
 [[ -f "$sources_manifest" ]] || fail "installed sources manifest is missing"
+helium_version="$(plutil -extract helium.version raw "$sources_manifest")"
+helium_chromium_version="$(plutil -extract helium.chromiumVersion raw "$sources_manifest")"
+helium_sha256="$(plutil -extract helium.sha256 raw "$sources_manifest")"
+[[ "$helium_version" == "0.17.2.1" ]] \
+    || fail "unexpected pinned Helium version: $helium_version"
+[[ "$helium_chromium_version" == "153.0.8010.52" ]] \
+    || fail "unexpected pinned Chromium version: $helium_chromium_version"
+[[ "$helium_sha256" == "f1a3fecde3c08254f1b1eec30e36ecd25f98cf3799644427fbcefd6e6beafacf" ]] \
+    || fail "unexpected pinned Helium SHA-256: $helium_sha256"
+installed_helium="$APP_DATA/helium/$helium_version/Helium.app"
+[[ -d "$installed_helium" ]] || fail "versioned Helium engine was not installed"
+installed_helium_version="$(plutil -extract CFBundleShortVersionString raw "$installed_helium/Contents/Info.plist")"
+[[ "$installed_helium_version" == "$helium_version" ]] \
+    || fail "installed Helium $installed_helium_version does not match pin $helium_version"
+codesign --verify --deep --strict --verbose=2 "$installed_helium"
+codesign -dv --verbose=4 "$installed_helium" 2>&1 \
+    | grep -Fq 'TeamIdentifier=S4Q33XPHB4' \
+    || fail "installed Helium is not signed by the expected Developer ID team"
 darc_major="$(plutil -extract darc.version.major raw "$sources_manifest")"
 darc_minor="$(plutil -extract darc.version.minor raw "$sources_manifest")"
 darc_patch="$(plutil -extract darc.version.patch raw "$sources_manifest")"

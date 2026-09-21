@@ -1,28 +1,33 @@
-# Xe Launcher
+# Xe Computer
 
-Xe Launcher is the entry point for Xe Computer.
+<p align="center">
+  <img src="macos/Artwork/xe-computer-icon-preview.png" width="180" alt="Xe Computer icon">
+</p>
+
+Xe Computer is a local development environment for building and running web
+apps on macOS. This repository contains Xe Launcher, the menu bar app that
+installs and manages Xe Computer, its browser runtime, and local Compose
+services.
 
 ## Requirements
 
 ### Hardware
 
-- Apple device with MacOS Tahoe.
+- Apple Silicon Mac running macOS Tahoe.
 
 ### Experience
 
 - Familiarity with web code/IDE/agentic environments.
 
-## Setup 
+## Install
 
-1. Download the [current release](https://github.com/Agent54/xe-darc-launcher/releases/latest).
+1. Download the [latest Xe Computer release](https://github.com/Agent54/xe-computer-launcher/releases/latest).
 2. Open the `Xe-Launcher.dmg` file.
 3. Drag the `Xe Launcher` icon to the Applications folder.
-4. Launch. You will then find the app in your menu bar.
-<img width="200" height="377" alt="Screenshot 2026-06-04 at 15 19 12" src="https://github.com/user-attachments/assets/7c35d2cf-eca2-4d0b-84c9-357748dda149" />
+4. Open Xe Launcher. It appears in the menu bar and starts Xe Computer.
 
 > [!NOTE]
 > If the package cannot open, launch Terminal and type `xattr -d com.apple.quarantine "Xe-Launcher.dmg"` to bypass Gatekeeper.
-
 
 ## Compose
 
@@ -63,3 +68,10 @@ and [integration tests](macos/Tests/Integration/README.md) for contributor detai
 
 Installed copies use Sparkle for signed in-app updates. Release maintainers
 should follow [the updater setup and release guide](macos/UPDATES.md).
+
+The browser engine is updated independently from the launcher. The current pin
+is Helium 0.17.2.1 (Chromium 153.0.8010.52); the launcher verifies the published
+checksum and Developer ID signature before replacing the engine while keeping
+browser profiles intact. Engines live under versioned
+`helium/VERSION/Helium.app` paths so a failed download or validation leaves the
+previous engine available.

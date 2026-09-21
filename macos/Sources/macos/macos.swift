@@ -28,6 +28,14 @@ private enum LauncherUpdateChannel: String {
     var feedURLString: String {
         "https://raw.githubusercontent.com/Agent54/xe-computer-launcher/updates/\(rawValue)/appcast.xml"
     }
+
+    var iwaUpdateChannel: String {
+        switch self {
+        case .stable: "default"
+        case .int: "nightly"
+        }
+    }
+
 }
 
 private final class LauncherVersionDisplayer: NSObject, SUVersionDisplay {
@@ -167,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var openAppDataFolderSeparator: NSMenuItem?
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
+    private var configureIWAUpdatesItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
@@ -252,10 +261,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let state = ExternalState.shared
             state.appendLog("launcher", "Recovering saved Xe Computer and browser state")
             let recoveredProcessCount = await Task.detached(priority: .userInitiated) {
-                state.updateAll()
+                // Stop the managed browser before a pinned Helium update can
+                // replace its application bundle.
+                state.updateSettings()
                 state.stopDarc()
                 let staleProcesses = state.findZombieProcesses()
                 state.killZombieProcesses(staleProcesses)
+                state.updateAll()
                 return staleProcesses.count
             }.value
             guard !Task.isCancelled else { return }
@@ -621,6 +633,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         )
         menu.addItem(checkForUpdatesItem)
         self.checkForUpdatesItem = checkForUpdatesItem
+        let configureIWAUpdatesItem = NSMenuItem(
+            title: "Configure Xe Computer Updates…",
+            action: #selector(configureIWAUpdatesAction),
+            keyEquivalent: ""
+        )
+        menu.addItem(configureIWAUpdatesItem)
+        self.configureIWAUpdatesItem = configureIWAUpdatesItem
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -1328,6 +1347,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             "Checking for updates on \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
         )
         updaterController.checkForUpdates(nil)
+    }
+
+    @objc private func configureIWAUpdatesAction() {
+        let channel = updateChannel.iwaUpdateChannel
+        let alert = NSAlert()
+        alert.messageText = "Configure Xe Computer Updates"
+        alert.informativeText = """
+        Xe Launcher will restart its managed Helium browser in a visible window and open Chromium's IWA settings.
+
+        Find Xe Computer, select the \(channel) update channel, then choose Perform update now. When finished, stop and start the Chrome Engine from the Xe Launcher menu to restore the normal headless setting.
+        """
+        alert.addButton(withTitle: "Open IWA Settings")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        runServiceAction("chrome") {
+            let state = ExternalState.shared
+            state.stopDarc()
+            state.stopChrome()
+            if let error = state.startChrome(
+                openingURL: "chrome://web-app-internals/",
+                forceHeaded: true
+            ) {
+                state.appendLog("launcher", "Could not open IWA settings: \(error)")
+            } else {
+                state.appendLog(
+                    "launcher",
+                    "Opened Chromium IWA settings for manual \(channel) channel selection"
+                )
+            }
+        }
     }
 
     func feedURLString(for updater: SPUUpdater) -> String? {

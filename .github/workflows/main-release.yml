@@ -114,6 +114,72 @@ jobs:
             -string "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$update_channel/appcast.xml" \
             macos/Sources/macos/Info.plist
 
+      - name: Verify Xe Computer release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          sources_file="macos/Sources/macos/Resources/sources.json"
+          release_json="$RUNNER_TEMP/xe-computer-release.json"
+
+          darc_version="$(
+            jq -r '
+              .darc.version |
+              [.major, .minor, .patch] |
+              if all(.[]; type == "number" and . >= 0 and floor == .)
+              then map(tostring) | join(".")
+              else error("invalid Darc version")
+              end
+            ' "$sources_file"
+          )"
+
+          version_component='(0|[1-9][0-9]{0,8})'
+          if [[ ! "$darc_version" =~ ^${version_component}\.${version_component}\.${version_component}$ ]]; then
+            echo "::error::Invalid Xe Computer version in $sources_file"
+            exit 1
+          fi
+
+          gh api \
+            "repos/Agent54/xe-darc/releases/tags/v$darc_version" \
+            > "$release_json"
+          gh release download iwa-manifest \
+            --repo Agent54/xe-darc \
+            -p iwa-updates.json \
+            -D "$RUNNER_TEMP" \
+            --clobber
+
+          if [[ "$GITHUB_REF_NAME" == "int" ]]; then
+            expected_iwa_channel="nightly"
+            expected_prerelease="true"
+          else
+            expected_iwa_channel="default"
+            expected_prerelease="false"
+          fi
+
+          jq -e \
+            --argjson prerelease "$expected_prerelease" \
+            '.draft == false and
+             .prerelease == $prerelease and
+             any(.assets[]; .name == "darc.swbn")' \
+            "$release_json" >/dev/null || {
+              echo "::error::Xe Computer v$darc_version is not valid for the $GITHUB_REF_NAME launcher channel"
+              exit 1
+            }
+
+          jq -e \
+            --arg version "$darc_version" \
+            --arg channel "$expected_iwa_channel" \
+            'any(.versions[];
+              .version == $version and
+              (.channels | index($channel) != null)
+            )' \
+            "$RUNNER_TEMP/iwa-updates.json" >/dev/null || {
+              echo "::error::Xe Computer v$darc_version is not published on the $expected_iwa_channel IWA channel"
+              exit 1
+            }
+
+          echo "Verified Xe Computer v$darc_version on the $expected_iwa_channel IWA channel"
+
       - name: Install Developer ID certificate
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}

@@ -52,10 +52,6 @@ DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
 all: release
 
-zip-helpers:
-	@echo "Zipping helpers..."
-	@ditto -c -k --keepParent $(BUILD_DIR)/Helium.zip Sources/macos/helpers/Helium.app
-
 build:
 	$(SWIFT) build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
 

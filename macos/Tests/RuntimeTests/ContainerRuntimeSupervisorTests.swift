@@ -75,6 +75,16 @@ struct ContainerRuntimeSupervisorTests {
             readDiagnostics: { await fixture.diagnostic() },
             resetRouter: { await fixture.resetRouter() },
             reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: {
+                HostResourceSnapshot(
+                    cpuPercent: 12.5,
+                    cpuCount: 10,
+                    memoryUsedBytes: 8 * 1024 * 1024 * 1024,
+                    memoryTotalBytes: 16 * 1024 * 1024 * 1024,
+                    diskUsedBytes: 100 * 1024 * 1024 * 1024,
+                    diskTotalBytes: 500 * 1024 * 1024 * 1024
+                )
+            },
             sleep: { _ in },
             onStatusChanged: { _ in },
             log: { _ in }
@@ -97,6 +107,8 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.phase == snapshot.phase)
         #expect(persisted.reason == snapshot.reason)
         #expect(persisted.oomKillCount == snapshot.oomKillCount)
+        #expect(persisted.hostResources?.cpuPercent == 12.5)
+        #expect(persisted.hostResources?.memoryTotalBytes == UInt64(16) * 1024 * 1024 * 1024)
         #expect(abs(persisted.updatedAt.timeIntervalSince(snapshot.updatedAt)) < 1)
     }
 

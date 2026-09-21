@@ -19,6 +19,7 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     let memoryTotalBytes: UInt64?
     let memoryAvailableBytes: UInt64?
     let oomKillCount: UInt64?
+    let hostResources: HostResourceSnapshot?
 
     var menuDescription: String { message }
 }
@@ -34,7 +35,8 @@ final class ContainerRuntimePresentation {
         recoveryAttempt: nil,
         memoryTotalBytes: nil,
         memoryAvailableBytes: nil,
-        oomKillCount: nil
+        oomKillCount: nil,
+        hostResources: nil
     )
 
     func update(_ snapshot: ContainerRuntimeSnapshot) {
@@ -60,7 +62,8 @@ actor ContainerRuntimeStatusStore {
             recoveryAttempt: nil,
             memoryTotalBytes: nil,
             memoryAvailableBytes: nil,
-            oomKillCount: nil
+            oomKillCount: nil,
+            hostResources: nil
         )
     }
 
@@ -97,6 +100,7 @@ actor ContainerRuntimeSupervisor {
     typealias ReadDiagnostics = @Sendable () async throws -> SmolVMMachine
     typealias RouterReset = @Sendable () async -> Void
     typealias RouterReconcile = @Sendable () async throws -> Void
+    typealias ReadHostResources = @Sendable () async -> HostResourceSnapshot?
     typealias Sleep = @Sendable (Duration) async throws -> Void
     typealias StatusChanged = @Sendable (ContainerRuntimeSnapshot) -> Void
     typealias Log = @Sendable (String) -> Void
@@ -119,6 +123,7 @@ actor ContainerRuntimeSupervisor {
     private let readDiagnostics: ReadDiagnostics
     private let resetRouter: RouterReset
     private let reconcileRouter: RouterReconcile
+    private let readHostResources: ReadHostResources
     private let sleep: Sleep
     private let now: @Sendable () -> Date
     private let onStatusChanged: StatusChanged
@@ -143,6 +148,7 @@ actor ContainerRuntimeSupervisor {
         },
         resetRouter: @escaping RouterReset = { GuestRouter.shared.reset() },
         reconcileRouter: @escaping RouterReconcile = { try await GuestRouter.shared.reconcile() },
+        readHostResources: @escaping ReadHostResources = { HostResourceSampler.shared.snapshot() },
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) },
         now: @escaping @Sendable () -> Date = Date.init,
         onStatusChanged: @escaping StatusChanged = { snapshot in
@@ -158,6 +164,7 @@ actor ContainerRuntimeSupervisor {
         self.readDiagnostics = readDiagnostics
         self.resetRouter = resetRouter
         self.reconcileRouter = reconcileRouter
+        self.readHostResources = readHostResources
         self.sleep = sleep
         self.now = now
         self.onStatusChanged = onStatusChanged
@@ -344,6 +351,7 @@ actor ContainerRuntimeSupervisor {
         recoveryAttempt: Int? = nil,
         memory: SmolVMMemoryStatus? = nil
     ) async {
+        let hostResources = await readHostResources()
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,
@@ -352,7 +360,8 @@ actor ContainerRuntimeSupervisor {
             recoveryAttempt: recoveryAttempt,
             memoryTotalBytes: memory?.totalBytes,
             memoryAvailableBytes: memory?.availableBytes,
-            oomKillCount: memory?.oomKillCount
+            oomKillCount: memory?.oomKillCount,
+            hostResources: hostResources
         )
         do {
             try await statusStore.publish(snapshot)

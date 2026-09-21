@@ -54,7 +54,7 @@ extension ExternalState {
         appDataURL.appendingPathComponent("sockets/chrome-debug.sock").path
     }
 
-    func startChrome() -> String? {
+    func startChrome(openingURL: String? = nil, forceHeaded: Bool = false) -> String? {
         guard !isBrowserStackStopRequested else {
             return "Chrome startup cancelled because Xe Launcher is shutting down"
         }
@@ -74,11 +74,15 @@ extension ExternalState {
 
         guard let chrome = preferredChrome() else { return "No supported Chrome installation found" }
 
+        let launchFlags = forceHeaded
+            ? Self.chromeFlags.filter { $0 != "--silent-launch" }
+            : Self.chromeFlags
         var args = [
             "--user-data-dir=\(profileDir.path)",
             "--remote-debugging-pipe"
-        ] + Self.chromeFlags
-        if boolSetting("chrome_headless", default: true) {
+        ] + launchFlags
+        let runsHeadless = !forceHeaded && boolSetting("chrome_headless", default: true)
+        if runsHeadless {
             args.append("--headless=new")
             // Override User-Agent globally (including workers) to remove "HeadlessChrome"
             let majorVersion = chrome.version ?? 145
@@ -97,11 +101,14 @@ extension ExternalState {
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
            !shimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
-        } else if !isDevProxy {
+        } else if !isDevProxy && !shimExists {
             if let iwaURL = configuredSourceAssetURL(name: "darc", dataURL: Self.appDataURL),
                FileManager.default.fileExists(atPath: iwaURL.path) {
                 args.append("--install-isolated-web-app-from-file=\(iwaURL.path)")
             }
+        }
+        if let openingURL {
+            args.append(openingURL)
         }
 
         // Create pipe pairs for Chrome DevTools Protocol pipe transport.
@@ -135,7 +142,7 @@ extension ExternalState {
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
             // Apply anti-detection patches when running in headless mode
-            if boolSetting("chrome_headless", default: true) {
+            if runsHeadless {
                 preventDetection()
             }
 

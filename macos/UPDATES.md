@@ -26,6 +26,34 @@ acts as the download marker, so updating the launcher to a newly pinned Xe
 Computer version fetches and installs that exact bundle instead of reusing an
 older `darc.swbn` file.
 
+Helium is also an independently versioned source asset. The manifest pins its
+release version, Chromium version, and the publisher's SHA-256 instead of using
+an unversioned `latest/Helium.zip` URL. At startup the launcher stops its
+managed browser processes, downloads the pinned Apple-silicon disk image when
+the installed Helium version is older or unreadable, and verifies the checksum,
+bundle identity, Developer ID signature, and signing team. A verified engine is
+installed at `helium/VERSION/Helium.app`. The complete version directory becomes
+visible only after verification, older directories remain usable as fallbacks,
+and the legacy unversioned `Helium.app` remains a migration fallback. Resolution
+prefers the newest valid installed engine that satisfies the pin and never
+downgrades a newer engine. Browser profiles are stored separately and are not
+replaced.
+
+Chromium 150 and later support update-channel selection for unmanaged IWAs,
+but the selection is deliberately user-initiated and Chromium exposes no
+public macOS command-line channel switch. **Configure Xe Computer Updates…**
+restarts the managed browser visibly and opens `chrome://web-app-internals`.
+Select `nightly` in an `int` launcher or `default` in a stable launcher and run
+the update once. Chromium then uses the selected channel for its normal signed
+background update checks. The launcher does not use CDP or modify Helium to
+change this state.
+
+The release workflow enforces the same mapping. An `int` launcher can only ship
+a Darc GitHub prerelease listed on the IWA manifest's `nightly` channel. A
+stable launcher can only ship a non-prerelease Darc release listed on
+`default`. Consequently, merging integration work to `main` cannot publish a
+stable launcher containing an unpromoted Darc prerelease.
+
 ## One-time signing-key setup
 
 There are two related keys, and they have different jobs:

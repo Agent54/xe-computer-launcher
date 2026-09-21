@@ -194,6 +194,10 @@ final class ExternalState: @unchecked Sendable {
     /// Resolve a helper app path: prefer the user data dir copy (avoids signature issues),
     /// fall back to the app bundle's Helpers/.
     static func resolveHelperApp(name: String) -> URL {
+        if name == "Helium.app",
+           let versionedApp = resolvedHeliumAppURL(dataURL: appDataURL) {
+            return versionedApp
+        }
         let userCopy = appDataURL.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: userCopy.path) {
             return userCopy
