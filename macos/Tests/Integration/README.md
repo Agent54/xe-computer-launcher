@@ -22,6 +22,12 @@ Run this only in a disposable test account or VM. `cleanup.sh`:
   with a timestamp, so accidentally removed data can be recovered;
 - detaches stale Xe Launcher disk-image mounts.
 
+The release workflow sets `XE_INSTALLER_CLEANUP_PERMANENT=1`. In that mode,
+cleanup permanently removes the current Xe test installation and data, and
+purges only timestamped `dev.xe.computer-*` entries created by earlier cleanup
+runs from the CI account's Trash. This happens at the start of a run; failed
+build artifacts remain available until the next run starts.
+
 On a fresh VM, `tccutil` may report that the bundle is not registered; the test treats
 that as an already-clean permission state and continues.
 
@@ -141,6 +147,8 @@ cleanup, artifact/build preparation, and the test invocation:
 
 ```yaml
 - name: Reset installer integration environment
+  env:
+    XE_INSTALLER_CLEANUP_PERMANENT: "1"
   run: bash macos/Tests/Integration/cleanup.sh
 
 - name: Run installer integration test
