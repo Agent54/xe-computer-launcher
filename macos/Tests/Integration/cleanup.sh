@@ -6,6 +6,7 @@ APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
+PERMANENT_CLEANUP="${XE_INSTALLER_CLEANUP_PERMANENT:-0}"
 
 log() {
     printf '[installer-cleanup] %s\n' "$*"
@@ -14,6 +15,52 @@ log() {
 fail() {
     printf '[installer-cleanup] ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+permanently_remove_owned_path() {
+    local path="$1"
+    local name
+
+    case "$path" in
+        "/Applications/Xe Launcher.app" | \
+        "${HOME}/Library/Application Support/dev.xe.computer" | \
+        "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" | \
+        "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" | \
+        "${HOME}/Applications/Chromium Apps.localized/Darc.app" | \
+        "${HOME}/Applications/Chrome Canary Apps.localized/Darc.app")
+            ;;
+        "${HOME}/.Trash/dev.xe.computer-"*)
+            name="${path##*/}"
+            [[ "$path" == "${HOME}/.Trash/${name}" ]] \
+                || fail "refusing permanent removal outside the Trash root: $path"
+            [[ "$name" =~ ^dev\.xe\.computer-(app-|shim-)?[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}$ ]] \
+                || fail "refusing permanent removal of unexpected Trash entry: $path"
+            ;;
+        *)
+            fail "refusing permanent removal of unowned path: $path"
+            ;;
+    esac
+
+    rm -rf -- "$path"
+}
+
+purge_previous_ci_trash() {
+    local trash_dir="${HOME}/.Trash"
+    local trashed_path
+    local trashed_name
+
+    [[ "$PERMANENT_CLEANUP" == "1" && -d "$trash_dir" ]] || return 0
+
+    while IFS= read -r -d '' trashed_path; do
+        trashed_name="${trashed_path##*/}"
+        [[ "$trashed_name" =~ ^dev\.xe\.computer-(app-|shim-)?[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}$ ]] \
+            || continue
+        log "permanently removing prior CI artifact from Trash: $trashed_name"
+        permanently_remove_owned_path "$trashed_path"
+    done < <(
+        find "$trash_dir" -mindepth 1 -maxdepth 1 \
+            -name "${BUNDLE_ID}-*" -print0
+    )
 }
 
 detach_disk_image() {
@@ -37,10 +84,15 @@ trash_generated_shim_if_owned() {
     )"
     [[ "$shim_user_data_dir" == "${APP_DATA}/profiles/"* ]] || return 0
 
-    trashed_shim="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-shim-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_shim"
-    log "moving stale generated app shim to $trashed_shim"
-    mv "$shim_path" "$trashed_shim"
+    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+        log "permanently removing stale generated app shim at $shim_path"
+        permanently_remove_owned_path "$shim_path"
+    else
+        trashed_shim="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-shim-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+        rmdir "$trashed_shim"
+        log "moving stale generated app shim to $trashed_shim"
+        mv "$shim_path" "$trashed_shim"
+    fi
 }
 
 stop_matching_processes() {
@@ -76,6 +128,11 @@ stop_matching_processes() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
+[[ "$PERMANENT_CLEANUP" == "0" || "$PERMANENT_CLEANUP" == "1" ]] \
+    || fail "XE_INSTALLER_CLEANUP_PERMANENT must be 0 or 1"
+
+purge_previous_ci_trash
+
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
 stop_matching_processes \
@@ -137,18 +194,28 @@ fi
 
 log "removing existing installed app"
 if [[ -e "$INSTALLED_APP" ]]; then
-    trashed_app="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-app-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_app"
-    log "moving existing installed app to $trashed_app"
-    mv "$INSTALLED_APP" "$trashed_app"
+    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+        log "permanently removing existing installed app at $INSTALLED_APP"
+        permanently_remove_owned_path "$INSTALLED_APP"
+    else
+        trashed_app="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-app-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+        rmdir "$trashed_app"
+        log "moving existing installed app to $trashed_app"
+        mv "$INSTALLED_APP" "$trashed_app"
+    fi
 fi
 
 log "removing existing app data"
 if [[ -e "$APP_DATA" ]]; then
-    trashed_data="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_data"
-    log "moving existing app data to $trashed_data"
-    mv "$APP_DATA" "$trashed_data"
+    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+        log "permanently removing existing app data at $APP_DATA"
+        permanently_remove_owned_path "$APP_DATA"
+    else
+        trashed_data="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+        rmdir "$trashed_data"
+        log "moving existing app data to $trashed_data"
+        mv "$APP_DATA" "$trashed_data"
+    fi
 fi
 
 log "cleanup complete"

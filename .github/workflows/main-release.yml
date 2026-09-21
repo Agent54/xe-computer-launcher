@@ -41,13 +41,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reset launcher integration environment
+        env:
+          XE_INSTALLER_CLEANUP_PERMANENT: "1"
+        run: bash macos/Tests/Integration/cleanup.sh
+
       - uses: actions/download-artifact@v4
         with:
           name: guest-worker
           path: workerd/dist
-
-      - name: Reset launcher integration environment
-        run: bash macos/Tests/Integration/cleanup.sh
 
       - name: Calculate next patch version
         id: version
