@@ -19,7 +19,6 @@ fail() {
 
 permanently_remove_owned_path() {
     local path="$1"
-    local name
 
     case "$path" in
         "/Applications/Xe Launcher.app" | \
@@ -29,38 +28,12 @@ permanently_remove_owned_path() {
         "${HOME}/Applications/Chromium Apps.localized/Darc.app" | \
         "${HOME}/Applications/Chrome Canary Apps.localized/Darc.app")
             ;;
-        "${HOME}/.Trash/dev.xe.computer-"*)
-            name="${path##*/}"
-            [[ "$path" == "${HOME}/.Trash/${name}" ]] \
-                || fail "refusing permanent removal outside the Trash root: $path"
-            [[ "$name" =~ ^dev\.xe\.computer-(app-|shim-)?[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}$ ]] \
-                || fail "refusing permanent removal of unexpected Trash entry: $path"
-            ;;
         *)
             fail "refusing permanent removal of unowned path: $path"
             ;;
     esac
 
     rm -rf -- "$path"
-}
-
-purge_previous_ci_trash() {
-    local trash_dir="${HOME}/.Trash"
-    local trashed_path
-    local trashed_name
-
-    [[ "$PERMANENT_CLEANUP" == "1" && -d "$trash_dir" ]] || return 0
-
-    while IFS= read -r -d '' trashed_path; do
-        trashed_name="${trashed_path##*/}"
-        [[ "$trashed_name" =~ ^dev\.xe\.computer-(app-|shim-)?[0-9]{8}-[0-9]{6}-[[:alnum:]]{6}$ ]] \
-            || continue
-        log "permanently removing prior CI artifact from Trash: $trashed_name"
-        permanently_remove_owned_path "$trashed_path"
-    done < <(
-        find "$trash_dir" -mindepth 1 -maxdepth 1 \
-            -name "${BUNDLE_ID}-*" -print0
-    )
 }
 
 detach_disk_image() {
@@ -130,8 +103,6 @@ stop_matching_processes() {
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
 [[ "$PERMANENT_CLEANUP" == "0" || "$PERMANENT_CLEANUP" == "1" ]] \
     || fail "XE_INSTALLER_CLEANUP_PERMANENT must be 0 or 1"
-
-purge_previous_ci_trash
 
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
