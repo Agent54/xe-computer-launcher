@@ -12,9 +12,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 printf 'Compose UI: http://127.0.0.1:8094/\n'
-"$worker_binary" serve --watch "$worker_dir/config.capnp" \
+"$worker_binary" serve --experimental --watch "$worker_dir/config.capnp" \
     --inspector-addr=0.0.0.0:9229 --verbose \
     --directory-path "assets=$COMPOSE_UI_ASSETS" \
+    --socket-addr "ingest=127.0.0.1:${HTTP_PORT:-80}" \
+    --socket-addr "tls=127.0.0.1:${HTTPS_PORT:-443}" \
     --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" &
 child=$!
 wait "$child"

@@ -9,6 +9,24 @@ function applicationProtocol(port) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+export async function resolveApplicationPort(hostname, env) {
+  const labels = hostname.split('.');
+  const name = labels[0];
+  const selector = labels.length === 3 ? labels[1] : undefined;
+  const resolved = await env.ROUTER.fetch(`http://localhost/__xe_router_service?name=${encodeURIComponent(name)}`);
+  if (!resolved.ok) return null;
+  const service = await resolved.json();
+  const ports = (await servicePorts(env, service)).filter(p => (p.protocol || 'tcp') === 'tcp');
+  const selected = selector === undefined ? ports.slice(0, 1)
+    : /^\d+$/.test(selector) ? ports.filter(p => Number(p.published) === Number(selector))
+    : ports.filter(p => typeof p.name === 'string' && p.name.toLowerCase() === selector);
+  if (selected.length !== 1) return null;
+  const port = selected[0];
+  if (!Number.isInteger(port.target) || port.target < 1 || port.target > 65535 ||
+      !publishedPortFor(service, port)) return null;
+  return { service, port, protocol: applicationProtocol(port) || 'http' };
+}
+
 function publishedPortFor(service, port) {
   const target = Number(port.target);
   const configured = Number(port.published);
@@ -19,7 +37,7 @@ function publishedPortFor(service, port) {
   return published.length === 1 ? published[0] : undefined;
 }
 
-function protocolResponse(request, service, port) {
+function protocolResponse(request, service, port, canonical = false) {
   const protocol = applicationProtocol(port);
   if (!protocol || protocol === 'http') return null;
   if (protocol !== 'https') {
@@ -29,8 +47,8 @@ function protocolResponse(request, service, port) {
   if (!published) return new Response('Published HTTPS port not available', { status: 404 });
   const url = new URL(request.url);
   url.protocol = 'https:';
-  url.hostname = `${url.hostname.split('.')[0]}.localhost`;
-  url.port = String(published);
+  if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
+  url.port = '';
   return new Response(null, {
     status: 307,
     headers: { Location: url.href, 'Cache-Control': 'no-store' },
@@ -85,7 +103,7 @@ export async function routeApplication(request, env) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return new Response('Invalid Compose target port', { status: 404 });
     }
-    const response = protocolResponse(request, service, selected[0]);
+    const response = protocolResponse(request, service, selected[0], selected[0] === ports[0]);
     if (response) return response;
     headers.set(targetHeader, String(port));
     headers.set(containerHeader, service.id);
@@ -96,10 +114,11 @@ export async function routeApplication(request, env) {
       const resolved = await env.ROUTER.fetch(`http://localhost/__xe_router_service?name=${encodeURIComponent(name)}`);
       if (resolved.ok) {
         const service = await resolved.json();
-        const selected = (await servicePorts(env, service)).filter(p =>
+        const ports = (await servicePorts(env, service)).filter(p => (p.protocol || 'tcp') === 'tcp');
+        const selected = ports.filter(p =>
           (p.protocol || 'tcp') === 'tcp' && Number(p.published) === Number(selector));
         if (selected.length === 1) {
-          const response = protocolResponse(request, service, selected[0]);
+          const response = protocolResponse(request, service, selected[0], selected[0] === ports[0]);
           if (response) return response;
         }
       }

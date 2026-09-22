@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
+import { request as httpsRequest, createServer as createHttpsServer } from 'node:https';
 import { createConnection } from 'node:net';
 import { once } from 'node:events';
 import { resolve, dirname, join, extname } from 'node:path';
@@ -28,6 +29,7 @@ const outputs: Promise<Deno.CommandOutput>[] = [];
 const servers = new Set<Deno.HttpServer<Deno.UnixAddr>>();
 let releaseSSE: (() => void) | undefined;
 const seen: { path: string; method: string; headers: IncomingMessage['headers']; body: string }[] = [];
+const xeComputerOrigin = 'isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic';
 
 function startProcess(command: string, args: string[], env?: Record<string, string>) {
   const process = new Deno.Command(command, { args, env, stdout: 'piped', stderr: 'piped' }).spawn();
@@ -50,6 +52,10 @@ function freePort() {
 const managementPort = freePort();
 let routingPort = freePort();
 while (routingPort === managementPort) routingPort = freePort();
+let tlsPort = freePort();
+while (tlsPort === managementPort || tlsPort === routingPort) tlsPort = freePort();
+const containerId = 'a'.repeat(64);
+let securePort = 0;
 
 interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean }
 function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
@@ -78,13 +84,19 @@ async function startUnix(path: string) {
     seen.push({ path: requestPath, method: req.method, headers: Object.fromEntries(req.headers), body });
     const headers = { 'Connection': 'close', 'Content-Type': 'application/json' };
     if (requestPath === '/v1.24/config/demo?format=json') {
-      return Response.json({ services: { web: { ports: [{ name: 'web', target: appPort, published: '32000', protocol: 'tcp' }] } } });
+      return Response.json({ services: { web: { ports: [
+        { name: 'web', target: appPort, published: '32000', protocol: 'tcp' },
+        { name: 'secure', target: securePort, published: '32001', protocol: 'tcp', app_protocol: 'https' },
+      ] } } });
     } else if (requestPath === '/v1.24/failure') {
       return Response.json({ error: 'backend EOF' }, { status: 500 });
     } else if (requestPath === '/containers/json') {
-      return new Response(JSON.stringify([{ Id: 'test', Labels: {
+      return new Response(JSON.stringify([{ Id: containerId, Labels: {
         'com.docker.compose.service': 'web', 'com.docker.compose.project': 'demo',
-      }, Ports: [{ Type: 'tcp', PrivatePort: appPort, PublicPort: 32000 }],
+      }, Ports: [
+        { Type: 'tcp', PrivatePort: appPort, PublicPort: 32000 },
+        { Type: 'tcp', PrivatePort: securePort, PublicPort: 32001 },
+      ],
         NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } }]), { headers });
     } else if (requestPath === '/v1.24/events') {
       const stream = new ReadableStream({ start(controller) {
@@ -126,13 +138,29 @@ const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req =>
 });
 const appPort = app.addr.port;
 
+async function tlsRequest(hostname: string): Promise<{ status: number; body: string }> {
+  return await new Promise((resolve, reject) => {
+    const request = httpsRequest({ hostname: '127.0.0.1', port: tlsPort, servername: hostname,
+      rejectUnauthorized: false, headers: { Host: hostname }, timeout: 5000 }, response => {
+      const chunks: Uint8Array[] = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode || 0,
+        body: Buffer.concat(chunks).toString() }));
+      response.on('error', reject);
+    });
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error('TLS request timed out')));
+    request.end();
+  });
+}
+
 async function verifyWebSocket() {
   // A raw handshake lets the test keep production Host validation on an ephemeral port.
   const socket = createConnection({ host: '127.0.0.1', port: routingPort });
   try {
     await once(socket, 'connect');
     socket.setTimeout(3000, () => socket.destroy(new Error('WebSocket echo timed out')));
-    socket.write('GET /ws HTTP/1.1\r\nHost: web.localhost:5196\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
+    socket.write('GET /ws HTTP/1.1\r\nHost: web.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
     let buffered = Buffer.alloc(0);
     let upgraded = false;
     for await (const chunk of socket) {
@@ -160,6 +188,19 @@ async function verifyWebSocket() {
 }
 
 try {
+  const certificate = join(root, 'test.crt');
+  const privateKey = join(root, 'test.key');
+  const generated = await new Deno.Command('openssl', { args: [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-keyout', privateKey, '-out', certificate, '-subj', '/CN=web.secure.localhost',
+    '-addext', 'subjectAltName=DNS:web.secure.localhost',
+  ], stdout: 'null', stderr: 'piped' }).output();
+  assert.equal(generated.code, 0, new TextDecoder().decode(generated.stderr));
+  const tlsApp = createHttpsServer({ key: await Deno.readTextFile(privateKey),
+    cert: await Deno.readTextFile(certificate) }, (_request, response) => response.end('tls-upstream-ok'));
+  await new Promise<void>(resolve => tlsApp.listen(0, '127.0.0.1', resolve));
+  securePort = (tlsApp.address() as { port: number }).port;
+  try {
   await Deno.mkdir(statusPath);
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
     phase: 'healthy', message: 'Container runtime ready', reason: null,
@@ -167,14 +208,15 @@ try {
   // Run the release config from a temporary directory containing no worker source.
   const configPath = compiled ? join(root, 'worker.bin') : join(workerDir, 'config.capnp');
   if (compiled) await Deno.copyFile(workerDir, configPath);
-  startProcess(binary, ['serve', ...(compiled ? ['--binary'] : []), configPath,
+  startProcess(binary, ['serve', '--experimental', ...(compiled ? ['--binary'] : []), configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
+    '--socket-addr', `tls=127.0.0.1:${tlsPort}`,
     '--directory-path', `assets=${assets}`,
     '--directory-path', `status=${statusPath}`,
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`]);
   const guestPath = compiled ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (compiled) await Deno.copyFile(guestConfig!, guestPath);
-  const startRouter = () => startProcess(binary, ['serve', ...(compiled ? ['--binary'] : []), guestPath,
+  const startRouter = () => startProcess(binary, ['serve', '--experimental', ...(compiled ? ['--binary'] : []), guestPath,
     '--socket-addr', `router=unix:${routerPath}`, '--external-addr', `docker=unix:${dockerPath}`]);
   let ready = false;
   for (let i = 0; i < 80; i++) {
@@ -186,12 +228,26 @@ try {
   assert.deepEqual(html.body, Buffer.from(await Deno.readFile(join(assets, 'index.html'))));
   assert.match(String(html.headers['content-type']), /^text\/html/);
   assert.equal(html.headers['x-frame-options'], 'DENY');
-  const deniedRequests: Options[] = [{ headers: { Origin: 'https://evil.test' } }, { headers: { Origin: 'http://web.localhost:5196' } },
+  const deniedRequests: Options[] = [{ headers: { Origin: 'https://evil.test' } }, { headers: { Origin: 'http://web.localhost' } },
     { headers: { 'Sec-Fetch-Site': 'cross-site' } }, { host: 'evil.test:8094' }];
   for (const options of deniedRequests) {
     assert.equal((await request('/', options)).status, 403);
   }
-  assert.equal((await request('/v1.24/ls', { app: true, host: 'api.moby.localhost:5196' })).status, 403);
+  assert.equal((await request('/v1.24/ls', { headers: {
+    Origin: xeComputerOrigin, 'Sec-Fetch-Site': 'cross-site',
+  } })).status, 403);
+  const checkoutPreflight = await request('/v1.24/repos/checkout', { method: 'OPTIONS', headers: {
+    Origin: xeComputerOrigin,
+    'Sec-Fetch-Site': 'cross-site',
+    'Access-Control-Request-Method': 'POST',
+    'Access-Control-Request-Headers': 'content-type',
+    'Access-Control-Request-Private-Network': 'true',
+  } });
+  assert.equal(checkoutPreflight.status, 204);
+  assert.equal(checkoutPreflight.headers['access-control-allow-origin'], xeComputerOrigin);
+  assert.equal(checkoutPreflight.headers['access-control-allow-methods'], 'POST');
+  assert.equal(checkoutPreflight.headers['access-control-allow-private-network'], 'true');
+  assert.equal((await request('/v1.24/ls', { app: true, host: 'api.moby.localhost' })).status, 403);
   assert.equal(JSON.parse((await request('/v1.24/runtime-status')).body.toString()).phase, 'healthy');
   assert.equal((await request('/v1.24/ls')).status, 503);
   for (const path of ['/api/unknown', '/_app/immutable/missing.js', '/_app/']) {
@@ -208,13 +264,24 @@ try {
     if (path.includes('/immutable/')) assert.match(String(result.headers['cache-control']), /immutable/);
   }
   console.log('PASS: unchanged release assets and UI without Docker/Compose');
-  assert.equal((await request('/', { app: true, host: 'web.localhost:5196' })).status, 503);
+  assert.equal((await request('/', { app: true, host: 'web.localhost' })).status, 503);
   let guest = startRouter();
   await sleep(500);
 
   let compose = await startUnix(composePath);
   let docker = await startUnix(dockerPath);
   const payload = '{"test":true}';
+  const checkoutPayload = '{"url":"https://github.com/Agent54/darc-code","path":"development"}';
+  const checkout = await request('/v1.24/repos/checkout', { method: 'POST', body: checkoutPayload, headers: {
+    Origin: xeComputerOrigin,
+    'Sec-Fetch-Site': 'cross-site',
+    'Content-Type': 'application/json',
+  } });
+  assert.equal(checkout.status, 200);
+  assert.equal(checkout.body.toString(), checkoutPayload);
+  assert.equal(checkout.headers['access-control-allow-origin'], xeComputerOrigin);
+  assert.equal(seen.at(-1)!.path, '/v1.24/repos/checkout');
+  assert.equal(seen.at(-1)!.method, 'POST');
   assert.equal((await request('/v1.24/up?project=test', { method: 'POST', body: payload,
     headers: { Origin: 'http://127.0.0.1:8094', Authorization: 'secret', Cookie: 'iwa_session=secret', 'Content-Type': 'application/json' } })).body.toString(), payload);
   assert.equal(seen.at(-1)!.path, '/v1.24/up?project=test');
@@ -242,14 +309,18 @@ try {
   releaseSSE!();
   sse.resume();
   await sseEnded;
-  const appOptions = { app: true, host: 'web.localhost:5196' };
+  const appOptions = { app: true, host: 'web.localhost' };
   assert.equal((await request('/hello?q=1', appOptions)).body.toString(), 'upstream-ok');
   assert.equal(seen.at(-1)!.path, '/hello?q=1');
   assert.equal((await request('/redirect', appOptions)).status, 302);
-  assert.equal((await request('/', { app: true, host: 'web.32000.localhost:5196' })).status, 200);
-  assert.equal((await request('/', { app: true, host: 'web.web.localhost:5196' })).status, 200);
-  assert.equal((await request('/', { app: true, host: 'web.1.localhost:5196' })).status, 404);
-  assert.equal((await request('/', { app: true, host: 'missing.localhost:5196' })).status, 404);
+  assert.equal((await request('/', { app: true, host: 'web.32000.localhost' })).status, 200);
+  assert.equal((await request('/', { app: true, host: 'web.web.localhost' })).status, 200);
+  assert.equal((await request('/', { app: true, host: 'web.1.localhost' })).status, 404);
+  assert.equal((await request('/', { app: true, host: 'missing.localhost' })).status, 404);
+  const secureRedirect = await request('/', { app: true, host: 'web.secure.localhost' });
+  assert.equal(secureRedirect.status, 307);
+  assert.equal(secureRedirect.headers.location, 'https://web.secure.localhost/');
+  assert.deepEqual(await tlsRequest('web.secure.localhost'), { status: 200, body: 'tls-upstream-ok' });
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
@@ -288,6 +359,7 @@ try {
   for (const process of processes) await stopProcess(process);
   for (const output of outputs) console.error(new TextDecoder().decode((await output).stderr));
   throw error;
+  } finally { tlsApp.close(); }
 } finally {
   releaseSSE?.();
   for (const process of processes) await stopProcess(process);

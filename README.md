@@ -35,11 +35,19 @@ On first launch, choose a folder for your Compose projects. The IWA UI provides
 access to Compose. Its server runs on your Mac and stays available during VM
 restarts; container operations resume when the VM is ready.
 
-Access running services at `http://<service>.localhost:5196/`. Use
+Access running services at `http://<service>.localhost/`. Use
 `<service>_<project>` when projects share a service name. The default is the first
 TCP port in the Compose `ports` list. Select a specific published port with
 `<service>.8080.localhost`, or a [named port](workerd/README.md#port-routes) with
-`<service>.web.localhost` (both on port 5196).
+`<service>.web.localhost` (both on port 80). HTTPS services use port 443 and
+keep TLS termination in the container.
+
+The launcher binds these shared app ports to loopback. To override them without
+adding UI controls, set `app_http_port` and `app_https_port` (integers from 1 to
+65535) in `~/Library/Application Support/dev.xe.computer/settings.json`, then
+restart the launcher. It checks both ports at startup and warns if either cannot
+be bound. Port-free app URLs still require traffic on 80 and 443; if you choose
+other listener ports, arrange local forwarding from those standard ports.
 
 The container VM uses at least 4096 MiB of elastic memory. Advanced users can
 raise the limit by setting `container_vm_memory_mib` in

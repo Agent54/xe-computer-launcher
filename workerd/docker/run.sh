@@ -11,4 +11,4 @@ printf '%s\n' "$$" > "$state/pid"
 printf '%s\n' "$runtime" > "$state/runtime"
 rm -f "$state/workerd.sock"
 exec "$runtime/lib/ld-linux-aarch64.so.1" --library-path "$runtime/lib" \
-    "$runtime/workerd" serve --binary "$runtime/guest-worker.bin" >"$state/workerd.log" 2>&1
+    "$runtime/workerd" serve --experimental --binary "$runtime/guest-worker.bin" >"$state/workerd.log" 2>&1

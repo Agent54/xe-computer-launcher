@@ -32,9 +32,9 @@ services:
         app_protocol: https
 ```
 
-- `app.localhost:5196` uses the first TCP entry in YAML order (`8080` → `3000`).
-- `app.8080.localhost:5196` selects the published port `8080`.
-- `app.web.localhost:5196` selects the port named `web`.
+- `app.localhost` uses the first TCP entry in YAML order (`8080` → `3000`).
+- `app.8080.localhost` selects the published port `8080`.
+- `app.web.localhost` selects the port named `web`.
 
 Short syntax such as `"8080:3000"` supports default and numeric routes too.
 Names used in URLs must be a single hostname label (letters, digits or hyphens);
@@ -42,12 +42,14 @@ all-numeric selectors always mean published port numbers. Only TCP ports
 published on the running container are routed. Names and YAML order refresh
 from the Compose API within two seconds.
 
-Ports with `app_protocol: https` redirect to the published port so the browser
-performs TLS directly with the application. Its certificate must cover the
-requested `.localhost` hostname. Ports with `app_protocol: http`, or without an
-application protocol, continue through the guest reverse proxy. Named and
-numeric HTTPS routes redirect to the canonical `app.localhost` hostname so one
-certificate covers every selector for that service.
+Ports with `app_protocol: https` redirect from HTTP on port 80 to HTTPS on the
+shared port 443. Workerd forwards TLS bytes through the guest to the selected
+application, which presents its own certificate for the requested `.localhost`
+hostname. Ports with `app_protocol: http`, or without an application protocol,
+continue through the guest HTTP reverse proxy. A named or numeric selector for
+the default HTTPS port redirects to `app.localhost`; a different HTTPS port
+keeps its selector hostname, which must also appear in the application's
+certificate.
 
 ## Build
 

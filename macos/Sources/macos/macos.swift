@@ -112,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var runtimeStartupTask: Task<Void, Never>?
     private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
-    private let workerdServer = WorkerdServer()
+    private var workerdServer = WorkerdServer()
     private let runtimeSupervisor = ContainerRuntimeSupervisor()
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
@@ -186,6 +186,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // startup owns a Dock icon, according to the user's saved preference.
         let state = ExternalState.shared
         state.updateSettings()
+        let workerdPorts = WorkerdPorts(settings: state.settings.rawData)
+        workerdServer = WorkerdServer(routingPort: workerdPorts.http, tlsPort: workerdPorts.https)
+        for warning in workerdPorts.settingWarnings {
+            state.appendLog("launcher", "Warning: \(warning)")
+        }
+        let portWarnings = workerdPorts.bindingWarnings()
+        for warning in portWarnings {
+            state.appendLog("launcher", "Warning: \(warning)")
+        }
         configureApplicationIdentity()
         applyDockIconPreference()
 
@@ -206,6 +215,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         startHostServices()
         startBackgroundInitialization()
+        if !portWarnings.isEmpty {
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Local App Ports Are Unavailable"
+                alert.informativeText = portWarnings.joined(separator: "\n") +
+                    "\n\nFree these ports or change app_http_port and app_https_port in settings.json, then restart Xe Launcher."
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
 
         // Accessibility onboarding is independent from browser and VM startup.
         // Waiting for the user here used to delay state restoration by up to a

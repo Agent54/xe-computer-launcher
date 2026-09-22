@@ -30,6 +30,21 @@ const config :Workerd.Config = (
         (name = "RUNTIME_STATUS", service = "status"),
       ],
     )),
+    (name = "tls-gateway", worker = (
+      compatibilityDate = "2026-04-05",
+      compatibilityFlags = ["experimental"],
+      modules = [
+        (name = "tls-gateway.js", esModule = embed "tls-gateway.js"),
+        (name = "tls-client-hello.js", esModule = embed "tls-client-hello.js"),
+        (name = "app-routing.js", esModule = embed "app-routing.js"),
+        (name = "socket-bridge.js", esModule = embed "socket-bridge.js"),
+      ],
+      globalOutbound = "deny",
+      bindings = [
+        (name = "ROUTER", service = "router"),
+        (name = "COMPOSE", service = "compose"),
+      ],
+    )),
     (name = "router", external = (http = ())),
     (name = "assets", disk = (writable = false)),
     (name = "status", disk = (writable = false)),
@@ -38,6 +53,7 @@ const config :Workerd.Config = (
   ],
   sockets = [
     (name = "management", address = "127.0.0.1:8094", http = (), service = "gateway"),
-    (name = "ingest", address = "127.0.0.1:5196", http = (), service = "gateway"),
+    (name = "ingest", address = "127.0.0.1:80", http = (), service = "gateway"),
+    (name = "tls", address = "127.0.0.1:443", tcp = (), service = "tls-gateway"),
   ],
 );

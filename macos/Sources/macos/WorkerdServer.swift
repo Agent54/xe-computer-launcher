@@ -18,7 +18,7 @@ enum WorkerdError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingResource(let path): "Missing workerd resource: \(path)"
-        case .exited(let status): "workerd exited (\(status)). Check System Logs; port 8094 or 5196 may already be in use."
+        case .exited(let status): "workerd exited (\(status)). Check System Logs; a configured listener port may already be in use."
         case .notReady: "workerd did not become ready at 127.0.0.1:8094."
         case .alreadyRunning: "Another launcher instance owns the workerd state directory."
         }
@@ -36,6 +36,7 @@ final class WorkerdServer {
     private let runtimeStatusURL: URL
     private let managementPort: UInt16
     private let routingPort: UInt16
+    private let tlsPort: UInt16
     private let log: @MainActor @Sendable (String) -> Void
     private var process: Process?
     private var stopping = false
@@ -46,7 +47,7 @@ final class WorkerdServer {
     init(executableURL: URL = WorkerdPaths.executableURL, configURL: URL = WorkerdPaths.configURL,
          assetsURL: URL = WorkerdPaths.assetsURL, stateURL: URL = WorkerdPaths.stateURL,
          runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
-         managementPort: UInt16 = 8094, routingPort: UInt16 = 5196,
+         managementPort: UInt16 = 8094, routingPort: UInt16 = 80, tlsPort: UInt16 = 443,
          log: @escaping @MainActor @Sendable (String) -> Void = { ExternalState.shared.appendLog("workerd", $0) }) {
         self.executableURL = executableURL
         self.configURL = configURL
@@ -55,6 +56,7 @@ final class WorkerdServer {
         self.runtimeStatusURL = runtimeStatusURL
         self.managementPort = managementPort
         self.routingPort = routingPort
+        self.tlsPort = tlsPort
         self.log = log
     }
 
@@ -83,9 +85,10 @@ final class WorkerdServer {
         let child = Process()
         child.executableURL = executableURL
         child.currentDirectoryURL = stateURL
-        child.arguments = ["serve", "--binary", configURL.path,
+        child.arguments = ["serve", "--experimental", "--binary", configURL.path,
             "--socket-addr", "management=127.0.0.1:\(managementPort)",
             "--socket-addr", "ingest=127.0.0.1:\(routingPort)",
+            "--socket-addr", "tls=127.0.0.1:\(tlsPort)",
             "--directory-path", "assets=\(assetsURL.path)",
             "--directory-path", "status=\(runtimeStatusURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",

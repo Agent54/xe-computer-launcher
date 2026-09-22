@@ -1,3 +1,5 @@
+import { bridgeSocketAndWebSocket } from './socket-bridge.js';
+
 // Runs inside the guest. Resolve Compose names to container IPs and private
 // ports, as in docker/legacy.js, without exposing each port on macOS.
 let cached = null;
@@ -31,15 +33,40 @@ function matchService(containers, name) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === '/__xe_router_health' && url.hostname === 'localhost') {
       return new Response('ready');
     }
+    if (url.origin === 'http://localhost' && url.pathname === '/__xe_tls_tunnel' &&
+        request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      const id = request.headers.get('x-xe-container-id');
+      const port = Number(request.headers.get('x-xe-target-port'));
+      if (!/^[a-f0-9]{64}$/.test(id || '') || !Number.isInteger(port) || port < 1 || port > 65535) {
+        return new Response('Invalid TLS tunnel target', { status: 403 });
+      }
+      try {
+        const containers = await discover(env);
+        const container = containers.find(c => c.Id === id);
+        if (!container || !(container.Ports || []).some(p => p.Type === 'tcp' && p.PrivatePort === port &&
+            Number.isInteger(p.PublicPort))) return new Response('TLS target unavailable', { status: 404 });
+        const address = Object.values(container.NetworkSettings?.Networks || {}).map(n => n.IPAddress).find(ip => ip);
+        if (!address) return new Response('TLS target unavailable', { status: 503 });
+        const { connect } = await import('cloudflare:sockets');
+        const upstream = connect({ hostname: address, port });
+        await upstream.opened;
+        const pair = new WebSocketPair();
+        const [client, server] = Object.values(pair);
+        ctx.waitUntil(bridgeSocketAndWebSocket(upstream, server));
+        return new Response(null, { status: 101, webSocket: client });
+      } catch {
+        return new Response('TLS target unavailable', { status: 503 });
+      }
+    }
     // Only the host worker can use this lookup over the guest socket. The
     // public gateway rejects localhost and never exposes this response itself.
     const lookup = url.origin === 'http://localhost' && url.pathname === '/__xe_router_service' && request.method === 'GET';
-    if (!lookup && (url.protocol !== 'http:' || url.port !== '5196' ||
+    if (!lookup && (url.protocol !== 'http:' || url.port !== '' ||
         !/^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost$/.test(url.hostname))) {
       return new Response('Invalid application hostname', { status: 403 });
     }

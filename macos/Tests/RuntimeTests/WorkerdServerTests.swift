@@ -6,6 +6,7 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct WorkerdServerTests {
+    @MainActor private final class LogCollector { var lines: [String] = [] }
     private let macosRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
@@ -20,12 +21,20 @@ struct WorkerdServerTests {
         let managementPort = try freePort()
         var routingPort = try freePort()
         while routingPort == managementPort { routingPort = try freePort() }
+        var tlsPort = try freePort()
+        while tlsPort == managementPort || tlsPort == routingPort { tlsPort = try freePort() }
         let runtimeStatus = root.appendingPathComponent("runtime-status", isDirectory: true)
+        let logs = LogCollector()
         let server = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets, stateURL: root,
                                   runtimeStatusURL: runtimeStatus,
-                                  managementPort: managementPort, routingPort: routingPort, log: { _ in })
+                                  managementPort: managementPort, routingPort: routingPort,
+                                  tlsPort: tlsPort, log: { logs.lines.append($0) })
         let absent = root.appendingPathComponent("missing.sock")
-        try await server.start(composeSocketURL: absent, routerSocketURL: absent)
+        do { try await server.start(composeSocketURL: absent, routerSocketURL: absent) }
+        catch {
+            Issue.record("workerd startup: \(error); logs: \(logs.lines.joined(separator: " | "))")
+            throw error
+        }
         do {
             #expect(server.isRunning)
             let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets,

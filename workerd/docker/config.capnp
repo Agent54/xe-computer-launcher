@@ -4,7 +4,11 @@ const config :Workerd.Config = (
   services = [
     (name = "router", worker = (
       compatibilityDate = "2026-04-05",
-      modules = [(name = "router.js", esModule = embed "../router.js")],
+      compatibilityFlags = ["experimental"],
+      modules = [
+        (name = "router.js", esModule = embed "../router.js"),
+        (name = "socket-bridge.js", esModule = embed "../socket-bridge.js"),
+      ],
       globalOutbound = "containers",
       bindings = [(name = "DOCKER", service = "docker")],
     )),

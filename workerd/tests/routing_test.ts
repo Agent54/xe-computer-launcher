@@ -3,6 +3,31 @@ import assert from 'node:assert/strict';
 import gateway from '../gateway.js';
 import router from '../router.js';
 import { surfaceRuntimeFailure } from '../runtime-status.js';
+import { clientHelloServerName } from '../tls-client-hello.js';
+import { resolveApplicationPort } from '../app-routing.js';
+
+Deno.test('TLS ClientHello selects only its SNI hostname', () => {
+  const hostname = new TextEncoder().encode('darc_darc.localhost');
+  const name = new Uint8Array([0, 0, hostname.length, ...hostname]);
+  const names = new Uint8Array([0, name.length, ...name]);
+  const extension = new Uint8Array([0, 0, 0, names.length, ...names]);
+  const body = new Uint8Array([
+    3, 3, ...new Uint8Array(32), 0, 0, 2, 0x13, 1, 1, 0,
+    0, extension.length, ...extension,
+  ]);
+  const handshake = new Uint8Array([1, 0, 0, body.length, ...body]);
+  const record = new Uint8Array([22, 3, 1, 0, handshake.length, ...handshake]);
+  assert.equal(clientHelloServerName(record.subarray(0, 10)), undefined);
+  assert.equal(clientHelloServerName(record), 'darc_darc.localhost');
+  assert.equal(clientHelloServerName(new Uint8Array([71, 69, 84, 32, 47])), null);
+  const first = handshake.subarray(0, 20);
+  const second = handshake.subarray(20);
+  const fragmented = new Uint8Array([
+    22, 3, 1, 0, first.length, ...first,
+    22, 3, 1, 0, second.length, ...second,
+  ]);
+  assert.equal(clientHelloServerName(fragmented), 'darc_darc.localhost');
+});
 
 Deno.test('management UI does not require a launcher session token', async () => {
   const env = {
@@ -12,6 +37,43 @@ Deno.test('management UI does not require a launcher session token', async () =>
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'compose-ui');
   assert.equal(response.headers.get('set-cookie'), null);
+});
+
+Deno.test('signed Xe Computer origin can use only the repository checkout route', async () => {
+  const origin = 'isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic';
+  let forwarded: Request | undefined;
+  const env = { MANAGEMENT: { fetch: (request: Request) => {
+    forwarded = request;
+    return Promise.resolve(Response.json({ ok: true, path: 'development/darc-code' }, { status: 201 }));
+  } } };
+  const preflight = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/repos/checkout', {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Sec-Fetch-Site': 'cross-site',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'content-type',
+      'Access-Control-Request-Private-Network': 'true',
+    },
+  }), env);
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
+  assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
+
+  const body = JSON.stringify({ url: 'https://github.com/Agent54/darc-code', path: 'development' });
+  const checkout = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/repos/checkout', {
+    method: 'POST', body, headers: {
+      Origin: origin, 'Sec-Fetch-Site': 'cross-site', 'Content-Type': 'application/json',
+    },
+  }), env);
+  assert.equal(checkout.status, 201);
+  assert.equal(checkout.headers.get('access-control-allow-origin'), origin);
+  assert.equal(await forwarded?.text(), body);
+
+  const denied = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/ls', {
+    headers: { Origin: origin, 'Sec-Fetch-Site': 'cross-site' },
+  }), env);
+  assert.equal(denied.status, 403);
 });
 
 Deno.test('runtime failures are enriched only while the supervisor reports an outage', async () => {
@@ -80,7 +142,7 @@ Deno.test('application port selection', async t => {
     return Promise.resolve(Response.json({ url: input.url, headers: Object.fromEntries(input.headers) }));
   };
   function request(host = 'service.localhost', headers?: Record<string, string>) {
-    return gateway.fetch(new Request(`http://${host}:5196/hello?q=1`, { headers }), env);
+    return gateway.fetch(new Request(`http://${host}/hello?q=1`, { headers }), env);
   }
   try {
     await t.step('default follows YAML order rather than Docker or numeric order', async () => {
@@ -97,13 +159,28 @@ Deno.test('application port selection', async t => {
       assert.equal((await request('service.dns.localhost')).status, 404);
       assert.equal((await request('service.missing.localhost')).status, 404);
     });
-    await t.step('HTTPS application ports redirect to their published TLS endpoint', async () => {
+    await t.step('HTTPS application ports redirect to the shared TLS endpoint', async () => {
       const named = await request('service.secure.localhost');
       assert.equal(named.status, 307);
-      assert.equal(named.headers.get('location'), 'https://service.localhost:9443/hello?q=1');
+      assert.equal(named.headers.get('location'), 'https://service.secure.localhost/hello?q=1');
       const numeric = await request('service.9443.localhost');
       assert.equal(numeric.status, 307);
-      assert.equal(numeric.headers.get('location'), 'https://service.localhost:9443/hello?q=1');
+      assert.equal(numeric.headers.get('location'), 'https://service.9443.localhost/hello?q=1');
+      const route = await resolveApplicationPort('service.secure.localhost', env);
+      assert.equal(route?.port.target, 9443);
+      assert.equal(route?.protocol, 'https');
+    });
+    await t.step('a default HTTPS port uses the canonical port-free hostname', async () => {
+      ports = [ports[2], ports[0], ports[1], ports[3]];
+      now += 3000;
+      const response = await request();
+      assert.equal(response.status, 307);
+      assert.equal(response.headers.get('location'), 'https://service.localhost/hello?q=1');
+      const route = await resolveApplicationPort('service.localhost', env);
+      assert.equal(route?.port.target, 9443);
+      assert.equal(route?.protocol, 'https');
+      ports = [ports[1], ports[2], ports[0], ports[3]];
+      now += 3000;
     });
     await t.step('caller cannot override selected ports and internal headers do not reach apps', async () => {
       const response = await request('service.web.localhost', { 'x-xe-target-port': '7000', 'x-xe-container-id': 'forged' });
@@ -111,7 +188,7 @@ Deno.test('application port selection', async t => {
       assert.equal(result.url, 'http://172.18.0.2:3000/hello?q=1');
       assert.equal(result.headers['x-xe-target-port'], undefined);
       assert.equal(result.headers['x-xe-container-id'], undefined);
-      assert.equal(result.headers['x-forwarded-host'], 'service.web.localhost:5196');
+      assert.equal(result.headers['x-forwarded-host'], 'service.web.localhost');
       assert.equal((await request('localhost')).status, 403);
       assert.equal((await request('api.moby.localhost')).status, 403);
     });
