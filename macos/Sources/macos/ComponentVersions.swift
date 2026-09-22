@@ -9,7 +9,8 @@ enum ComponentVersions {
     static func bundled(
         resourceURL: URL?,
         contentsURL: URL?,
-        heliumAppURL: URL?
+        heliumAppURL: URL?,
+        darcActivation: DarcProfileBundleActivation? = nil
     ) -> [ComponentVersion] {
         let sourceManifest = jsonObject(at: resourceURL?.appendingPathComponent("sources.json"))
         let darcVersion = ((sourceManifest?["darc"] as? [String: Any])?["version"] as? [String: Any])
@@ -43,8 +44,19 @@ enum ComponentVersions {
             )
         }
 
+        let activeDarcBundle: String
+        if let darcActivation {
+            activeDarcBundle = "\(darcActivation.version) "
+                + "(profile \(darcActivation.profileName); "
+                + "SHA-256 \(darcActivation.sha256.prefix(12)); "
+                + "Chromium registry unchanged)"
+        } else {
+            activeDarcBundle = "Not activated by launcher"
+        }
+
         return [
             ComponentVersion(name: "Xe Computer", version: darcVersion ?? "Unknown"),
+            ComponentVersion(name: "Xe Computer active bundle", version: activeDarcBundle),
             ComponentVersion(name: "Helium", version: heliumVersion ?? "Not installed"),
             ComponentVersion(
                 name: "SmolVM",

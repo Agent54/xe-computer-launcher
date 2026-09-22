@@ -413,6 +413,24 @@ jobs:
           test -s "$update_dir/appcast.xml"
           grep -q 'sparkle:edSignature=' "$update_dir/appcast.xml"
 
+          # generate_appcast derives delta filenames from the application name,
+          # so "Xe Launcher" produces names containing a space. GitHub rewrites
+          # special characters in uploaded release asset names, which would make
+          # the generated appcast URL return 404. Rename the files and URLs to a
+          # stable, GitHub-safe form before signing the final appcast.
+          for delta in "$update_dir"/*.delta; do
+            [[ -f "$delta" ]] || continue
+            delta_name="${delta##*/}"
+            safe_delta_name="${delta_name// /-}"
+            [[ "$safe_delta_name" != "$delta_name" ]] || continue
+
+            mv "$delta" "$update_dir/$safe_delta_name"
+            encoded_delta_name="${delta_name// /%20}"
+            sed -i '' \
+              "s|$encoded_delta_name|$safe_delta_name|g" \
+              "$update_dir/appcast.xml"
+          done
+
           # Keep CFBundleShortVersionString numeric for macOS, but expose the
           # fully qualified release tag (including the int build suffix) in
           # Sparkle's update UI.

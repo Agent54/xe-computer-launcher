@@ -76,15 +76,34 @@ for ((index = 1; index <= actual_delta_count; index++)); do
     delta_from="$(xpath_value "$delta/@*[local-name()='deltaFrom']")"
     delta_length="$(xpath_value "$delta/@length")"
     delta_signature="$(xpath_value "$delta/@*[local-name()='edSignature']")"
+    delta_filename="${delta_url##*/}"
 
     [[ "$delta_url" == "$expected_release_prefix"*.delta ]] \
         || fail "delta $index is not hosted beside the full update: $delta_url"
+    [[ "$delta_filename" =~ ^[A-Za-z0-9._-]+\.delta$ ]] \
+        || fail "delta $index filename is not GitHub-safe: $delta_filename"
     [[ -n "$delta_from" ]] || fail "delta $index has no source build"
     [[ "$delta_length" =~ ^[1-9][0-9]*$ ]] || fail "delta $index has invalid length: $delta_length"
     [[ -n "$delta_signature" ]] || fail "delta $index has no EdDSA signature"
     [[ "$seen_delta_versions" != *$'\n'"$delta_from"$'\n'* ]] \
         || fail "multiple deltas use source build $delta_from"
     seen_delta_versions+="$delta_from"$'\n'
+
+    if [[ "$source_path" == https://* ]]; then
+        if ! curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --location \
+            --head \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --output /dev/null \
+            "$delta_url"; then
+            fail "delta $index is not downloadable: $delta_url"
+        fi
+    fi
 done
 
 echo "Sparkle appcast verification passed: $source_path ($actual_delta_count delta update(s))"

@@ -13,7 +13,7 @@
         type="application/octet-stream"/>
       <sparkle:deltas>
         <enclosure
-          url="https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/Xe%20Launcher123.1-122.1.delta"
+          url="https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/Xe-Launcher123.1-122.1.delta"
           sparkle:deltaFrom="122.1"
           sparkle:edSignature="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=="
           length="321"

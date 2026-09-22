@@ -171,9 +171,21 @@ final class ExternalState: @unchecked Sendable {
 
     func updateAll() {
         ensureAppDataFolderExists()
-        refreshChromeAvailability()
-        updateChromeProfiles()
         updateSettings()
+        updateChromeProfiles()
+        let localBundleProfiles = Set(
+            chromeProfiles.lazy
+                .map(\.name)
+                .filter { self.darcOverrideURL(forProfile: $0) == nil }
+        )
+        activateConfiguredDarcBundle(
+            dataURL: Self.appDataURL,
+            profileNames: localBundleProfiles,
+            browserIsRunning: chromeRunning
+        ) { [weak self] source, message in
+            self?.appendLog(source, message)
+        }
+        refreshChromeAvailability()
     }
 
     private func ensureAppDataFolderExists() {

@@ -627,6 +627,19 @@ done
 pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
     || fail "Xe Computer app shim did not launch from its managed location"
 
+darc_profile_bundle=""
+while IFS= read -r candidate_bundle; do
+    if cmp -s "$darc_bundle" "$candidate_bundle"; then
+        darc_profile_bundle="$candidate_bundle"
+        break
+    fi
+done < <(
+    find "$APP_DATA/profiles/default/Default/iwa" \
+        -mindepth 2 -maxdepth 2 -type f -name main.swbn -print
+)
+[[ -n "$darc_profile_bundle" ]] \
+    || fail "Chromium profile is not using the configured Xe Computer bundle"
+
 log "checking that setup did not request App Management permission"
 app_management_events="$(
     /usr/bin/log show \

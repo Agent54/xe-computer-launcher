@@ -4,6 +4,39 @@ const configs = new Map();
 const targetHeader = 'x-xe-target-port';
 const containerHeader = 'x-xe-container-id';
 
+function applicationProtocol(port) {
+  const value = port.app_protocol ?? port.appProtocol;
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function publishedPortFor(service, port) {
+  const target = Number(port.target);
+  const configured = Number(port.published);
+  const published = [...new Set((service.publishedPorts || [])
+    .filter(mapping => mapping.target === target &&
+      (!Number.isInteger(configured) || mapping.published === configured))
+    .map(mapping => mapping.published))];
+  return published.length === 1 ? published[0] : undefined;
+}
+
+function protocolResponse(request, service, port) {
+  const protocol = applicationProtocol(port);
+  if (!protocol || protocol === 'http') return null;
+  if (protocol !== 'https') {
+    return new Response(`Unsupported Compose application protocol: ${protocol}`, { status: 404 });
+  }
+  const published = publishedPortFor(service, port);
+  if (!published) return new Response('Published HTTPS port not available', { status: 404 });
+  const url = new URL(request.url);
+  url.protocol = 'https:';
+  url.hostname = `${url.hostname.split('.')[0]}.localhost`;
+  url.port = String(published);
+  return new Response(null, {
+    status: 307,
+    headers: { Location: url.href, 'Cache-Control': 'no-store' },
+  });
+}
+
 async function servicePorts(env, service) {
   const url = new URL(`http://compose/v1.24/config/${encodeURIComponent(service.project)}`);
   url.searchParams.set('format', 'json');
@@ -52,8 +85,27 @@ export async function routeApplication(request, env) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return new Response('Invalid Compose target port', { status: 404 });
     }
+    const response = protocolResponse(request, service, selected[0]);
+    if (response) return response;
     headers.set(targetHeader, String(port));
     headers.set(containerHeader, service.id);
+  } else {
+    // Numeric routes keep working when Compose configuration is unavailable,
+    // but use its application protocol when the matching entry can be read.
+    try {
+      const resolved = await env.ROUTER.fetch(`http://localhost/__xe_router_service?name=${encodeURIComponent(name)}`);
+      if (resolved.ok) {
+        const service = await resolved.json();
+        const selected = (await servicePorts(env, service)).filter(p =>
+          (p.protocol || 'tcp') === 'tcp' && Number(p.published) === Number(selector));
+        if (selected.length === 1) {
+          const response = protocolResponse(request, service, selected[0]);
+          if (response) return response;
+        }
+      }
+    } catch {
+      // The guest router remains the source of truth for numeric HTTP routes.
+    }
   }
   return env.ROUTER.fetch(new Request(request, { headers }));
 }

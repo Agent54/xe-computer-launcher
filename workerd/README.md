@@ -26,6 +26,10 @@ services:
       - name: admin
         target: 9000
         published: "9090"
+      - name: secure
+        target: 9443
+        published: "9443"
+        app_protocol: https
 ```
 
 - `app.localhost:5196` uses the first TCP entry in YAML order (`8080` → `3000`).
@@ -37,6 +41,13 @@ Names used in URLs must be a single hostname label (letters, digits or hyphens);
 all-numeric selectors always mean published port numbers. Only TCP ports
 published on the running container are routed. Names and YAML order refresh
 from the Compose API within two seconds.
+
+Ports with `app_protocol: https` redirect to the published port so the browser
+performs TLS directly with the application. Its certificate must cover the
+requested `.localhost` hostname. Ports with `app_protocol: http`, or without an
+application protocol, continue through the guest reverse proxy. Named and
+numeric HTTPS routes redirect to the canonical `app.localhost` hostname so one
+certificate covers every selector for that service.
 
 ## Build
 

@@ -24,7 +24,13 @@ The Xe Computer source asset is stored in application support as
 `darc.VERSION.swbn` (for example, `darc.0.0.18.swbn`). The versioned filename
 acts as the download marker, so updating the launcher to a newly pinned Xe
 Computer version fetches and installs that exact bundle instead of reusing an
-older `darc.swbn` file.
+older `darc.swbn` file. Once the managed browser is stopped, the launcher
+validates the bundle's embedded manifest version and fixed Web Bundle ID,
+then atomically replaces Chromium's profile-owned `main.swbn`. The versioned
+source bundles remain available for rollback, so the launcher does not create
+redundant per-profile backups. Chromium uses random per-IWA directory names, so
+the launcher finds Xe Computer by its fixed Web Bundle ID, replaces every
+matching `main.swbn`, and ignores all other installed IWAs.
 
 Helium is also an independently versioned source asset. The manifest pins its
 release version, Chromium version, and the publisher's SHA-256 instead of using
@@ -39,14 +45,13 @@ prefers the newest valid installed engine that satisfies the pin and never
 downgrades a newer engine. Browser profiles are stored separately and are not
 replaced.
 
-Chromium 150 and later support update-channel selection for unmanaged IWAs,
-but the selection is deliberately user-initiated and Chromium exposes no
-public macOS command-line channel switch. **Configure Xe Computer Updates…**
-restarts the managed browser visibly and opens `chrome://web-app-internals`.
-Select `nightly` in an `int` launcher or `default` in a stable launcher and run
-the update once. Chromium then uses the selected channel for its normal signed
-background update checks. The launcher does not use CDP or modify Helium to
-change this state.
+The launcher intentionally does not patch Chromium's protobuf/LevelDB IWA
+registry. That registry can therefore continue to display the version used for
+the original installation even after the effective profile bundle changes. The
+About panel reports both the configured release and the launcher-managed active
+bundle by comparing `main.swbn` directly with the pinned versioned source file.
+No separate launcher state is written. This mechanism requires neither CDP,
+manual update-channel selection, nor a patched Helium build.
 
 The release workflow enforces the same mapping. An `int` launcher can only ship
 a Darc GitHub prerelease listed on the IWA manifest's `nightly` channel. A

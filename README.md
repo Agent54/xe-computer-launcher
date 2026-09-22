@@ -75,3 +75,12 @@ checksum and Developer ID signature before replacing the engine while keeping
 browser profiles intact. Engines live under versioned
 `helium/VERSION/Helium.app` paths so a failed download or validation leaves the
 previous engine available.
+
+Xe Computer IWA releases retain their real, monotonically increasing manifest
+versions. While the managed browser is stopped, the launcher verifies the
+configured release version and Web Bundle ID, then atomically replaces
+Chromium's profile-owned `main.swbn`. Chromium's
+internal registry is intentionally not patched. The effective version and
+SHA-256 shown in the launcher's About panel are derived live by comparing the
+profile bundle with the configured versioned source asset. No additional state
+file is maintained. The versioned source bundles remain available for rollback.

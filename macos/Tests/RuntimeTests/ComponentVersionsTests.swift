@@ -45,11 +45,22 @@ struct ComponentVersionsTests {
         let versions = ComponentVersions.bundled(
             resourceURL: resources,
             contentsURL: root.appendingPathComponent("Contents"),
-            heliumAppURL: helium
+            heliumAppURL: helium,
+            darcActivation: DarcProfileBundleActivation(
+                profileName: "default",
+                version: "1.2.3",
+                sha256: "ea4bf40bc776231ca796cf9b4641bda112cffd771fa7691a7b61b07ee5c35ae6",
+                webBundleID: trustedXeComputerWebBundleID,
+                relativeBundlePath: "profiles/default/Default/iwa/test/main.swbn"
+            )
         )
 
         #expect(versions == [
             ComponentVersion(name: "Xe Computer", version: "1.2.3"),
+            ComponentVersion(
+                name: "Xe Computer active bundle",
+                version: "1.2.3 (profile default; SHA-256 ea4bf40bc776; Chromium registry unchanged)"
+            ),
             ComponentVersion(name: "Helium", version: "0.9.4.1"),
             ComponentVersion(name: "SmolVM", version: "v1.16.2-compose_3"),
             ComponentVersion(name: "Compose Server", version: "v5.1.3-int.2"),
@@ -67,10 +78,14 @@ struct ComponentVersionsTests {
             heliumAppURL: nil
         )
 
-        #expect(versions.count == 7)
+        #expect(versions.count == 8)
         #expect(versions.first == ComponentVersion(name: "Xe Computer", version: "Unknown"))
-        #expect(versions[1] == ComponentVersion(name: "Helium", version: "Not installed"))
-        #expect(versions.dropFirst(2).allSatisfy { $0.version == "Unknown" })
+        #expect(versions[1] == ComponentVersion(
+            name: "Xe Computer active bundle",
+            version: "Not activated by launcher"
+        ))
+        #expect(versions[2] == ComponentVersion(name: "Helium", version: "Not installed"))
+        #expect(versions.dropFirst(3).allSatisfy { $0.version == "Unknown" })
     }
 
     private func writePlist(version: String, to url: URL) throws {

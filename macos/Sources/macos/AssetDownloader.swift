@@ -113,6 +113,67 @@ func configuredSourceAssetURL(name: String, dataURL: URL, bundle: Bundle = .main
     return dataURL.appendingPathComponent(asset.filename)
 }
 
+/// Derives the selected profile's active Darc version directly from the
+/// configured versioned source asset and Chromium's profile bundle.
+func activeConfiguredDarcBundleActivation(
+    dataURL: URL,
+    profileName: String,
+    bundle: Bundle = .main
+) -> DarcProfileBundleActivation? {
+    guard let info = sourceConfigurations(in: bundle)?["darc"],
+          let asset = trustedSourceAsset(name: "darc", info: info),
+          let expectedVersion = asset.expectedVersion else {
+        return nil
+    }
+    return activeDarcBundleActivation(
+        dataURL: dataURL,
+        profileName: profileName,
+        sourceURL: dataURL.appendingPathComponent(asset.filename),
+        expectedVersion: expectedVersion
+    )
+}
+
+/// Reconciles Chromium's profile-owned `main.swbn` with the configured,
+/// versioned Darc asset. The caller must ensure the managed browser is stopped
+/// so Chromium cannot retain an open reader for the old bundle.
+@discardableResult
+func activateConfiguredDarcBundle(
+    dataURL: URL,
+    profileNames: Set<String>? = nil,
+    browserIsRunning: Bool,
+    bundle: Bundle = .main,
+    log: @escaping (String, String) -> Void
+) -> DarcBundleActivationSummary? {
+    guard !browserIsRunning else {
+        log("launcher", "Deferred Xe Computer bundle activation because Chromium is still running")
+        return nil
+    }
+    guard let info = sourceConfigurations(in: bundle)?["darc"],
+          let asset = trustedSourceAsset(name: "darc", info: info),
+          let expectedVersion = asset.expectedVersion else {
+        log("launcher", "Invalid Xe Computer source configuration; profile bundle was not changed")
+        return nil
+    }
+
+    let sourceURL = dataURL.appendingPathComponent(asset.filename)
+    guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+        return nil
+    }
+
+    do {
+        return try activateDarcBundle(
+            sourceURL: sourceURL,
+            expectedVersion: expectedVersion,
+            dataURL: dataURL,
+            profileNames: profileNames,
+            log: { message in log("launcher", message) }
+        )
+    } catch {
+        log("launcher", "Xe Computer bundle activation failed: \(error.localizedDescription)")
+        return nil
+    }
+}
+
 func heliumVersionedAppURL(dataURL: URL, version: String) -> URL {
     dataURL
         .appendingPathComponent("helium", isDirectory: true)

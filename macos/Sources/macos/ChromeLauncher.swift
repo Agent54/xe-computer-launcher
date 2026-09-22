@@ -69,6 +69,17 @@ extension ExternalState {
             if let err = createProfile(name: profileName) { return err }
         }
 
+        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
+        if !isDevProxy {
+            activateConfiguredDarcBundle(
+                dataURL: Self.appDataURL,
+                profileNames: [profileName],
+                browserIsRunning: chromeRunning
+            ) { [weak self] source, message in
+                self?.appendLog(source, message)
+            }
+        }
+
         // Ensure sockets directory exists for the debug pipe
         let socketsDir = Self.appDataURL.appendingPathComponent("sockets", isDirectory: true)
         try? FileManager.default.createDirectory(at: socketsDir, withIntermediateDirectories: true)
@@ -92,7 +103,6 @@ extension ExternalState {
 
         // Install the IWA: use override URL if set for this profile, otherwise use local file.
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
         let shimDir = Self.appDataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
         let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
         let shimApp = shimDir.appendingPathComponent(shimAppName)

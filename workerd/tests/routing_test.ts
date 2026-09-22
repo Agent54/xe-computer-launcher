@@ -46,6 +46,7 @@ Deno.test('application port selection', async t => {
       { Type: 'tcp', PrivatePort: 3000, PublicPort: 8080 },
       { Type: 'tcp', PrivatePort: 9000, PublicPort: 9090 },
       { Type: 'tcp', PrivatePort: 9000, PublicPort: 9090 },
+      { Type: 'tcp', PrivatePort: 9443, PublicPort: 9443 },
       { Type: 'udp', PrivatePort: 5353, PublicPort: 5353 },
       { Type: 'tcp', PrivatePort: 7000 },
     ],
@@ -54,7 +55,8 @@ Deno.test('application port selection', async t => {
   let containers = [container];
   let ports = [
     { name: 'metrics', target: 9000, published: '9090', protocol: 'tcp' },
-    { name: 'web', target: 3000, published: '8080', protocol: 'tcp' },
+    { name: 'web', target: 3000, published: '8080', protocol: 'tcp', app_protocol: 'http' },
+    { name: 'secure', target: 9443, published: '9443', protocol: 'tcp', app_protocol: 'https' },
     { name: 'dns', target: 5353, published: '5353', protocol: 'udp' },
   ];
   let configStatus = 200;
@@ -95,6 +97,14 @@ Deno.test('application port selection', async t => {
       assert.equal((await request('service.dns.localhost')).status, 404);
       assert.equal((await request('service.missing.localhost')).status, 404);
     });
+    await t.step('HTTPS application ports redirect to their published TLS endpoint', async () => {
+      const named = await request('service.secure.localhost');
+      assert.equal(named.status, 307);
+      assert.equal(named.headers.get('location'), 'https://service.localhost:9443/hello?q=1');
+      const numeric = await request('service.9443.localhost');
+      assert.equal(numeric.status, 307);
+      assert.equal(numeric.headers.get('location'), 'https://service.localhost:9443/hello?q=1');
+    });
     await t.step('caller cannot override selected ports and internal headers do not reach apps', async () => {
       const response = await request('service.web.localhost', { 'x-xe-target-port': '7000', 'x-xe-container-id': 'forged' });
       const result = await response.json();
@@ -106,7 +116,7 @@ Deno.test('application port selection', async t => {
       assert.equal((await request('api.moby.localhost')).status, 403);
     });
     await t.step('configuration changes refresh names and default order', async () => {
-      ports = [ports[1], { ...ports[0], name: 'monitor' }, ports[2]];
+      ports = [ports[1], { ...ports[0], name: 'monitor' }, ports[2], ports[3]];
       now += 3000;
       assert.equal((await (await request()).json()).url, 'http://172.18.0.2:3000/hello?q=1');
       assert.equal((await request('service.metrics.localhost')).status, 404);

@@ -1,0 +1,183 @@
+name: Update launcher components
+
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to check
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - xe-computer
+          - compose-server
+          - compose-ui
+          - smolvm
+      release_tag:
+        description: Optional exact integration release tag; requires one selected component
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      component:
+        required: false
+        default: all
+        type: string
+      release_tag:
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: launcher-component-updates
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.components.outputs.value }}
+    steps:
+      - name: Select components
+        id: components
+        env:
+          COMPONENT: ${{ inputs.component }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          component="${COMPONENT:-all}"
+          case "$component" in
+            all)
+              components='["xe-computer","compose-server","compose-ui","smolvm"]'
+              ;;
+            xe-computer|compose-server|compose-ui|smolvm)
+              components="[\"$component\"]"
+              ;;
+            *)
+              echo "::error::Unsupported component: $component"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$component" == "all" && -n "$RELEASE_TAG" ]]; then
+            echo "::error::An exact release tag requires one selected component"
+            exit 1
+          fi
+          echo "value=$components" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        component: ${{ fromJSON(needs.prepare.outputs.components) }}
+    runs-on: [self-hosted, macOS, ARM64, xe-mac]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: int
+          fetch-depth: 0
+
+      - name: Check for a newer trusted release
+        id: update
+        env:
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN || github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: bash macos/Scripts/update-component-lock.sh '${{ matrix.component }}' "$RELEASE_TAG"
+
+      - name: Verify updated component
+        if: steps.update.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN || github.token }}
+        run: make -C macos '${{ steps.update.outputs.build_target }}'
+
+      - name: Create or update component pull request
+        if: steps.update.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPONENT: ${{ steps.update.outputs.component }}
+          DISPLAY_NAME: ${{ steps.update.outputs.display_name }}
+          RELEASE_TAG: ${{ steps.update.outputs.release_tag }}
+          UPSTREAM_REPOSITORY: ${{ steps.update.outputs.repository }}
+          LOCK_FILE: ${{ steps.update.outputs.lock_file }}
+          BUILD_TARGET: ${{ steps.update.outputs.build_target }}
+          BASE_BRANCH: int
+        shell: bash
+        run: |
+          branch="automation/update-$COMPONENT"
+          title="Update $DISPLAY_NAME to $RELEASE_TAG"
+          body_file="$RUNNER_TEMP/component-update.md"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          remote_branch_sha=""
+          if git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null; then
+            remote_branch_sha="$(git rev-parse "refs/remotes/origin/$branch")"
+          fi
+
+          pr_number="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$branch" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -n "$remote_branch_sha" ]] && git diff --quiet "$remote_branch_sha" -- "$LOCK_FILE"; then
+            if [[ -n "$pr_number" ]]; then
+              echo "$DISPLAY_NAME $RELEASE_TAG is already proposed in pull request #$pr_number."
+              exit 0
+            fi
+          else
+            git checkout -b "$branch"
+            git add "$LOCK_FILE"
+            git commit -m "$title"
+
+            lease="refs/heads/$branch:"
+            if [[ -n "$remote_branch_sha" ]]; then
+              lease="refs/heads/$branch:$remote_branch_sha"
+            fi
+            git push \
+              --force-with-lease="$lease" \
+              origin \
+              "HEAD:refs/heads/$branch"
+          fi
+
+          {
+            echo "Updates the bundled $DISPLAY_NAME release used by Xe Launcher."
+            echo
+            echo "- Upstream: \`$UPSTREAM_REPOSITORY\`"
+            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- Pin: \`$LOCK_FILE\`"
+            echo
+            echo "The release assets and published checksums were verified, then \`make -C macos $BUILD_TARGET\` completed before this pull request was published."
+          } > "$body_file"
+
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body-file "$body_file"
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$branch" \
+              --title "$title" \
+              --body-file "$body_file"
+          fi

@@ -53,6 +53,10 @@ export default {
         service: container.Labels['com.docker.compose.service'],
         project: container.Labels['com.docker.compose.project'],
         configFiles: container.Labels['com.docker.compose.project.config_files'],
+        publishedPorts: (container.Ports || []).filter(p => p.Type === 'tcp' &&
+          Number.isInteger(p.PrivatePort) && Number.isInteger(p.PublicPort) &&
+          p.PrivatePort > 0 && p.PrivatePort < 65536 && p.PublicPort > 0 && p.PublicPort < 65536)
+          .map(p => ({ target: p.PrivatePort, published: p.PublicPort })),
       });
       const numeric = /^\d+$/.test(portPart);
       const published = (container.Ports || []).filter(p => p.Type === 'tcp' &&
