@@ -39,12 +39,14 @@ Deno.test('management UI does not require a launcher session token', async () =>
   assert.equal(response.headers.get('set-cookie'), null);
 });
 
-Deno.test('signed Xe Computer origin can use only the repository checkout route', async () => {
+Deno.test('signed Xe Computer origin can use only the Compose UI routes', async () => {
   const origin = 'isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic';
   let forwarded: Request | undefined;
   const env = { MANAGEMENT: { fetch: (request: Request) => {
     forwarded = request;
-    return Promise.resolve(Response.json({ ok: true, path: 'development/darc-code' }, { status: 201 }));
+    return Promise.resolve(request.method === 'POST'
+      ? Response.json({ ok: true, path: 'development/darc-code' }, { status: 201 })
+      : Response.json([]));
   } } };
   const preflight = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/repos/checkout', {
     method: 'OPTIONS',
@@ -70,7 +72,27 @@ Deno.test('signed Xe Computer origin can use only the repository checkout route'
   assert.equal(checkout.headers.get('access-control-allow-origin'), origin);
   assert.equal(await forwarded?.text(), body);
 
-  const denied = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/ls', {
+  for (const path of ['/v1.24/ls?all=true', '/v1.24/config/demo?format=json', '/v1.24/ps/demo?all=true']) {
+    const response = await gateway.fetch(new Request(`http://127.0.0.1:8094${path}`, {
+      headers: { Origin: origin, 'Sec-Fetch-Site': 'cross-site' },
+    }), env);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get('access-control-allow-origin'), origin);
+  }
+
+  const readPreflight = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/ls', {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Sec-Fetch-Site': 'cross-site',
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Private-Network': 'true',
+    },
+  }), env);
+  assert.equal(readPreflight.status, 204);
+  assert.equal(readPreflight.headers.get('access-control-allow-methods'), 'GET');
+
+  const denied = await gateway.fetch(new Request('http://127.0.0.1:8094/v1.24/system', {
     headers: { Origin: origin, 'Sec-Fetch-Site': 'cross-site' },
   }), env);
   assert.equal(denied.status, 403);

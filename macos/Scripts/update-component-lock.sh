@@ -197,6 +197,14 @@ else
 fi
 
 release_file="$temporary_dir/release.json"
+release_id="$(jq -er '.id' "$release_file")"
+# The release-list response can retain an empty asset array after assets have
+# been uploaded. Fetch assets from their dedicated endpoint instead.
+gh api --paginate --slurp "repos/$repository/releases/$release_id/assets?per_page=100" \
+    | jq 'add' > "$temporary_dir/assets.json"
+jq --slurpfile assets "$temporary_dir/assets.json" '.assets = $assets[0]' \
+    "$release_file" > "$temporary_dir/release-with-assets.json"
+release_file="$temporary_dir/release-with-assets.json"
 jq -e --arg pattern "$tag_pattern" '
     .draft == false and
     .prerelease == true and

@@ -233,9 +233,11 @@ try {
   for (const options of deniedRequests) {
     assert.equal((await request('/', options)).status, 403);
   }
-  assert.equal((await request('/v1.24/ls', { headers: {
+  const composeUIUnavailable = await request('/v1.24/ls', { headers: {
     Origin: xeComputerOrigin, 'Sec-Fetch-Site': 'cross-site',
-  } })).status, 403);
+  } });
+  assert.equal(composeUIUnavailable.status, 503);
+  assert.equal(composeUIUnavailable.headers['access-control-allow-origin'], xeComputerOrigin);
   const checkoutPreflight = await request('/v1.24/repos/checkout', { method: 'OPTIONS', headers: {
     Origin: xeComputerOrigin,
     'Sec-Fetch-Site': 'cross-site',
