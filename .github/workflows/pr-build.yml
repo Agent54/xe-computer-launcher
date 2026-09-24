@@ -27,10 +27,11 @@ jobs:
 
     steps:
       - name: Check out pull request
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Reset launcher integration environment
-        run: bash macos/Tests/Integration/cleanup.sh
+        run: bash macos/Tests/Integration/cleanup-ci.sh
 
       - name: Verify Sparkle delta appcast fixture
         run: |
@@ -155,3 +156,7 @@ jobs:
 
       - name: Verify version in About dialog
         run: macos/Tests/Integration/about-version.sh
+
+      - name: Quit integration-test apps and preserve installation
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: bash macos/Tests/Integration/cleanup.sh --stop-only

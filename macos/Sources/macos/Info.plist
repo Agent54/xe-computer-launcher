@@ -32,6 +32,9 @@
         <key>XeUpdateChannel</key>
         <string>stable</string>
 
+        <key>XePortHelperUnregisterCLI</key>
+        <true/>
+
         <key>LSMinimumSystemVersion</key>
         <string>26.2</string>
 

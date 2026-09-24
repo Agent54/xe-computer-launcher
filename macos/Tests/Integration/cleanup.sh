@@ -7,6 +7,7 @@ BUNDLE_ID="dev.xe.computer"
 INSTALLED_APP="/Applications/${APP_NAME}.app"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 PERMANENT_CLEANUP=0
+STOP_ONLY=0
 
 log() {
     printf '[installer-cleanup] %s\n' "$*"
@@ -26,12 +27,18 @@ require_ci_context() {
         || fail "permanent cleanup requires the macOS ARM64 runner"
     [[ "${GITHUB_REPOSITORY:-}" == "Agent54/xe-computer-launcher" ]] \
         || fail "permanent cleanup requires the launcher repository"
-    [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]] \
-        || fail "permanent cleanup requires the release workflow"
-    [[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
-        || fail "permanent cleanup requires the release job triggered by a push"
-    [[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
-        || fail "permanent cleanup requires the int or main release branch"
+    if [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]]; then
+        [[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
+            || fail "permanent cleanup requires the release job triggered by a push"
+        [[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
+            || fail "permanent cleanup requires the int or main release branch"
+    elif [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/pr-build.yml@"* ]]; then
+        [[ "${GITHUB_JOB:-}" == "launcher-integration" && "${GITHUB_EVENT_NAME:-}" == "pull_request" \
+            && "${GITHUB_BASE_REF:-}" == "main" ]] \
+            || fail "permanent cleanup requires the integration job for a main-branch pull request"
+    else
+        fail "permanent cleanup requires the launcher release or integration workflow"
+    fi
 }
 
 configure_cleanup_mode() {
@@ -43,8 +50,11 @@ configure_cleanup_mode() {
             require_ci_context
             PERMANENT_CLEANUP=1
             ;;
+        1:--stop-only)
+            STOP_ONLY=1
+            ;;
         *)
-            fail "usage: cleanup.sh [--ci-permanent]"
+            fail "usage: cleanup.sh [--ci-permanent|--stop-only]"
             ;;
     esac
 }
@@ -174,12 +184,31 @@ configure_cleanup_mode "$@"
 
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
+launcher_pattern='/X[Ee] Launcher[.]app/Contents/MacOS/bin'
+if [[ "$STOP_ONLY" == "1" ]]; then
+    # Ask Cocoa to quit normally so the launcher can stop Workerd, Compose,
+    # Helium, the shim, and its VM before we force any remaining process out.
+    log "requesting graceful Xe Launcher shutdown"
+    perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 10 \
+        osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();' \
+        || log "Launch Services quit request failed; falling back to process signals"
+    for _ in {1..140}; do
+        pgrep -f "$launcher_pattern" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+fi
 stop_matching_processes \
     "Xe Launcher instances" \
-    '/X[Ee] Launcher[.]app/Contents/MacOS/bin'
+    "$launcher_pattern"
 stop_matching_processes \
     "orphaned Xe Launcher workerd processes" \
     '/X[Ee] Launcher[.]app/Contents/Helpers/workerd( |$)'
+stop_matching_processes \
+    "orphaned Xe Launcher SmolVM processes" \
+    '/X[Ee] Launcher[.]app/Contents/Helpers/SmolRuntime/smolvm-bin( |$)'
+stop_matching_processes \
+    "Xe Launcher worker-bridge processes" \
+    '/X[Ee] Launcher[.]app/Contents/MacOS/port-helper --exec-workerd'
 stop_matching_processes \
     "Xe Computer app shims" \
     "/Library/Application Support/${bundle_id_pattern}/shims/.*/Xe Computer[^/]*[.]app/Contents/MacOS/app_mode_loader"
@@ -189,6 +218,18 @@ stop_matching_processes \
 stop_matching_processes \
     "Xe Launcher's Helium and helper processes" \
     "/Library/Application Support/${bundle_id_pattern}/Helium[.]app/"
+
+if [[ "$STOP_ONLY" == "1" ]]; then
+    log "app processes stopped; preserving the installed app, shim files, data, port helper, and permissions"
+    exit 0
+fi
+
+if [[ -x "$INSTALLED_APP/Contents/MacOS/bin" ]] \
+    && [[ "$(plutil -extract XePortHelperUnregisterCLI raw "$INSTALLED_APP/Contents/Info.plist" 2>/dev/null || true)" == "true" ]]; then
+    log "unregistering Xe Launcher's port helper"
+    "$INSTALLED_APP/Contents/MacOS/bin" --unregister-port-helper \
+        || fail "could not unregister the port helper before removing the installed app"
+fi
 
 log "removing stale generated app shims"
 trash_generated_shim_if_owned \

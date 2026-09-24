@@ -20,12 +20,18 @@ fail() {
     || fail "cleanup-ci.sh requires the macOS ARM64 runner"
 [[ "${GITHUB_REPOSITORY:-}" == "Agent54/xe-computer-launcher" ]] \
     || fail "cleanup-ci.sh requires the launcher repository"
-[[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]] \
-    || fail "cleanup-ci.sh requires the release workflow"
-[[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
-    || fail "cleanup-ci.sh requires the release job triggered by a push"
-[[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
-    || fail "cleanup-ci.sh requires the int or main release branch"
+if [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]]; then
+    [[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
+        || fail "cleanup-ci.sh requires the release job triggered by a push"
+    [[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
+        || fail "cleanup-ci.sh requires the int or main release branch"
+elif [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/pr-build.yml@"* ]]; then
+    [[ "${GITHUB_JOB:-}" == "launcher-integration" && "${GITHUB_EVENT_NAME:-}" == "pull_request" \
+        && "${GITHUB_BASE_REF:-}" == "main" ]] \
+        || fail "cleanup-ci.sh requires the integration job for a main-branch pull request"
+else
+    fail "cleanup-ci.sh requires the launcher release or integration workflow"
+fi
 [[ -n "$WORKSPACE" && "$SCRIPT_DIR" == "${WORKSPACE%/}/macos/Tests/Integration" ]] \
     || fail "cleanup-ci.sh must run from the checked-out launcher workspace"
 

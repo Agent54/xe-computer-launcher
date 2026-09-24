@@ -13,25 +13,33 @@ these scripts; they should not duplicate their behavior.
 
 ## Destructive changes
 
-Run this only in a disposable test account or VM. `cleanup.sh`:
+Run destructive cleanup only in a disposable test account or VM. `cleanup.sh`:
 
-- quits running Xe Launcher copies;
+- quits running Xe Launcher, Helium, and Xe Computer shim processes;
+- unregisters the standard-port helper when the installed app supports CI teardown;
 - resets TCC permissions for `dev.xe.computer`;
 - removes `/Applications/Xe Launcher.app`;
 - moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
 - detaches stale Xe Launcher disk-image mounts.
 
-The release workflow runs `cleanup-ci.sh`, which explicitly disables Trash and
-permanently removes only the exact current Xe test installation, data, and
-owned generated-shim paths at the start of a run. It refuses to run outside
-the launcher's release job on the self-hosted macOS ARM64 GitHub Actions runner,
+The release and pull-request workflows run `cleanup-ci.sh` only before
+installation. It explicitly disables Trash and permanently removes only the
+exact previous Xe test installation, data, and owned generated-shim paths. It refuses to run outside
+the launcher's release or integration jobs on the self-hosted macOS ARM64 GitHub Actions runner,
 and permanent removal refuses targets that contain mounted filesystems. Manual
 runs use `cleanup.sh` and retain the recoverable behavior described above;
 ambient environment variables cannot enable permanent cleanup. Failed workspace
 build artifacts remain available until the next checkout cleans the workspace.
 Timestamped entries created by older workflow versions are not touched and
 require one-time runner maintenance.
+
+After the About-dialog test, both workflows run `cleanup.sh --stop-only` even
+if the test fails. It asks Xe Launcher to quit gracefully, then stops any
+remaining Workerd, SmolVM, Helium, or Xe Computer shim processes. It does not
+delete the installed app or data, unregister the port helper, reset permissions,
+or detach the DMG; those remain available to inspect until the next run starts.
+The launchd helper itself remains registered and keeps 80/443 reserved.
 
 On a fresh VM, `tccutil` may report that the bundle is not registered; the test treats
 that as an already-clean permission state and continues.
@@ -66,6 +74,13 @@ The cleanup deliberately resets Xe Launcher's own permissions on every run. Afte
 the installed copy relaunches, grant its Accessibility request in System
 Settings so first-run setup can continue. This interaction is part of the
 integration test, not a persistent one-time machine grant.
+
+An existing installation with a saved storage folder but no confirmed port
+choice—including older setups that silently saved 5196/5194—gets a one-time
+port-choice prompt after updating. If 5196/5194 cannot be
+bound, that option is not offered; selecting 80/443 continues through the
+normal macOS background-helper approval flow. Choosing **Not Now** leaves
+local routing and browser restoration stopped until the next launch.
 
 Accessibility and Automation grants belong to the process that invokes
 `osascript`. If the test is invoked over SSH, granting Terminal locally does

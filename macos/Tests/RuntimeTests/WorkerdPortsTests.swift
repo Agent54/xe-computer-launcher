@@ -1,10 +1,24 @@
 import Darwin
+import Foundation
 import Testing
 @testable import macos
 
 @Suite(.serialized)
 struct WorkerdPortsTests {
     @Test func settingsUseDefaultsAndValidateOverrides() {
+        #expect(!WorkerdPorts.hasExplicitPortSetting(nil))
+        #expect(!WorkerdPorts.hasExplicitPortSetting(["compose_storage_path": "/tmp/stacks"]))
+        #expect(!WorkerdPorts.hasExplicitPortSetting(["app_http_port": NSNull()]))
+        #expect(WorkerdPorts.hasExplicitPortSetting(["app_http_port": 5196]))
+        #expect(WorkerdPorts.hasExplicitPortSetting(["app_http_port": 80, "app_https_port": 443]))
+        #expect(WorkerdPorts.needsPortChoice(nil))
+        #expect(WorkerdPorts.needsPortChoice(["app_http_port": 5196, "app_https_port": 5194]))
+        #expect(!WorkerdPorts.needsPortChoice([
+            "app_http_port": 5196, "app_https_port": 5194, "app_port_choice_confirmed": true
+        ]))
+        #expect(!WorkerdPorts.needsPortChoice(["app_http_port": 80, "app_https_port": 443]))
+        #expect(!WorkerdPorts.needsPortChoice(["app_http_port": 8080, "app_https_port": 8443]))
+
         let defaults = WorkerdPorts(settings: nil)
         #expect(defaults.http == 5196)
         #expect(defaults.https == 5194)
@@ -51,6 +65,20 @@ struct WorkerdPortsTests {
         #expect(otherLowPorts.http == 5196)
         #expect(otherLowPorts.https == 5194)
         #expect(otherLowPorts.settingWarnings.count == 2)
+    }
+
+    @Test @MainActor func legacyStorageSettingsStillRequirePortChoice() {
+        #expect(LauncherSetup.needsChoice(settings: nil))
+        #expect(LauncherSetup.needsChoice(settings: ["compose_storage_path": "/tmp/stacks"]))
+        #expect(LauncherSetup.needsChoice(settings: [
+            "compose_storage_path": "/tmp/stacks", "app_http_port": 5196, "app_https_port": 5194
+        ]))
+        #expect(!LauncherSetup.needsChoice(settings: [
+            "compose_storage_path": "/tmp/stacks", "app_http_port": 80, "app_https_port": 443
+        ]))
+        #expect(!LauncherSetup.needsChoice(settings: [
+            "compose_storage_path": "/tmp/stacks", "app_http_port": 8080
+        ]))
     }
 
     @Test func startupProbeReportsOccupiedLoopbackPort() throws {

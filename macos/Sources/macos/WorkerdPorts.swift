@@ -13,6 +13,22 @@ struct WorkerdPorts {
     let https: UInt16
     let settingWarnings: [String]
 
+    static func hasExplicitPortSetting(_ settings: [String: Any]?) -> Bool {
+        ["app_http_port", "app_https_port"].contains { key in
+            guard let value = settings?[key] else { return false }
+            return !(value is NSNull)
+        }
+    }
+
+    static func needsPortChoice(_ settings: [String: Any]?) -> Bool {
+        guard hasExplicitPortSetting(settings) else { return true }
+        guard settings?["app_port_choice_confirmed"] as? Bool != true else { return false }
+        let ports = WorkerdPorts(settings: settings)
+        // Older setup saved these defaults without an explicit port decision.
+        // Keep standard and manually configured non-default pairs unchanged.
+        return ports.http == defaultHTTP && ports.https == defaultHTTPS && ports.settingWarnings.isEmpty
+    }
+
     init(settings: [String: Any]?) {
         var warnings: [String] = []
 

@@ -737,15 +737,17 @@ log "choosing the default user data storage folder"
 press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
 saved_http_port=""
 saved_https_port=""
+saved_port_choice=""
 deadline=$((SECONDS + 10))
 while (( SECONDS < deadline )); do
     saved_http_port="$(plutil -extract app_http_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
     saved_https_port="$(plutil -extract app_https_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
-    [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] && break
+    saved_port_choice="$(plutil -extract app_port_choice_confirmed raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" && "$saved_port_choice" == "true" ]] && break
     sleep 0.25
 done
-[[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] \
-    || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset}, expected 80/443"
+[[ "$saved_http_port" == "80" && "$saved_https_port" == "443" && "$saved_port_choice" == "true" ]] \
+    || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset} (confirmed: ${saved_port_choice:-unset}), expected confirmed 80/443"
 
 log "checking whether the background port helper needs administrator approval"
 if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 5 >/dev/null 2>&1; then

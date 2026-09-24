@@ -39,6 +39,7 @@ jobs:
           echo "ORIGINAL_KEYCHAINS=$RUNNER_TEMP/original-keychains-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" >> "$GITHUB_ENV"
 
       - name: Check out release branch
+        id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -320,6 +321,10 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ steps.version.outputs.release_tag }}
         run: macos/Tests/Integration/about-version.sh
+
+      - name: Quit integration-test apps and preserve installation
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: bash macos/Tests/Integration/cleanup.sh --stop-only
 
       - name: Generate signed Sparkle appcast and deltas
         env:

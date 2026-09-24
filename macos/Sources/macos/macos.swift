@@ -85,6 +85,15 @@ private enum ShutdownComponent: CaseIterable, Hashable {
 @main
 struct MacOSApp {
     static func main() {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--unregister-port-helper" {
+            if let warning = PrivilegedPortService.unregisterIfRegistered() {
+                fputs("\(warning)\n", stderr)
+                exit(1)
+            }
+            return
+        }
+
         // Sandbox disabled during development
         // if !Sandbox.apply() {
         //     print("[FATAL] Sandbox failed to apply - refusing to run unsandboxed")
@@ -108,7 +117,7 @@ struct MacOSApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private var didFinishNormalStartup = false
-    private var storageChoiceDeclinedOnThisLaunch = false
+    private var setupDeferredOnThisLaunch = false
     private var isPreparingForTermination = false
     private var runtimeStartupTask: Task<Void, Never>?
     private var browserStartupTask: Task<Void, Never>?
@@ -193,27 +202,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         setupStatusItem()
         renderMenuLabels()
 
-        // The one-time setup also selects host app ports. Show it even when
-        // virtualization is unavailable: Workerd and its port choice still run.
-        if state.stringSetting("compose_storage_path")?.isEmpty != false {
+        // First-run setup and legacy settings without a port choice both need
+        // a decision before Workerd starts, even without virtualization.
+        if LauncherSetup.needsChoice() {
             do {
-                storageChoiceDeclinedOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
+                setupDeferredOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
             } catch {
-                storageChoiceDeclinedOnThisLaunch = true
-                state.appendLog("launcher", "Warning: user data storage unavailable: \(error.localizedDescription)")
+                setupDeferredOnThisLaunch = true
+                state.appendLog("launcher", "Warning: launcher setup unavailable: \(error.localizedDescription)")
             }
+        }
+        if setupDeferredOnThisLaunch {
+            state.appendLog("launcher", "Local app routing deferred until storage and port setup is complete.")
         }
         state.updateSettings()
         let workerdPorts = WorkerdPorts(settings: state.settings.rawData)
         workerdServer = WorkerdServer(routingPort: workerdPorts.http, tlsPort: workerdPorts.https)
-        for warning in workerdPorts.settingWarnings {
+        for warning in setupDeferredOnThisLaunch ? [] : workerdPorts.settingWarnings {
             state.appendLog("launcher", "Warning: \(warning)")
         }
         let needsPortHelper = workerdPorts.http == WorkerdPorts.standardHTTP
-        let helperWarning = needsPortHelper ? PrivilegedPortService.registerIfNeeded() :
-            PrivilegedPortService.unregisterIfRegistered()
-        let portWarnings = workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
-            (helperWarning.map { [$0] } ?? [])
+        let helperWarning = setupDeferredOnThisLaunch ? nil :
+            (needsPortHelper ? PrivilegedPortService.registerIfNeeded() :
+                PrivilegedPortService.unregisterIfRegistered())
+        let portWarnings = setupDeferredOnThisLaunch ? [] :
+            workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
+                (helperWarning.map { [$0] } ?? [])
         for warning in portWarnings {
             state.appendLog("launcher", "Warning: \(warning)")
         }
@@ -228,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             _ = updaterController
         }
 
-        startHostServices()
+        if !setupDeferredOnThisLaunch { startHostServices() }
         startBackgroundInitialization()
         if !portWarnings.isEmpty {
             DispatchQueue.main.async {
@@ -265,15 +279,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func startBackgroundInitialization() {
         guard !isPreparingForTermination, runtimeStartupTask == nil, browserStartupTask == nil else { return }
+        guard !setupDeferredOnThisLaunch else {
+            ExternalState.shared.appendLog("launcher", "Browser and container startup deferred until launcher setup is complete.")
+            return
+        }
         runtimeStartupTask = Task {
             do {
                 // Host UI is already running, even on machines without a hypervisor.
                 guard VirtualizationSupport.isAvailable else {
                     ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
-                    return
-                }
-                guard !storageChoiceDeclinedOnThisLaunch else {
-                    ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
                     return
                 }
                 guard let stacksURL = try LauncherSetup.chooseIfNeeded() else {
