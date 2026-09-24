@@ -459,9 +459,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 let composeCleanup = Task { @MainActor in await composeServer?.stop() }
                 await workerdCleanup.value
                 await composeCleanup.value
-                if let warning = PrivilegedPortService.unregisterIfRegistered() {
-                    ExternalState.shared.appendLog("launcher", "Warning: \(warning)")
-                }
+                // Keep launchd registration across quit/relaunch so an approved
+                // standard-port helper stays available. Startup unregisters it
+                // when the configured ports switch away from 80/443.
                 ExternalState.shared.appendLog(
                     "launcher",
                     "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"

@@ -58,7 +58,9 @@ that as an already-clean permission state and continues.
    General → Login Items & Extensions** and enables Xe Launcher under **Allow in
    Background**, then restarts the app. If macOS asks for administrator
    authentication, complete that prompt in the runner's GUI session. The test
-   waits for the switch to turn on but cannot supply administrator credentials.
+   waits for the launch daemon to become active before restarting; it cannot
+   supply administrator credentials. The approved helper remains registered
+   across normal app restarts, reserving 80/443 until custom ports are selected.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System

@@ -357,6 +357,8 @@ on run argv
     set appName to item 1 of argv
     set timeoutSeconds to item 2 of argv as integer
     set wantedIdentifier to appName & "_Toggle"
+    set pressedToggle to false
+    set confirmedPolls to 0
 
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
@@ -381,37 +383,29 @@ on run argv
                                 end try
 
                                 if elementIdentifier is wantedIdentifier then
-                                    set toggleValue to 0
+                                    set toggleValue to -1
                                     try
                                         set toggleValue to value of uiElement as integer
                                     end try
-                                    if toggleValue is 1 then return "already enabled"
-
-                                    set togglePosition to position of uiElement
-                                    set toggleSize to size of uiElement
-                                    try
-                                        perform action "AXPress" of uiElement
-                                    end try
-                                    delay 0.5
-
-                                    try
-                                        set toggleValue to value of uiElement as integer
-                                    end try
-                                    if toggleValue is not 1 then
-                                        click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
+                                    if toggleValue is 1 and not my authorizationPending() then
+                                        set confirmedPolls to confirmedPolls + 1
+                                        if confirmedPolls ≥ 8 then return "enabled"
+                                    else
+                                        set confirmedPolls to 0
                                     end if
 
-                                    -- macOS may require the user to authenticate
-                                    -- before changing this security-sensitive
-                                    -- setting. Keep the test alive while that
-                                    -- system-owned sheet is completed manually.
-                                    repeat (timeoutSeconds * 4) times
-                                        delay 0.25
+                                    if toggleValue is 0 and not pressedToggle then
+                                        set togglePosition to position of uiElement
+                                        set toggleSize to size of uiElement
                                         try
-                                            if value of uiElement as integer is 1 then return "enabled"
+                                            perform action "AXPress" of uiElement
+                                        on error
+                                            click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
                                         end try
-                                    end repeat
-                                    error "The Accessibility switch for " & appName & " did not turn on"
+                                        set pressedToggle to true
+                                        log "Clicked the Xe Launcher Accessibility switch; waiting for macOS approval"
+                                    end if
+                                    exit repeat
                                 end if
                             end repeat
                         end if
@@ -419,11 +413,34 @@ on run argv
                 end tell
             end if
 
+            if attemptNumber mod 40 is 0 then log "Still waiting for confirmed Accessibility access for " & appName
             delay 0.25
         end repeat
         error "Timed out waiting for the Accessibility switch for " & appName
     end tell
 end run
+
+on authorizationPending()
+    tell application "System Events"
+        repeat with processName in {"SecurityAgent", "AuthorizationHost"}
+            try
+                if exists application process (contents of processName) then
+                    if (count of windows of application process (contents of processName)) > 0 then return true
+                end if
+            end try
+        end repeat
+        if exists application process "System Settings" then
+            tell application process "System Settings"
+                repeat with uiWindow in windows
+                    try
+                        if (count of sheets of uiWindow) > 0 then return true
+                    end try
+                end repeat
+            end tell
+        end if
+    end tell
+    return false
+end authorizationPending
 APPLESCRIPT
 }
 
@@ -438,6 +455,7 @@ on run argv
     set timeoutSeconds to item 2 of argv as integer
     set foundAppRow to false
     set clickedToggle to false
+    set confirmedPolls to 0
 
     tell application "System Settings" to activate
     tell application "System Events"
@@ -515,8 +533,13 @@ on run argv
                                 try
                                     set toggleValue to value of targetToggle as integer
                                 end try
-                                if toggleValue is 1 then return "enabled"
-                                if not clickedToggle then
+                                if toggleValue is 1 and not my authorizationPending() then
+                                    set confirmedPolls to confirmedPolls + 1
+                                    if confirmedPolls ≥ 8 then return "enabled"
+                                else
+                                    set confirmedPolls to 0
+                                end if
+                                if toggleValue is 0 and not clickedToggle then
                                     set togglePosition to position of targetToggle
                                     set toggleSize to size of targetToggle
                                     try
@@ -549,6 +572,28 @@ on run argv
     if not clickedToggle then error "The " & appName & " background switch was not found in System Settings"
     error "The " & appName & " background switch did not turn on; complete the macOS administrator authentication prompt"
 end run
+
+on authorizationPending()
+    tell application "System Events"
+        repeat with processName in {"SecurityAgent", "AuthorizationHost"}
+            try
+                if exists application process (contents of processName) then
+                    if (count of windows of application process (contents of processName)) > 0 then return true
+                end if
+            end try
+        end repeat
+        if exists application process "System Settings" then
+            tell application process "System Settings"
+                repeat with uiWindow in windows
+                    try
+                        if (count of sheets of uiWindow) > 0 then return true
+                    end try
+                end repeat
+            end tell
+        end if
+    end tell
+    return false
+end authorizationPending
 APPLESCRIPT
 }
 
@@ -707,6 +752,22 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     log "enabling Xe Launcher under Allow in Background"
     grant_background_port_helper_permission "$APP_NAME" 120
 
+    log "waiting for macOS to finish approving the port helper"
+    deadline=$((SECONDS + 120))
+    next_approval_update=$((SECONDS + 10))
+    while (( SECONDS < deadline )); do
+        if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+            break
+        fi
+        if (( SECONDS >= next_approval_update )); then
+            log "port helper is not active yet; complete any macOS password prompt"
+            next_approval_update=$((SECONDS + 10))
+        fi
+        sleep 1
+    done
+    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
+        || fail "macOS did not activate the approved port helper; leave its background switch on and complete administrator authentication"
+
     log "restarting the installed launcher after port helper approval"
     run_with_timeout 10 osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();'
     deadline=$((SECONDS + 90))
@@ -715,6 +776,8 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     done
     pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null \
         && fail "installed launcher did not quit after port helper approval"
+    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
+        || fail "port helper registration disappeared when Xe Launcher quit"
     open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
 fi
 
