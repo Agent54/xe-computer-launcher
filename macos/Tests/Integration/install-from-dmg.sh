@@ -427,6 +427,131 @@ end run
 APPLESCRIPT
 }
 
+grant_background_port_helper_permission() {
+    local app_name="$1"
+    local timeout_seconds="$2"
+
+    run_with_timeout "$((timeout_seconds + 10))" osascript - \
+        "$app_name" "$timeout_seconds" <<'APPLESCRIPT'
+on run argv
+    set appName to item 1 of argv
+    set timeoutSeconds to item 2 of argv as integer
+    set foundAppRow to false
+    set clickedToggle to false
+
+    tell application "System Settings" to activate
+    tell application "System Events"
+        repeat with attemptNumber from 1 to (timeoutSeconds * 4)
+            if exists application process "System Settings" then
+                tell application process "System Settings"
+                    repeat with uiWindow in windows
+                        set windowTitle to ""
+                        try
+                            set windowTitle to name of uiWindow as text
+                        end try
+                        if windowTitle contains "Login Items" then
+                            set uiElements to {}
+                            try
+                                set uiElements to entire contents of uiWindow
+                            end try
+
+                            set appLabel to missing value
+                            set targetToggle to missing value
+                            repeat with uiElement in uiElements
+                                set elementName to ""
+                                set elementValue to ""
+                                set elementRole to ""
+                                set elementIdentifier to ""
+                                try
+                                    set elementName to name of uiElement as text
+                                end try
+                                try
+                                    set elementValue to value of uiElement as text
+                                end try
+                                try
+                                    set elementRole to role of uiElement as text
+                                end try
+                                try
+                                    set elementIdentifier to value of attribute "AXIdentifier" of uiElement as text
+                                end try
+                                if elementName is appName or elementValue is appName or ¬
+                                    (elementRole is "AXStaticText" and (elementName contains appName or elementValue contains appName)) then
+                                    set appLabel to uiElement
+                                end if
+                                if elementIdentifier contains appName and elementIdentifier contains "Toggle" then
+                                    set targetToggle to uiElement
+                                end if
+                            end repeat
+
+                            if appLabel is not missing value then
+                                set foundAppRow to true
+                                if targetToggle is missing value then
+                                    set labelPosition to position of appLabel
+                                    set labelSize to size of appLabel
+                                    set labelY to item 2 of labelPosition + (item 2 of labelSize div 2)
+                                    set bestDistance to 100000
+                                    repeat with uiElement in uiElements
+                                        set elementRole to ""
+                                        try
+                                            set elementRole to role of uiElement as text
+                                        end try
+                                        if elementRole is "AXCheckBox" or elementRole is "AXSwitch" then
+                                            set togglePosition to position of uiElement
+                                            set toggleSize to size of uiElement
+                                            set rowDistance to item 2 of togglePosition + (item 2 of toggleSize div 2) - labelY
+                                            if rowDistance < 0 then set rowDistance to -rowDistance
+                                            set horizontalDistance to item 1 of togglePosition - item 1 of labelPosition
+                                            if rowDistance ≤ 30 and horizontalDistance > 0 and horizontalDistance < bestDistance then
+                                                set targetToggle to uiElement
+                                                set bestDistance to horizontalDistance
+                                            end if
+                                        end if
+                                    end repeat
+                                end if
+                            end if
+
+                            if targetToggle is not missing value then
+                                set toggleValue to -1
+                                try
+                                    set toggleValue to value of targetToggle as integer
+                                end try
+                                if toggleValue is 1 then return "enabled"
+                                if not clickedToggle then
+                                    set togglePosition to position of targetToggle
+                                    set toggleSize to size of targetToggle
+                                    try
+                                        perform action "AXPress" of targetToggle
+                                    on error
+                                        click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
+                                    end try
+                                    set clickedToggle to true
+                                    log "Clicked the Xe Launcher background switch; waiting for macOS approval"
+                                end if
+                            end if
+                        end if
+                    end repeat
+                end tell
+            end if
+            if attemptNumber mod 40 is 0 then
+                if clickedToggle then
+                    log "Still waiting for the Xe Launcher background switch to turn on"
+                else if foundAppRow then
+                    log "Found the Xe Launcher row; still looking for its background switch"
+                else
+                    log "Still looking for Xe Launcher in Login Items & Extensions"
+                end if
+            end if
+            delay 0.25
+        end repeat
+    end tell
+
+    if not foundAppRow then error "The " & appName & " row did not appear in Login Items & Extensions > Allow in Background"
+    if not clickedToggle then error "The " & appName & " background switch was not found in System Settings"
+    error "The " & appName & " background switch did not turn on; complete the macOS administrator authentication prompt"
+end run
+APPLESCRIPT
+}
+
 detach_disk_image() {
     local target="$1"
     if [[ -d "$target" || -b "$target" ]]; then
@@ -577,12 +702,20 @@ done
 [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] \
     || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset}, expected 80/443"
 
-# A fresh CI account cannot run the privileged listener until an administrator
-# approves Xe Launcher's background helper. Open the relevant pane and stop
-# immediately; the runner must be provisioned once, then this test rerun.
 log "checking whether the background port helper needs administrator approval"
 if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 5 >/dev/null 2>&1; then
-    fail "approve Xe Launcher's background port helper in System Settings > General > Login Items & Extensions (or Background Items Added > Options > Allow), authenticate as an administrator, then rerun this test"
+    log "enabling Xe Launcher under Allow in Background"
+    grant_background_port_helper_permission "$APP_NAME" 120
+
+    log "restarting the installed launcher after port helper approval"
+    run_with_timeout 10 osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();'
+    deadline=$((SECONDS + 90))
+    while (( SECONDS < deadline )) && pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; do
+        sleep 0.5
+    done
+    pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null \
+        && fail "installed launcher did not quit after port helper approval"
+    open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
 fi
 
 log "accepting the native macOS Accessibility permission prompt"

@@ -54,11 +54,11 @@ that as an already-clean permission state and continues.
    account should provide non-interactive sudo.
 6. Approve Xe Launcher's background port helper once as an administrator.
    After the first signed install selects ports 80/443, macOS shows a
-   **Background Items Added** notification. Choose **Options → Allow**, or
-   enable Xe Launcher in **System Settings → General → Login Items & Extensions**,
-   authenticate, then restart Xe Launcher and rerun the test. The test opens
-   that Settings pane and stops with an explicit error when approval is missing;
-   it cannot grant administrator consent unattended.
+   **Background Items Added** notification. The test opens **System Settings →
+   General → Login Items & Extensions** and enables Xe Launcher under **Allow in
+   Background**, then restarts the app. If macOS asks for administrator
+   authentication, complete that prompt in the runner's GUI session. The test
+   waits for the switch to turn on but cannot supply administrator credentials.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System
