@@ -48,6 +48,7 @@ private final class PortReplyGate: @unchecked Sendable {
 enum PrivilegedPortService {
     static let plistName = "dev.xe.computer.ports.plist"
     static let serviceName = "dev.xe.computer.ports"
+    private static let approvalMessage = "To use ports 80/443, allow Xe Launcher's background port helper. In the macOS Background Items Added notification choose Options → Allow, or enable Xe Launcher in System Settings → General → Login Items & Extensions. Authenticate as an administrator, then restart Xe Launcher."
 
     static var status: SMAppService.Status {
         SMAppService.daemon(plistName: plistName).status
@@ -72,11 +73,20 @@ enum PrivilegedPortService {
         // been registered, even when both bundle files are present.
         if service.status == .notRegistered || service.status == .notFound {
             do { try service.register() }
-            catch { return "Port helper registration failed: \(error.localizedDescription)" }
+            catch {
+                let failure = error as NSError
+                // A first-time daemon registration can throw this error while
+                // macOS waits for an administrator to approve the background item.
+                if service.status == .requiresApproval ||
+                    (failure.domain == SMAppServiceErrorDomain && failure.code == 1) {
+                    return approvalMessage
+                }
+                return "Port helper registration failed (\(failure.domain) code \(failure.code)): \(failure.localizedDescription)"
+            }
         }
         switch service.status {
         case .enabled: return nil
-        case .requiresApproval: return "Approve the Xe Launcher port helper in System Settings, then restart the launcher."
+        case .requiresApproval: return approvalMessage
         case .notRegistered: return "The Xe Launcher port helper is not registered."
         case .notFound: return "macOS could not find the Xe Launcher port helper service after registration."
         @unknown default: return "The Xe Launcher port helper is unavailable."

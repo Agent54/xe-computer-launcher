@@ -20,7 +20,7 @@ enum LauncherSetup {
             let standardPortsAvailable = standardPortsSelectable()
             alert.informativeText = "Choose a folder for your Compose projects and their files. The default is a stacks folder in Xe Launcher's app data directory:\n\n\(ComposeServerPaths.stacksURL.path)\n\n" +
                 (standardPortsAvailable
-                    ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below."
+                    ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below. Choosing 80/443 adds a background port helper. When macOS asks, choose Allow and authenticate as an administrator; 80/443 will not work until you restart Xe Launcher after approval."
                     : "Ports 80/443 are unavailable. Local apps will use ports 5196 (HTTP) and 5194 (HTTPS).")
             let standardPortsCheckbox: NSButton? = standardPortsAvailable
                 ? NSButton(checkboxWithTitle: "Use ports 80/443 for local apps (requires administrator approval)", target: nil, action: nil)

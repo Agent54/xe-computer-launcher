@@ -4,7 +4,7 @@
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
 installer test also accepts the first-run user data storage prompt using the
-default `stacks` folder when virtualization is supported. The
+default `stacks` folder and selects local HTTP/HTTPS ports 80/443. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on
@@ -52,6 +52,13 @@ that as an already-clean permission state and continues.
 5. Ensure the test user can run `sudo` to remove the existing application. A
    dedicated local test account can cache credentials before running; a CI
    account should provide non-interactive sudo.
+6. Approve Xe Launcher's background port helper once as an administrator.
+   After the first signed install selects ports 80/443, macOS shows a
+   **Background Items Added** notification. Choose **Options → Allow**, or
+   enable Xe Launcher in **System Settings → General → Login Items & Extensions**,
+   authenticate, then restart Xe Launcher and rerun the test. The test opens
+   that Settings pane and stops with an explicit error when approval is missing;
+   it cannot grant administrator consent unattended.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System

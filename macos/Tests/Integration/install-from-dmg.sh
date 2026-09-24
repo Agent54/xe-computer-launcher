@@ -577,6 +577,14 @@ done
 [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] \
     || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset}, expected 80/443"
 
+# A fresh CI account cannot run the privileged listener until an administrator
+# approves Xe Launcher's background helper. Open the relevant pane and stop
+# immediately; the runner must be provisioned once, then this test rerun.
+log "checking whether the background port helper needs administrator approval"
+if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 5 >/dev/null 2>&1; then
+    fail "approve Xe Launcher's background port helper in System Settings > General > Login Items & Extensions (or Background Items Added > Options > Allow), authenticate as an administrator, then rerun this test"
+fi
+
 log "accepting the native macOS Accessibility permission prompt"
 drain_accessibility_permission_prompts "$APP_NAME" 60
 

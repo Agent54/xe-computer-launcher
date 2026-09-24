@@ -234,11 +234,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             DispatchQueue.main.async {
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
-                alert.messageText = "Local App Ports Are Unavailable"
-                alert.informativeText = portWarnings.joined(separator: "\n") +
-                    (needsPortHelper
+                alert.messageText = needsPortHelper && helperWarning != nil
+                    ? "Port Helper Needs Attention" : "Local App Ports Are Unavailable"
+                alert.informativeText = portWarnings.joined(separator: "\n")
+                if helperWarning == nil {
+                    alert.informativeText += needsPortHelper
                         ? "\n\nFree occupied ports or approve the port helper, then restart Xe Launcher."
-                        : "\n\nFree occupied ports and restart Xe Launcher.")
+                        : "\n\nFree occupied ports and restart Xe Launcher."
+                }
                 alert.alertStyle = .warning
                 if needsPortHelper && helperWarning != nil {
                     alert.addButton(withTitle: "Open System Settings")
