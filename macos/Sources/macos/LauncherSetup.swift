@@ -1,11 +1,11 @@
 import AppKit
 
 @MainActor
-enum ComposeStorage {
+enum LauncherSetup {
     private static let settingKey = "compose_storage_path"
 
-    /// Ask once, before starting Compose. Cancelling leaves the choice unset
-    /// so the user can choose storage the next time they launch the app.
+    /// Ask for first-run choices before starting Compose. Cancelling leaves
+    /// setup incomplete so the user can try again on the next launch.
     static func chooseIfNeeded() throws -> URL? {
         let state = ExternalState.shared
         if let path = state.stringSetting(settingKey), !path.isEmpty {
@@ -17,7 +17,18 @@ enum ComposeStorage {
         while true {
             let alert = NSAlert()
             alert.messageText = "Choose user data storage"
-            alert.informativeText = "Choose a folder for your Compose projects and their files. The default is a stacks folder in Xe Launcher's app data directory:\n\n\(ComposeServerPaths.stacksURL.path)"
+            let standardPortsAvailable = WorkerdPorts.standardPortsAvailable()
+            alert.informativeText = "Choose a folder for your Compose projects and their files. The default is a stacks folder in Xe Launcher's app data directory:\n\n\(ComposeServerPaths.stacksURL.path)\n\n" +
+                (standardPortsAvailable
+                    ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below."
+                    : "Ports 80/443 are unavailable. Local apps will use ports 5196 (HTTP) and 5194 (HTTPS).")
+            let standardPortsCheckbox: NSButton? = standardPortsAvailable
+                ? NSButton(checkboxWithTitle: "Use ports 80/443 for local apps (requires administrator approval)", target: nil, action: nil)
+                : nil
+            if let standardPortsCheckbox {
+                standardPortsCheckbox.frame = NSRect(x: 0, y: 0, width: 440, height: 24)
+                alert.accessoryView = standardPortsCheckbox
+            }
             alert.addButton(withTitle: "Use Default Folder")
             alert.addButton(withTitle: "Choose Folder…")
             alert.addButton(withTitle: "Not Now")
@@ -45,7 +56,16 @@ enum ComposeStorage {
 
             do {
                 try prepare(url)
-                state.setStringSetting(settingKey, url.path)
+                let wantsStandardPorts = standardPortsCheckbox?.state == .on
+                let useStandardPorts = wantsStandardPorts && WorkerdPorts.standardPortsAvailable()
+                state.setInitialStorageAndPorts(path: url.path, useStandardPorts: useStandardPorts)
+                if wantsStandardPorts && !useStandardPorts {
+                    let warning = NSAlert()
+                    warning.alertStyle = .warning
+                    warning.messageText = "Standard Ports Became Unavailable"
+                    warning.informativeText = "Xe Launcher will use ports 5196 and 5194 instead."
+                    warning.runModal()
+                }
                 return url
             } catch {
                 let failure = NSAlert(error: error)

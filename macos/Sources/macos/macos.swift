@@ -108,6 +108,7 @@ struct MacOSApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private var didFinishNormalStartup = false
+    private var storageChoiceDeclinedOnThisLaunch = false
     private var isPreparingForTermination = false
     private var runtimeStartupTask: Task<Void, Never>?
     private var browserStartupTask: Task<Void, Never>?
@@ -186,22 +187,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // startup owns a Dock icon, according to the user's saved preference.
         let state = ExternalState.shared
         state.updateSettings()
+        configureApplicationIdentity()
+        applyDockIconPreference()
+        setupMainMenu()
+        setupStatusItem()
+        renderMenuLabels()
+
+        // The one-time storage dialog also selects app ports. Finish it before
+        // creating workerd or registering the privileged port helper.
+        if VirtualizationSupport.isAvailable,
+           state.stringSetting("compose_storage_path")?.isEmpty != false {
+            do {
+                storageChoiceDeclinedOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
+            } catch {
+                storageChoiceDeclinedOnThisLaunch = true
+                state.appendLog("launcher", "Warning: user data storage unavailable: \(error.localizedDescription)")
+            }
+        }
+        state.updateSettings()
         let workerdPorts = WorkerdPorts(settings: state.settings.rawData)
         workerdServer = WorkerdServer(routingPort: workerdPorts.http, tlsPort: workerdPorts.https)
         for warning in workerdPorts.settingWarnings {
             state.appendLog("launcher", "Warning: \(warning)")
         }
-        let portWarnings = workerdPorts.bindingWarnings()
+        let needsPortHelper = workerdPorts.http == WorkerdPorts.standardHTTP
+        let helperWarning = needsPortHelper ? PrivilegedPortService.registerIfNeeded() :
+            PrivilegedPortService.unregisterIfRegistered()
+        let portWarnings = workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
+            (helperWarning.map { [$0] } ?? [])
         for warning in portWarnings {
             state.appendLog("launcher", "Warning: \(warning)")
         }
-        configureApplicationIdentity()
-        applyDockIconPreference()
-
-        setupMainMenu()
-        setupStatusItem()
-        renderMenuLabels()
-
         // Updating a copy on a read-only disk image cannot succeed. The copy
         // installed into /Applications or ~/Applications starts Sparkle on its
         // first normal launch instead.
@@ -221,9 +237,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 let alert = NSAlert()
                 alert.messageText = "Local App Ports Are Unavailable"
                 alert.informativeText = portWarnings.joined(separator: "\n") +
-                    "\n\nFree these ports or change app_http_port and app_https_port in settings.json, then restart Xe Launcher."
+                    (needsPortHelper
+                        ? "\n\nFree occupied ports or approve the port helper, then restart Xe Launcher."
+                        : "\n\nFree occupied ports and restart Xe Launcher.")
                 alert.alertStyle = .warning
-                alert.runModal()
+                if needsPortHelper && helperWarning != nil {
+                    alert.addButton(withTitle: "Open System Settings")
+                    alert.addButton(withTitle: "Later")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        PrivilegedPortService.openSystemSettings()
+                    }
+                } else {
+                    alert.runModal()
+                }
             }
         }
 
@@ -244,7 +270,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
                     return
                 }
-                guard let stacksURL = try ComposeStorage.chooseIfNeeded() else {
+                guard !storageChoiceDeclinedOnThisLaunch else {
+                    ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
+                    return
+                }
+                guard let stacksURL = try LauncherSetup.chooseIfNeeded() else {
                     ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
                     return
                 }
@@ -427,6 +457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 let composeCleanup = Task { @MainActor in await composeServer?.stop() }
                 await workerdCleanup.value
                 await composeCleanup.value
+                if let warning = PrivilegedPortService.unregisterIfRegistered() {
+                    ExternalState.shared.appendLog("launcher", "Warning: \(warning)")
+                }
                 ExternalState.shared.appendLog(
                     "launcher",
                     "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"

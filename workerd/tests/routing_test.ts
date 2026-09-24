@@ -1,6 +1,8 @@
 // Unit tests only: Docker, Compose, guest transport and upstream fetch are mocked.
 import assert from 'node:assert/strict';
 import gateway from '../gateway.js';
+import appGateway from '../app-gateway.js';
+import tlsGateway from '../tls-gateway.js';
 import router from '../router.js';
 import { surfaceRuntimeFailure } from '../runtime-status.js';
 import { clientHelloServerName } from '../tls-client-hello.js';
@@ -29,6 +31,44 @@ Deno.test('TLS ClientHello selects only its SNI hostname', () => {
   assert.equal(clientHelloServerName(fragmented), 'darc_darc.localhost');
 });
 
+Deno.test('TLS gateway connects to the private terminator with an explicit address', async () => {
+  for (const hostname of ['compose-ui.localhost', 'service.app.localhost']) {
+    const encoded = new TextEncoder().encode(hostname);
+    const name = new Uint8Array([0, 0, encoded.length, ...encoded]);
+    const names = new Uint8Array([0, name.length, ...name]);
+    const extension = new Uint8Array([0, 0, 0, names.length, ...names]);
+    const body = new Uint8Array([3, 3, ...new Uint8Array(32), 0, 0, 2, 0x13, 1, 1, 0,
+      0, extension.length, ...extension]);
+    const handshake = new Uint8Array([1, 0, 0, body.length, ...body]);
+    const hello = new Uint8Array([22, 3, 1, 0, handshake.length, ...handshake]);
+    const writes: Uint8Array[] = [];
+    const client = {
+      readable: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(hello); controller.close(); } }),
+      writable: new WritableStream<Uint8Array>(),
+      close: () => Promise.resolve(),
+    };
+    const upstream = {
+      readable: new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }),
+      writable: new WritableStream<Uint8Array>({ write(bytes) { writes.push(bytes); } }),
+      close: () => Promise.resolve(),
+    };
+    let address: string | undefined;
+    const env = {
+      UI_TLS: { connect: (value: string) => { address = value; return Promise.resolve(upstream); } },
+      ROUTER: { fetch: () => Promise.resolve(Response.json({
+        id: 'service-1', service: 'service', project: 'tls-test',
+        publishedPorts: [{ target: 3000, published: 8080 }],
+      })) },
+      COMPOSE: { fetch: () => Promise.resolve(Response.json({ services: {
+        service: { ports: [{ target: 3000, published: 8080, app_protocol: 'http' }] },
+      } })) },
+    };
+    await tlsGateway.connect(client, env);
+    assert.equal(address, 'localhost:443');
+    assert.deepEqual(writes[0], hello);
+  }
+});
+
 Deno.test('management UI does not require a launcher session token', async () => {
   const env = {
     MANAGEMENT: { fetch: () => Promise.resolve(new Response('compose-ui')) },
@@ -37,6 +77,24 @@ Deno.test('management UI does not require a launcher session token', async () =>
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'compose-ui');
   assert.equal(response.headers.get('set-cookie'), null);
+  assert.equal((await gateway.fetch(new Request('http://web.localhost:8094/'), env)).status, 403);
+});
+
+Deno.test('Compose UI uses the shared HTTP and HTTPS application host', async () => {
+  const env = {
+    MANAGEMENT: { fetch: () => Promise.resolve(new Response('compose-ui')) },
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ http: 5196, https: 5194 })) },
+  };
+  for (const protocol of ['http', 'https']) {
+    const url = `${protocol}://compose-ui.localhost:${protocol === 'http' ? 5196 : 5194}/`;
+    const response = await appGateway.fetch(new Request(url), env);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'compose-ui');
+    assert.equal(response.headers.get('x-frame-options'), 'DENY');
+    assert.equal((await appGateway.fetch(new Request(url, {
+      headers: { Origin: 'https://evil.test' },
+    }), env)).status, 403);
+  }
 });
 
 Deno.test('signed Xe Computer origin can use only the Compose UI routes', async () => {
@@ -145,6 +203,7 @@ Deno.test('application port selection', async t => {
   ];
   let configStatus = 200;
   let guestDown = false;
+  let listenerPorts = { http: 80, https: 443 };
   const guestEnv = { DOCKER: { fetch: () => Promise.resolve(Response.json(containers)) } };
   const env = {
     ROUTER: { fetch: (input: Request | string) => {
@@ -158,13 +217,15 @@ Deno.test('application port selection', async t => {
       assert.equal(url.searchParams.get('path'), '/stacks/demo/compose.yaml');
       return Promise.resolve(Response.json({ services: { service: { ports } } }, { status: configStatus }));
     } },
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json(listenerPorts)) },
   };
   globalThis.fetch = (input: RequestInfo | URL) => {
     assert(input instanceof Request);
     return Promise.resolve(Response.json({ url: input.url, headers: Object.fromEntries(input.headers) }));
   };
   function request(host = 'service.localhost', headers?: Record<string, string>) {
-    return gateway.fetch(new Request(`http://${host}/hello?q=1`, { headers }), env);
+    const authority = listenerPorts.http === 80 ? host : `${host}:${listenerPorts.http}`;
+    return appGateway.fetch(new Request(`http://${authority}/hello?q=1`, { headers }), env);
   }
   try {
     await t.step('default follows YAML order rather than Docker or numeric order', async () => {
@@ -180,6 +241,24 @@ Deno.test('application port selection', async t => {
       assert.equal((await (await request('service.web.localhost')).json()).url, 'http://172.18.0.2:3000/hello?q=1');
       assert.equal((await request('service.dns.localhost')).status, 404);
       assert.equal((await request('service.missing.localhost')).status, 404);
+    });
+    await t.step('the HTTPS listener terminates HTTP apps and preserves their public scheme', async () => {
+      const response = await appGateway.fetch(new Request('https://service.web.localhost/hello?q=1'), env);
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.url, 'http://172.18.0.2:3000/hello?q=1');
+      assert.equal(result.headers['x-forwarded-proto'], 'https');
+      assert.equal(result.headers['x-xe-origin-proto'], undefined);
+      assert.equal(result.headers['x-xe-public-host'], undefined);
+      const posted = await appGateway.fetch(new Request('https://service.web.localhost/submit', {
+        method: 'POST', body: 'payload',
+      }), env);
+      assert.equal(posted.status, 200);
+      const alias = await appGateway.fetch(new Request('https://service.app.localhost/hello'), env);
+      assert.equal(alias.status, 200);
+      const aliased = await alias.json();
+      assert.equal(aliased.url, 'http://172.18.0.2:9000/hello');
+      assert.equal(aliased.headers['x-forwarded-host'], 'service.app.localhost');
     });
     await t.step('HTTPS application ports redirect to the shared TLS endpoint', async () => {
       const named = await request('service.secure.localhost');
@@ -201,8 +280,26 @@ Deno.test('application port selection', async t => {
       const route = await resolveApplicationPort('service.localhost', env);
       assert.equal(route?.port.target, 9443);
       assert.equal(route?.protocol, 'https');
+      const alias = await appGateway.fetch(new Request('https://service.app.localhost/hello'), env);
+      assert.equal(alias.status, 307);
+      assert.equal(alias.headers.get('location'), 'https://service.localhost/hello');
       ports = [ports[1], ports[2], ports[0], ports[3]];
       now += 3000;
+    });
+    await t.step('fallback listeners preserve their ports in HTTPS redirects', async () => {
+      listenerPorts = { http: 5196, https: 5194 };
+      const http = await (await request('service.web.localhost', { 'x-xe-public-host': 'evil.test:1234' })).json();
+      assert.equal(http.headers['x-forwarded-host'], 'service.web.localhost:5196');
+      assert.equal(http.headers['x-forwarded-proto'], 'http');
+      assert.equal(http.headers['x-xe-public-host'], undefined);
+      const https = await (await appGateway.fetch(new Request('https://service.web.localhost:5194/hello'), env)).json();
+      assert.equal(https.headers['x-forwarded-host'], 'service.web.localhost:5194');
+      assert.equal(https.headers['x-forwarded-proto'], 'https');
+      const response = await request('service.secure.localhost');
+      assert.equal(response.status, 307);
+      assert.equal(response.headers.get('location'), 'https://service.secure.localhost:5194/hello?q=1');
+      assert.equal((await appGateway.fetch(new Request('http://service.secure.localhost/'), env)).status, 403);
+      listenerPorts = { http: 80, https: 443 };
     });
     await t.step('caller cannot override selected ports and internal headers do not reach apps', async () => {
       const response = await request('service.web.localhost', { 'x-xe-target-port': '7000', 'x-xe-container-id': 'forged' });

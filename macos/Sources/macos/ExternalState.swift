@@ -298,6 +298,15 @@ final class ExternalState: @unchecked Sendable {
         saveSettings()
     }
 
+    func setInitialStorageAndPorts(path: String, useStandardPorts: Bool) {
+        var dict = settings.rawData ?? [:]
+        dict["compose_storage_path"] = path
+        dict["app_http_port"] = Int(useStandardPorts ? WorkerdPorts.standardHTTP : WorkerdPorts.defaultHTTP)
+        dict["app_https_port"] = Int(useStandardPorts ? WorkerdPorts.standardHTTPS : WorkerdPorts.defaultHTTPS)
+        settings = Settings(rawData: dict)
+        saveSettings()
+    }
+
     func setBoolSetting(_ key: String, _ value: Bool) {
         let current = (settings.rawData?[key] as? Bool)
         if current == value { return }

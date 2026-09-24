@@ -29,3 +29,15 @@ export async function bridgeSocketAndWebSocket(socket, webSocket, initialBytes) 
   try { await socket.close(); } catch {}
   await Promise.allSettled([pump, writes]);
 }
+
+// UI and HTTP-app hostnames are terminated by a separate local HTTPS Workerd
+// socket. HTTPS-app SNI names continue unmodified to their containers.
+export async function bridgeSocketAndSocket(client, upstream, initialBytes) {
+  const writer = upstream.writable.getWriter();
+  try { await writer.write(initialBytes); } finally { writer.releaseLock(); }
+  const inbound = client.readable.pipeTo(upstream.writable).catch(error => { console.warn('TLS inbound bridge:', error); });
+  const outbound = upstream.readable.pipeTo(client.writable).catch(error => { console.warn('TLS outbound bridge:', error); });
+  await Promise.race([inbound, outbound]);
+  await Promise.allSettled([client.close(), upstream.close()]);
+  await Promise.allSettled([inbound, outbound]);
+}

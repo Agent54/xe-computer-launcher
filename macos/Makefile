@@ -27,6 +27,7 @@ COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
 COMPOSE_SERVER = $(HELPERS)/docker-compose
 WORKERD_STAGE = $(BUILD_DIR)/workerd/workerd
 WORKERD = $(HELPERS)/workerd
+PORT_HELPER = $(MACOS_DIR)/port-helper
 COMPOSE_UI_STAGE = $(BUILD_DIR)/compose-ui
 GUEST_ROUTER_ASSET_DIR ?=
 DMG_NAME = $(APP_NAME).dmg
@@ -48,7 +49,7 @@ NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYC
 DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
 DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
-.PHONY: all clean build smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd verify-workerd verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
+.PHONY: all clean build smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd sign-port-helper verify-workerd verify-port-helper verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
@@ -68,7 +69,7 @@ workerd:
 	@file ../workerd/node_modules/workerd/bin/workerd | grep -q 'Mach-O 64-bit executable arm64'
 	@mkdir -p "$(BUILD_DIR)/workerd/resources"
 	@cp ../workerd/node_modules/workerd/bin/workerd "$(WORKERD_STAGE)"
-	@cp ../workerd/dist/worker.bin "$(BUILD_DIR)/workerd/resources/worker.bin"
+	@rsync -a --delete ../workerd/dist/host-worker/ "$(BUILD_DIR)/workerd/resources/"
 	@cp ../workerd/node_modules/workerd/README.md "$(BUILD_DIR)/workerd/resources/WORKERD-README.md"
 
 compose-ui:
@@ -104,6 +105,9 @@ package: build smol-runtime compose-server workerd guest-worker compose-ui
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
 	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
+	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
+	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"
+	@cp Sources/macos/PortHelperLaunchDaemon.plist "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
 	@cp ../workerd/package.json "$(RESOURCES)/Workerd.package.json"
 	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
 	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
@@ -152,14 +156,21 @@ verify-compose-server:
 sign-workerd:
 	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --entitlements Sources/macos/WorkerdEntitlements.plist --sign "$(SIGN_IDENTITY)" "$(WORKERD)"
 
+sign-port-helper:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(PORT_HELPER)"
+
 verify-workerd:
 	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)"
+
+verify-port-helper:
+	@/bin/bash Scripts/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
 
 bundle: package
 	@echo "Creating app bundle..."
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-compose-server
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-workerd
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-port-helper
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
 	@echo "Signing app bundle with: $(DEVELOPMENT_SIGN_IDENTITY)"
 	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPMENT_SIGN_IDENTITY)" "$(APP_BUNDLE)"
@@ -180,6 +191,7 @@ release-sign: package
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-compose-server
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-workerd
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-port-helper
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
 	@echo "Signing with Developer ID: $(DEVELOPER_ID)"
 	@codesign --force --options runtime --timestamp --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
@@ -199,6 +211,7 @@ check: release-sign
 	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
 	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
 	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)" --release
+	@/bin/bash Scripts/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist" --release
 
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"

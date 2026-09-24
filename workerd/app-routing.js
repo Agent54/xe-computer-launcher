@@ -1,3 +1,5 @@
+import { readAppPorts } from './app-ports.js';
+
 // Compose's parsed config retains port names and YAML list order. Docker's
 // container listing supplies the running service identity and published ports.
 const configs = new Map();
@@ -9,8 +11,14 @@ function applicationProtocol(port) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
+function routeLabels(hostname) {
+  return hostname.endsWith('.app.localhost')
+    ? [hostname.slice(0, -'.app.localhost'.length), 'localhost']
+    : hostname.split('.');
+}
+
 export async function resolveApplicationPort(hostname, env) {
-  const labels = hostname.split('.');
+  const labels = routeLabels(hostname);
   const name = labels[0];
   const selector = labels.length === 3 ? labels[1] : undefined;
   const resolved = await env.ROUTER.fetch(`http://localhost/__xe_router_service?name=${encodeURIComponent(name)}`);
@@ -37,7 +45,7 @@ function publishedPortFor(service, port) {
   return published.length === 1 ? published[0] : undefined;
 }
 
-function protocolResponse(request, service, port, canonical = false) {
+async function protocolResponse(request, service, port, env, canonical = false) {
   const protocol = applicationProtocol(port);
   if (!protocol || protocol === 'http') return null;
   if (protocol !== 'https') {
@@ -46,9 +54,15 @@ function protocolResponse(request, service, port, canonical = false) {
   const published = publishedPortFor(service, port);
   if (!published) return new Response('Published HTTPS port not available', { status: 404 });
   const url = new URL(request.url);
+  if (url.protocol === 'https:' && !url.hostname.endsWith('.app.localhost')) {
+    return new Response('HTTPS application route changed; retry', { status: 503, headers: { 'Retry-After': '2' } });
+  }
   url.protocol = 'https:';
-  if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
-  url.port = '';
+  if (url.hostname.endsWith('.app.localhost')) {
+    url.hostname = `${url.hostname.slice(0, -'.app.localhost'.length)}.localhost`;
+  } else if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
+  const { https } = await readAppPorts(env);
+  url.port = https === 443 ? '' : String(https);
   return new Response(null, {
     status: 307,
     headers: { Location: url.href, 'Cache-Control': 'no-store' },
@@ -82,13 +96,15 @@ async function servicePorts(env, service) {
 
 export async function routeApplication(request, env) {
   const url = new URL(request.url);
-  const labels = url.hostname.split('.');
+  const labels = routeLabels(url.hostname);
   const name = labels[0];
   const selector = labels.length === 3 ? labels[1] : undefined;
   const headers = new Headers(request.headers);
   // Never trust routing instructions supplied by a browser or container app.
   headers.delete(targetHeader);
   headers.delete(containerHeader);
+  headers.delete('x-xe-origin-proto');
+  headers.delete('x-xe-public-host');
   if (selector === undefined || !/^\d+$/.test(selector)) {
     const resolved = await env.ROUTER.fetch(`http://localhost/__xe_router_service?name=${encodeURIComponent(name)}`);
     if (!resolved.ok) return resolved;
@@ -103,7 +119,7 @@ export async function routeApplication(request, env) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return new Response('Invalid Compose target port', { status: 404 });
     }
-    const response = protocolResponse(request, service, selected[0], selected[0] === ports[0]);
+    const response = await protocolResponse(request, service, selected[0], env, selected[0] === ports[0]);
     if (response) return response;
     headers.set(targetHeader, String(port));
     headers.set(containerHeader, service.id);
@@ -118,7 +134,7 @@ export async function routeApplication(request, env) {
         const selected = ports.filter(p =>
           (p.protocol || 'tcp') === 'tcp' && Number(p.published) === Number(selector));
         if (selected.length === 1) {
-          const response = protocolResponse(request, service, selected[0], selected[0] === ports[0]);
+          const response = await protocolResponse(request, service, selected[0], env, selected[0] === ports[0]);
           if (response) return response;
         }
       }
@@ -126,5 +142,13 @@ export async function routeApplication(request, env) {
       // The guest router remains the source of truth for numeric HTTP routes.
     }
   }
-  return env.ROUTER.fetch(new Request(request, { headers }));
+  headers.set('x-xe-origin-proto', url.protocol === 'https:' ? 'https' : 'http');
+  headers.set('x-xe-public-host', url.host);
+  // The guest router speaks HTTP on its private Unix socket even when the
+  // public connection was terminated as HTTPS by the host.
+  url.protocol = 'http:';
+  url.port = '';
+  return env.ROUTER.fetch(new Request(url, {
+    method: request.method, headers, body: request.body, redirect: 'manual',
+  }));
 }

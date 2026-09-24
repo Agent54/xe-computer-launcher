@@ -35,19 +35,51 @@ On first launch, choose a folder for your Compose projects. The IWA UI provides
 access to Compose. Its server runs on your Mac and stays available during VM
 restarts; container operations resume when the VM is ready.
 
-Access running services at `http://<service>.localhost/`. Use
+On first launch, the folder dialog offers standard web ports 80/443 when both
+are available. Without that selection, the shared listeners use the previous
+HTTP port 5196 and HTTPS port 5194. The Compose UI and app links use the same
+listener port and protocol. Open the UI at `http://compose-ui.localhost/` or
+`https://compose-ui.localhost/`; on fallback ports, use `:5196` or `:5194`
+respectively.
+
+Access running services at `http://<service>.localhost/` when using port 80,
+or `http://<service>.localhost:5196/` with the fallback. Use
 `<service>_<project>` when projects share a service name. The default is the first
 TCP port in the Compose `ports` list. Select a specific published port with
 `<service>.8080.localhost`, or a [named port](workerd/README.md#port-routes) with
-`<service>.web.localhost` (both on port 80). HTTPS services use port 443 and
-keep TLS termination in the container.
+`<service>.web.localhost` (on the selected shared HTTP port). HTTPS services
+use the selected shared HTTPS port and keep TLS termination in the container.
+HTTP services also work from the shared HTTPS listener. Their HTTPS UI links
+use `<service>_<project>.app.localhost` on that same port, where Workerd
+terminates TLS with a generated local certificate. HTTPS services keep their
+existing `<service>_<project>.localhost` names and container certificates.
 
-The launcher binds these shared app ports to loopback. To override them without
-adding UI controls, set `app_http_port` and `app_https_port` (integers from 1 to
-65535) in `~/Library/Application Support/dev.xe.computer/settings.json`, then
-restart the launcher. It checks both ports at startup and warns if either cannot
-be bound. Port-free app URLs still require traffic on 80 and 443; if you choose
-other listener ports, arrange local forwarding from those standard ports.
+On first launch, Xe Launcher generates a private local certificate authority
+and a server certificate for `compose-ui.localhost` and single-label
+`*.app.localhost` HTTP app names. Browsers will warn until you import
+`~/Library/Application Support/dev.xe.computer/workerd/ui-https/root.crt` into
+Keychain Access and set that certificate to **Always Trust**. Only trust this
+locally generated authority on your own Mac. Its private key remains in the
+launcher state directory with owner-only permissions; the server certificate
+renews without having to trust it again. HTTPS container apps still present
+their own certificates, which must be trusted separately.
+
+When standard ports are selected, a small Swift `launchd` helper reserves only `127.0.0.1:80` and
+`127.0.0.1:443` after administrator approval. It hands those listening sockets
+to the unprivileged Workerd process; it does not handle app traffic or TLS.
+Approve the helper in System Settings → General → Login Items & Extensions and
+restart Xe Launcher. The management UI remains available while approval is
+pending, but standard-port app URLs do not.
+
+To override the shared app listener ports without adding UI controls, set
+`app_http_port` and `app_https_port` in
+`~/Library/Application Support/dev.xe.computer/settings.json`, then restart the
+launcher. Defaults are 5196 and 5194; custom ports must be at least 1024 and at
+most 65535, except for the supported 80/443 pair. The launcher checks direct-bind
+ports at startup and warns if they are unavailable. App URLs include a port
+when the selected port is nonstandard.
+Mixed standard/custom pairs are rejected and reset to the default pair. Set
+both ports above 1023 to disable the helper.
 
 The container VM uses at least 4096 MiB of elastic memory. Advanced users can
 raise the limit by setting `container_vm_memory_mib` in
@@ -68,6 +100,12 @@ a CI run for the same source revision:
 ```sh
 make -C macos BUILD_CONFIG=debug GUEST_ROUTER_ASSET_DIR=/path/to/guest-worker bundle
 ```
+
+To build from a local Compose UI checkout, explicitly set
+`COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte` when running
+`make`. Otherwise the build uses the checksum-pinned release. CI uses that
+release until `macos/ComposeUI.lock` is updated to one containing the matching
+shared-domain links.
 
 CI builds the guest worker and macOS app together. See [worker development](workerd/README.md)
 and [integration tests](macos/Tests/Integration/README.md) for contributor details.

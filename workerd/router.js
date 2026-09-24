@@ -67,10 +67,13 @@ export default {
     // public gateway rejects localhost and never exposes this response itself.
     const lookup = url.origin === 'http://localhost' && url.pathname === '/__xe_router_service' && request.method === 'GET';
     if (!lookup && (url.protocol !== 'http:' || url.port !== '' ||
-        !/^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost$/.test(url.hostname))) {
+        !/^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/.test(url.hostname))) {
       return new Response('Invalid application hostname', { status: 403 });
     }
-    const [name, portPart] = url.hostname.split('.');
+    const appAlias = url.hostname.endsWith('.app.localhost');
+    const [name, portPart] = appAlias
+      ? [url.hostname.slice(0, -'.app.localhost'.length), undefined]
+      : url.hostname.split('.');
     try {
       const containers = await discover(env);
       const container = matchService(containers, lookup ? url.searchParams.get('name') : name);
@@ -107,8 +110,13 @@ export default {
       headers.delete('x-xe-container-id');
       headers.delete('forwarded');
       headers.delete('x-forwarded-for');
-      headers.set('x-forwarded-host', url.host);
-      headers.set('x-forwarded-proto', 'http');
+      const publicHost = headers.get('x-xe-public-host');
+      headers.delete('x-xe-public-host');
+      headers.set('x-forwarded-host', publicHost === url.hostname ||
+        (publicHost?.startsWith(`${url.hostname}:`) && /^\d{1,5}$/.test(publicHost.slice(url.hostname.length + 1)))
+        ? publicHost : url.host);
+      headers.set('x-forwarded-proto', headers.get('x-xe-origin-proto') === 'https' ? 'https' : 'http');
+      headers.delete('x-xe-origin-proto');
       url.hostname = address;
       url.port = String(port);
       // Manual redirects ensure a backend cannot make the router fetch another

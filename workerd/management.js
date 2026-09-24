@@ -10,6 +10,12 @@ const mimeTypes = {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.protocol === 'https:' &&
+        (url.hostname !== 'compose-ui.localhost' ||
+         (request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+         request.headers.get('Sec-Fetch-Site') === 'cross-site')) {
+      return new Response('Forbidden', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+    }
     if (url.pathname === '/v1.24/runtime-status' && request.method === 'GET') {
       return Response.json(await readRuntimeStatus(env), { headers: { 'Cache-Control': 'no-store' } });
     }

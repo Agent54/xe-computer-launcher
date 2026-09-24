@@ -1,7 +1,4 @@
-import { routeApplication } from './app-routing.js';
-import { runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
-
-// The gateway is the only public worker. Backends have no listener of their own.
+// Only the management socket can reach this worker. Backends have no listener of their own.
 const managementOrigin = 'http://127.0.0.1:8094';
 const repositoryCheckoutPath = '/v1.24/repos/checkout';
 const darcOrigins = new Set([
@@ -78,16 +75,6 @@ export default {
       headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
-    // App routing is local and hostname-scoped. Management is never exposed on
-    // an app origin, including api.moby.localhost and arbitrary Host headers.
-    if (url.protocol !== 'http:' || url.port !== '' ||
-        !/^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost$/.test(url.hostname) ||
-        url.hostname === 'api.moby.localhost') return denied();
-    try {
-      const response = await routeApplication(request, env);
-      return response.status >= 500 ? await surfaceRuntimeFailure(response, env) : response;
-    } catch {
-      return await runtimeUnavailable(env);
-    }
+    return denied();
   },
 };

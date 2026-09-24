@@ -6,7 +6,7 @@
   "scripts": {
     "build:guest": "mkdir -p dist && ./node_modules/workerd/bin/workerd compile --config-only docker/config.capnp > dist/guest-worker.bin.tmp && mv dist/guest-worker.bin.tmp dist/guest-worker.bin",
     "build:runtime": "deno task build:guest && bash docker/package-runtime.sh",
-    "build": "mkdir -p dist && ./node_modules/workerd/bin/workerd compile --config-only config.capnp > dist/worker.bin.tmp && mv dist/worker.bin.tmp dist/worker.bin",
+    "build": "mkdir -p dist/host-worker && cp config.capnp *.js dist/host-worker/",
     "dev": "bash ./dev.sh",
     "test:unit": "deno test --no-config --no-lock tests/routing_test.ts",
     "test:integration": "deno run --no-config --no-lock --allow-read --allow-write=/tmp --allow-env --allow-net=127.0.0.1 --allow-run tests/integration.ts"

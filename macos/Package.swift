@@ -24,6 +24,7 @@ let package = Package(
                 "Entitlements.plist",
                 "SmolVMEntitlements.plist",
                 "WorkerdEntitlements.plist",
+                "PortHelperLaunchDaemon.plist",
                 "Resources/app.icns",
                 "Resources/status-icon.png",
                 "sandbox"
@@ -40,6 +41,7 @@ let package = Package(
                 ])
             ]
         ),
+        .executableTarget(name: "port-helper", path: "Sources/PortHelper"),
         .testTarget(name: "RuntimeTests", dependencies: ["macos"], path: "Tests/RuntimeTests")
     ]
 )

@@ -1,6 +1,6 @@
-// Run against real workerd and unchanged release assets, using disposable backends.
+// Run against real workerd and pinned release assets, using disposable backends.
 // Arguments: workerd [worker-directory] assets compose-binary.
-// Or: --compiled workerd host-config assets compose-binary guest-config.
+// Or: --packaged workerd host-source-directory assets compose-binary guest-config.
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
@@ -10,12 +10,12 @@ import { once } from 'node:events';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const compiled = Deno.args[0] === '--compiled';
-const inputArgs = compiled ? Deno.args.slice(1) : Deno.args;
-assert(compiled ? inputArgs.length === 5 : inputArgs.length === 3 || inputArgs.length === 4,
-  'Pass workerd [worker-directory] assets compose-binary, or --compiled workerd host-config assets compose-binary guest-config');
-const guestConfig = compiled ? resolve(inputArgs[4]) : undefined;
-const args = compiled ? inputArgs.slice(0, 4) : inputArgs;
+const packaged = Deno.args[0] === '--packaged';
+const inputArgs = packaged ? Deno.args.slice(1) : Deno.args;
+assert(packaged ? inputArgs.length === 5 : inputArgs.length === 3 || inputArgs.length === 4,
+  'Pass workerd [worker-directory] assets compose-binary, or --packaged workerd host-source-directory assets compose-binary guest-config');
+const guestConfig = packaged ? resolve(inputArgs[4]) : undefined;
+const args = packaged ? inputArgs.slice(0, 4) : inputArgs;
 const [binary, workerDir, assets, composeBinary] = (args.length === 4 ? args :
   [args[0], dirname(dirname(fileURLToPath(import.meta.url))), args[1], args[2]]).map(p => resolve(p));
 const root = await Deno.makeTempDir({ dir: '/tmp', prefix: 'xe-worker-' });
@@ -60,9 +60,11 @@ let securePort = 0;
 interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean }
 function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
+    let host = options.host || '127.0.0.1:8094';
+    if (options.app && !host.includes(':')) host += `:${routingPort}`;
     const req = httpRequest({ hostname: '127.0.0.1', port: options.app ? routingPort : managementPort,
       path, method: options.method || 'GET', agent: false,
-      headers: { Host: options.host || '127.0.0.1:8094', ...options.headers },
+      headers: { Host: host, ...options.headers },
     }, resolve);
     req.on('error', reject);
     req.setTimeout(3000, () => req.destroy(new Error(`Request timed out: ${path}`)));
@@ -196,6 +198,14 @@ try {
     '-addext', 'subjectAltName=DNS:web.secure.localhost',
   ], stdout: 'null', stderr: 'piped' }).output();
   assert.equal(generated.code, 0, new TextDecoder().decode(generated.stderr));
+  const uiCertificate = join(root, 'ui.crt');
+  const uiPrivateKey = join(root, 'ui.key');
+  const uiGenerated = await new Deno.Command('openssl', { args: [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-keyout', uiPrivateKey, '-out', uiCertificate, '-subj', '/CN=compose-ui.localhost',
+    '-addext', 'subjectAltName=DNS:compose-ui.localhost,DNS:*.app.localhost',
+  ], stdout: 'null', stderr: 'piped' }).output();
+  assert.equal(uiGenerated.code, 0, new TextDecoder().decode(uiGenerated.stderr));
   const tlsApp = createHttpsServer({ key: await Deno.readTextFile(privateKey),
     cert: await Deno.readTextFile(certificate) }, (_request, response) => response.end('tls-upstream-ok'));
   await new Promise<void>(resolve => tlsApp.listen(0, '127.0.0.1', resolve));
@@ -205,18 +215,28 @@ try {
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
     phase: 'healthy', message: 'Container runtime ready', reason: null,
   }));
-  // Run the release config from a temporary directory containing no worker source.
-  const configPath = compiled ? join(root, 'worker.bin') : join(workerDir, 'config.capnp');
-  if (compiled) await Deno.copyFile(workerDir, configPath);
-  startProcess(binary, ['serve', '--experimental', ...(compiled ? ['--binary'] : []), configPath,
+  await Deno.writeTextFile(join(statusPath, 'app-ports.json'), JSON.stringify({
+    http: routingPort, https: tlsPort,
+  }));
+  // Run the packaged sources with generated TLS files, as the launcher does.
+  for await (const entry of Deno.readDir(workerDir)) {
+    if (entry.isFile && (entry.name.endsWith('.js') || entry.name === 'config.capnp')) {
+      await Deno.copyFile(join(workerDir, entry.name), join(root, entry.name));
+    }
+  }
+  const configPath = join(root, 'config.capnp');
+  const uiSocketPath = join(root, 'ui-https.sock');
+  startProcess(binary, ['serve', '--experimental', configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
     '--socket-addr', `tls=127.0.0.1:${tlsPort}`,
+    '--socket-addr', `ui-https=unix:${uiSocketPath}`,
     '--directory-path', `assets=${assets}`,
     '--directory-path', `status=${statusPath}`,
-    '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`]);
-  const guestPath = compiled ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
-  if (compiled) await Deno.copyFile(guestConfig!, guestPath);
-  const startRouter = () => startProcess(binary, ['serve', '--experimental', ...(compiled ? ['--binary'] : []), guestPath,
+    '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`,
+    '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
+  const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
+  if (packaged) await Deno.copyFile(guestConfig!, guestPath);
+  const startRouter = () => startProcess(binary, ['serve', '--experimental', ...(packaged ? ['--binary'] : []), guestPath,
     '--socket-addr', `router=unix:${routerPath}`, '--external-addr', `docker=unix:${dockerPath}`]);
   let ready = false;
   for (let i = 0; i < 80; i++) {
@@ -228,6 +248,11 @@ try {
   assert.deepEqual(html.body, Buffer.from(await Deno.readFile(join(assets, 'index.html'))));
   assert.match(String(html.headers['content-type']), /^text\/html/);
   assert.equal(html.headers['x-frame-options'], 'DENY');
+  const appUI = await request('/', { app: true, host: 'compose-ui.localhost' });
+  assert.equal(appUI.status, 200);
+  assert.deepEqual(appUI.body, html.body);
+  assert.equal((await request('/', { app: true, host: 'compose-ui.localhost',
+    headers: { Origin: 'https://evil.test' } })).status, 403);
   const deniedRequests: Options[] = [{ headers: { Origin: 'https://evil.test' } }, { headers: { Origin: 'http://web.localhost' } },
     { headers: { 'Sec-Fetch-Site': 'cross-site' } }, { host: 'evil.test:8094' }];
   for (const options of deniedRequests) {
@@ -261,11 +286,11 @@ try {
     const path = file.slice(assets.length);
     const result = await request(path);
     assert.equal(result.status, 200, path);
-    assert.deepEqual(result.body, Buffer.from(await Deno.readFile(file)), path);
+    if (path !== '/index.html') assert.deepEqual(result.body, Buffer.from(await Deno.readFile(file)), path);
     if (extname(file) === '.js') assert.match(String(result.headers['content-type']), /^text\/javascript/);
     if (path.includes('/immutable/')) assert.match(String(result.headers['cache-control']), /immutable/);
   }
-  console.log('PASS: unchanged release assets and UI without Docker/Compose');
+  console.log('PASS: source UI assets, shared-port UI hostname, and UI without Docker/Compose');
   assert.equal((await request('/', { app: true, host: 'web.localhost' })).status, 503);
   let guest = startRouter();
   await sleep(500);
@@ -321,7 +346,7 @@ try {
   assert.equal((await request('/', { app: true, host: 'missing.localhost' })).status, 404);
   const secureRedirect = await request('/', { app: true, host: 'web.secure.localhost' });
   assert.equal(secureRedirect.status, 307);
-  assert.equal(secureRedirect.headers.location, 'https://web.secure.localhost/');
+  assert.equal(secureRedirect.headers.location, `https://web.secure.localhost:${tlsPort}/`);
   assert.deepEqual(await tlsRequest('web.secure.localhost'), { status: 200, body: 'tls-upstream-ok' });
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
