@@ -193,10 +193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         setupStatusItem()
         renderMenuLabels()
 
-        // The one-time storage dialog also selects app ports. Finish it before
-        // creating workerd or registering the privileged port helper.
-        if VirtualizationSupport.isAvailable,
-           state.stringSetting("compose_storage_path")?.isEmpty != false {
+        // The one-time setup also selects host app ports. Show it even when
+        // virtualization is unavailable: Workerd and its port choice still run.
+        if state.stringSetting("compose_storage_path")?.isEmpty != false {
             do {
                 storageChoiceDeclinedOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
             } catch {

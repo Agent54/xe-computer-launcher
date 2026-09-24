@@ -29,6 +29,9 @@ jobs:
       - name: Check out pull request
         uses: actions/checkout@v4
 
+      - name: Reset launcher integration environment
+        run: bash macos/Tests/Integration/cleanup.sh
+
       - name: Verify Sparkle delta appcast fixture
         run: |
           macos/Tests/Integration/verify-appcast.sh \

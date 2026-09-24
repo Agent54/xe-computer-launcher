@@ -178,6 +178,9 @@ stop_matching_processes \
     "Xe Launcher instances" \
     '/X[Ee] Launcher[.]app/Contents/MacOS/bin'
 stop_matching_processes \
+    "orphaned Xe Launcher workerd processes" \
+    '/X[Ee] Launcher[.]app/Contents/Helpers/workerd( |$)'
+stop_matching_processes \
     "Xe Computer app shims" \
     "/Library/Application Support/${bundle_id_pattern}/shims/.*/Xe Computer[^/]*[.]app/Contents/MacOS/app_mode_loader"
 stop_matching_processes \
