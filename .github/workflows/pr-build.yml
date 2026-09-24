@@ -83,9 +83,18 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          security list-keychains \
-            -d user \
-            -s "$KEYCHAIN_PATH"
+          # Keep the login Keychain searchable for Helium during the installer
+          # test. Replacing the list with only the signing Keychain makes its
+          # encrypted profile key unavailable even when login is the default.
+          login_keychain="$HOME/Library/Keychains/login.keychain-db"
+          [[ -f "$login_keychain" ]] || { echo "::error::CI login Keychain is missing."; exit 1; }
+          keychains=("$login_keychain")
+          while IFS= read -r keychain; do
+            if [[ -n "$keychain" && "$keychain" != "$login_keychain" && "$keychain" != "$KEYCHAIN_PATH" ]]; then
+              keychains+=("$keychain")
+            fi
+          done < <(security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/')
+          security list-keychains -d user -s "${keychains[@]}" "$KEYCHAIN_PATH"
 
           security find-identity \
             -v \
