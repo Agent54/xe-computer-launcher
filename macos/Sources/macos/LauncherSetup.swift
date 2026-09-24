@@ -36,7 +36,7 @@ enum LauncherSetup {
                 (portsAlreadyConfigured
                     ? "Your existing local app port settings will be kept."
                     : standardPortsAvailable
-                    ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below. Choosing 80/443 adds a background port helper. When macOS asks, choose Allow and authenticate as an administrator; 80/443 will not work until you restart Xe Launcher after approval."
+                    ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below. Choosing 80/443 adds a background port helper. When macOS asks, choose Allow and authenticate as an administrator; Xe Launcher will detect approval automatically."
                     : "Ports 80/443 are unavailable. Local apps will use ports 5196 (HTTP) and 5194 (HTTPS).") +
                 (defaultPortWarnings.isEmpty ? "" : "\n\nDefault ports are currently unavailable: \(defaultPortWarnings.joined(separator: " "))")
             let standardPortsCheckbox: NSButton? = standardPortsAvailable && !portsAlreadyConfigured
@@ -97,6 +97,73 @@ enum LauncherSetup {
         }
     }
 
+    /// Post-install changes are saved for the next launch so active listeners
+    /// and Compose's storage socket are never replaced under running services.
+    static func changePortChoice() -> Bool {
+        let state = ExternalState.shared
+        let current = WorkerdPorts(settings: state.settings.rawData)
+        let alert = NSAlert()
+        alert.messageText = "Local app ports"
+        alert.informativeText = "Currently using HTTP \(current.http) and HTTPS \(current.https). Choose a port pair for the next launch. Ports 80/443 require the macOS background port helper; 5196/5194 do not."
+        alert.addButton(withTitle: "Use 80/443")
+        alert.addButton(withTitle: "Use 5196/5194")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        let wantsStandard: Bool
+        switch response {
+        case .alertFirstButtonReturn: wantsStandard = true
+        case .alertSecondButtonReturn: wantsStandard = false
+        default: return false
+        }
+        if wantsStandard && current.http == WorkerdPorts.standardHTTP && current.https == WorkerdPorts.standardHTTPS {
+            return false
+        }
+        if !wantsStandard && current.http == WorkerdPorts.defaultHTTP && current.https == WorkerdPorts.defaultHTTPS {
+            return false
+        }
+        if wantsStandard {
+            guard standardPortsSelectable() else {
+                showPortWarning("Ports 80/443 Are Unavailable", "Free those ports before choosing them.")
+                return false
+            }
+        } else {
+            let warnings = WorkerdPorts(settings: nil).bindingWarnings()
+            guard warnings.isEmpty else {
+                showPortWarning("Ports 5196/5194 Are Unavailable", warnings.joined(separator: "\n"))
+                return false
+            }
+        }
+        state.setAppPorts(useStandardPorts: wantsStandard)
+        return true
+    }
+
+    static func changeStorageFolder() -> Bool {
+        let state = ExternalState.shared
+        let currentPath = state.stringSetting(settingKey)
+        let panel = NSOpenPanel()
+        panel.title = "Choose Compose storage folder"
+        panel.message = "Existing projects are not moved. The selected folder will be used after you reopen Xe Launcher."
+        panel.prompt = "Use This Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = currentPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? ComposeServerPaths.stacksURL
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let selected = panel.url else { return false }
+        do {
+            try prepare(selected)
+            if currentPath == selected.path { return false }
+            state.setStringSetting(settingKey, selected.path)
+            return true
+        } catch {
+            showPortWarning("Storage Folder Unavailable", error.localizedDescription)
+            return false
+        }
+    }
+
     private enum PortChoice {
         case standard
         case defaults
@@ -111,7 +178,7 @@ enum LauncherSetup {
             let defaultWarnings = WorkerdPorts(settings: nil).bindingWarnings()
             let alert = NSAlert()
             alert.messageText = "Choose local app ports"
-            alert.informativeText = "Your existing user data folder is unchanged. This Xe Launcher version needs a port choice for local app domains. Ports 80/443 require approval of the background helper and a restart.\n\n" +
+            alert.informativeText = "Your existing user data folder is unchanged. This Xe Launcher version needs a port choice for local app domains. Ports 80/443 require approval of the background helper; Xe Launcher will detect it automatically.\n\n" +
                 (defaultWarnings.isEmpty ? "Ports 5196/5194 are available as the custom-port default."
                     : "Ports 5196/5194 are unavailable: \(defaultWarnings.joined(separator: " "))")
             var choices: [PortChoice] = []

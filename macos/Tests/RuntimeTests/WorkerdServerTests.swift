@@ -117,6 +117,7 @@ struct WorkerdServerTests {
             if curl.terminationStatus == 0 { #expect(tlsBody == html) }
             let savedPorts = try Data(contentsOf: runtimeStatus.appendingPathComponent("app-ports.json"))
             #expect(String(decoding: savedPorts, as: UTF8.self).contains("\"http\":\(routingPort)"))
+            #expect(String(decoding: savedPorts, as: UTF8.self).contains("\"publicHttpReady\":true"))
             request.url = server.uiURL.appendingPathComponent("v1.24/ls")
             let (_, apiResponse) = try await session.data(for: request)
             #expect((apiResponse as? HTTPURLResponse)?.statusCode == 503)
@@ -172,6 +173,8 @@ struct WorkerdServerTests {
         do {
             #expect(server.isRunning)
             #expect(logs.lines.contains { $0.contains("port helper") })
+            let savedPorts = try Data(contentsOf: root.appendingPathComponent("status/app-ports.json"))
+            #expect(String(decoding: savedPorts, as: UTF8.self).contains("\"publicHttpReady\":false"))
             let session = URLSession(configuration: .ephemeral)
             defer { session.invalidateAndCancel() }
             var request = URLRequest(url: server.uiURL)

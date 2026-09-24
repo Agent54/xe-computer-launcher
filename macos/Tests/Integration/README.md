@@ -64,11 +64,17 @@ that as an already-clean permission state and continues.
    After the first signed install selects ports 80/443, macOS shows a
    **Background Items Added** notification. The test opens **System Settings →
    General → Login Items & Extensions** and enables Xe Launcher under **Allow in
-   Background**, then restarts the app. If macOS asks for administrator
+   Background**. If macOS asks for administrator
    authentication, complete that prompt in the runner's GUI session. The test
-   waits for the launch daemon to become active before restarting; it cannot
-   supply administrator credentials. The approved helper remains registered
-   across normal app restarts, reserving 80/443 until custom ports are selected.
+   waits for the launch daemon and verifies both public ports without restarting
+   the launcher; it cannot supply administrator credentials. The approved helper
+   remains registered across normal app restarts, reserving 80/443 until custom
+   ports are selected.
+
+After installation, the Xe Launcher status menu has **Local App Ports** to
+switch between 80/443 and 5196/5194, and **Compose Storage Folder** to choose
+a different folder. Either change takes effect after quitting and reopening the
+launcher. Choosing another storage folder does not move existing projects.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, grant its Accessibility request in System

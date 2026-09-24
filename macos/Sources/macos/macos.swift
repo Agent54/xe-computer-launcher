@@ -176,6 +176,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
+    private var localAppPortsItem: NSMenuItem?
+    private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
 
@@ -246,6 +248,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         startBackgroundInitialization()
         if !portWarnings.isEmpty {
             DispatchQueue.main.async {
+                if needsPortHelper && helperWarning != nil && PrivilegedPortService.status == .enabled {
+                    return
+                }
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = needsPortHelper && helperWarning != nil
@@ -253,14 +258,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 alert.informativeText = portWarnings.joined(separator: "\n")
                 if helperWarning == nil {
                     alert.informativeText += needsPortHelper
-                        ? "\n\nFree occupied ports or approve the port helper, then restart Xe Launcher."
-                        : "\n\nFree occupied ports and restart Xe Launcher."
+                        ? "\n\nFree occupied ports or approve the port helper; Xe Launcher will retry automatically."
+                        : "\n\nFree occupied ports; Xe Launcher will retry automatically."
                 }
                 alert.alertStyle = .warning
                 if needsPortHelper && helperWarning != nil {
                     alert.addButton(withTitle: "Open System Settings")
                     alert.addButton(withTitle: "Later")
-                    if alert.runModal() == .alertFirstButtonReturn {
+                    let approvalTimer = Timer(timeInterval: 1, repeats: true) { _ in
+                        if PrivilegedPortService.status == .enabled {
+                            MainActor.assumeIsolated {
+                                NSApp.stopModal(withCode: .alertSecondButtonReturn)
+                            }
+                        }
+                    }
+                    RunLoop.main.add(approvalTimer, forMode: .common)
+                    let response = alert.runModal()
+                    approvalTimer.invalidate()
+                    alert.window.orderOut(nil)
+                    if response == .alertFirstButtonReturn {
                         PrivilegedPortService.openSystemSettings()
                     }
                 } else {
@@ -356,15 +372,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         hostServicesTask = Task {
             var activeComposeSocket: URL?
+            var lastPortHelperRetry = Date.distantPast
             while !Task.isCancelled {
                 if activeComposeSocket != composeSocketURL {
                     await workerdServer.stop()
                     activeComposeSocket = composeSocketURL
                 }
+                if workerdServer.usesStandardPorts && workerdServer.isRunning &&
+                    !workerdServer.servingStandardPorts && PrivilegedPortService.status == .enabled &&
+                    Date().timeIntervalSince(lastPortHelperRetry) >= 10 {
+                    lastPortHelperRetry = Date()
+                    ExternalState.shared.appendLog("launcher", "Port helper approved; restarting local app routing on 80/443")
+                    await workerdServer.stop()
+                }
                 do {
                     try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
                 } catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
+                renderMenuLabels()
                 do { try await GuestRouter.shared.reconcile() }
                 catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
@@ -666,6 +691,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         appDataItem.isHidden = true
         menu.addItem(appDataItem)
         openAppDataFolderItem = appDataItem
+
+        menu.addItem(.separator())
+
+        let portsItem = NSMenuItem(title: "Local App Ports…", action: #selector(changeLocalAppPortsAction), keyEquivalent: "")
+        menu.addItem(portsItem)
+        localAppPortsItem = portsItem
+        menu.addItem(NSMenuItem(title: "Compose Storage Folder…", action: #selector(changeStorageFolderAction), keyEquivalent: ""))
 
         menu.addItem(.separator())
 
@@ -1048,7 +1080,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         let state = ExternalState.shared
-        statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
+        let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
+        if settingsRestartRequired {
+            statusMessageItem?.title = "Status: Restart needed for settings"
+        } else if workerdServer.usesStandardPorts && !workerdServer.servingStandardPorts {
+            statusMessageItem?.title = "Status: Local ports 80/443 not ready"
+        } else {
+            statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
+        }
+        localAppPortsItem?.title = "Local App Ports: \(configuredPorts.http)/\(configuredPorts.https)…"
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
@@ -1153,6 +1193,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             alert.alertStyle = .warning
             alert.runModal()
         }
+    }
+
+    @objc private func changeLocalAppPortsAction() {
+        guard LauncherSetup.changePortChoice() else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    @objc private func changeStorageFolderAction() {
+        guard LauncherSetup.changeStorageFolder() else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    private func showSettingsRestartAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Restart Xe Launcher to Apply Changes"
+        alert.informativeText = "Your new local app ports or Compose storage folder are saved. Running services will keep their current settings until you quit and reopen Xe Launcher."
+        alert.addButton(withTitle: "Quit Now")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
     }
 
     @objc private func darcOverrideURLAction() {

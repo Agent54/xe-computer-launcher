@@ -45,8 +45,10 @@ final class WorkerdServer {
     private var stopTask: Task<Void, Never>?
     private var stopping = false
     private var lockDescriptor: Int32 = -1
+    private(set) var servingStandardPorts = false
 
     var isRunning: Bool { process?.isRunning == true }
+    var usesStandardPorts: Bool { routingPort == WorkerdPorts.standardHTTP && tlsPort == WorkerdPorts.standardHTTPS }
     var processIdentifier: pid_t? { process?.processIdentifier }
     var uiURL: URL { URL(string: "http://127.0.0.1:\(managementPort)/")! }
     init(executableURL: URL = WorkerdPaths.executableURL, configURL: URL = WorkerdPaths.configURL,
@@ -96,10 +98,6 @@ final class WorkerdServer {
         defer {
             if !started && lockDescriptor >= 0 { close(lockDescriptor); lockDescriptor = -1 }
         }
-        let appPorts = try JSONSerialization.data(withJSONObject: [
-            "http": Int(routingPort), "https": Int(tlsPort)
-        ], options: [.sortedKeys])
-        try appPorts.write(to: runtimeStatusURL.appendingPathComponent("app-ports.json"), options: .atomic)
         let state = stateURL
         let source = configURL
         let prepared = try await Task.detached(priority: .userInitiated) {
@@ -116,16 +114,21 @@ final class WorkerdServer {
             log("Local Compose UI certificate authority created at \(prepared.certificateURL.path). Trust this certificate in Keychain Access to avoid browser warnings for compose-ui.localhost and HTTP apps on HTTPS.")
         }
         let uiSocketURL = stateURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
-        let needsPrivilegedPorts = routingPort == WorkerdPorts.standardHTTP && tlsPort == WorkerdPorts.standardHTTPS
+        let needsPrivilegedPorts = usesStandardPorts
         var privilegedSockets: PrivilegedPortSockets?
         if needsPrivilegedPorts {
             do { privilegedSockets = try await acquirePrivilegedSockets() }
-            catch { log("Warning: \(error.localizedDescription) App routing on standard ports is unavailable until approval and restart.") }
+            catch { log("Warning: \(error.localizedDescription) App routing on standard ports is unavailable; Xe Launcher will retry automatically.") }
         }
         if privilegedSockets != nil && !FileManager.default.isExecutableFile(atPath: portHelperURL.path) {
             log("Warning: Missing port-helper executable at \(portHelperURL.path); standard app ports are unavailable.")
             privilegedSockets = nil
         }
+        let appPorts = try JSONSerialization.data(withJSONObject: [
+            "http": Int(routingPort), "https": Int(tlsPort),
+            "publicHttpReady": !needsPrivilegedPorts || privilegedSockets != nil,
+        ], options: [.sortedKeys])
+        try appPorts.write(to: runtimeStatusURL.appendingPathComponent("app-ports.json"), options: .atomic)
         if stopping { await stop(); throw CancellationError() }
         let child = Process()
         child.executableURL = privilegedSockets == nil ? executableURL : portHelperURL
@@ -205,6 +208,7 @@ final class WorkerdServer {
                         let httpsPort = tlsPort == 443 ? "" : ":\(tlsPort)"
                         log("Compose UI HTTPS ready at https://compose-ui.localhost\(httpsPort)/")
                     }
+                    servingStandardPorts = needsPrivilegedPorts && privilegedSockets != nil
                     started = true
                     return
                 }
@@ -225,6 +229,7 @@ final class WorkerdServer {
     func stop() async {
         if let stopTask { await stopTask.value; return }
         requestStop()
+        servingStandardPorts = false
         let child = process
         let descriptor = lockDescriptor
         let log = self.log

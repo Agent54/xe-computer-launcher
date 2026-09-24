@@ -1,4 +1,4 @@
-export const fallbackAppPorts = Object.freeze({ http: 5196, https: 5194 });
+export const fallbackAppPorts = Object.freeze({ http: 5196, https: 5194, publicHttpReady: true });
 
 export async function readAppPorts(env) {
   try {
@@ -10,7 +10,7 @@ export async function readAppPorts(env) {
         ports.http === ports.https || ports.http === 8094 || ports.https === 8094) {
       return fallbackAppPorts;
     }
-    return { http: ports.http, https: ports.https };
+    return { http: ports.http, https: ports.https, publicHttpReady: ports.publicHttpReady !== false };
   } catch {
     return fallbackAppPorts;
   }

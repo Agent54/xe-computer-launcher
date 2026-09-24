@@ -70,13 +70,26 @@ Deno.test('TLS gateway connects to the private terminator with an explicit addre
 });
 
 Deno.test('management UI does not require a launcher session token', async () => {
+  let ports = { http: 5196, https: 5194, publicHttpReady: true };
   const env = {
     MANAGEMENT: { fetch: () => Promise.resolve(new Response('compose-ui')) },
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json(ports)) },
   };
   const response = await gateway.fetch(new Request('http://127.0.0.1:8094/'), env);
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'compose-ui');
   assert.equal(response.headers.get('set-cookie'), null);
+  const navigation = () => gateway.fetch(new Request('http://127.0.0.1:8094/', {
+    headers: { 'Sec-Fetch-Mode': 'navigate' },
+  }), env);
+  const fallback = await navigation();
+  assert.equal(fallback.status, 307);
+  assert.equal(fallback.headers.get('location'), 'http://compose-ui.localhost:5196/');
+  assert.equal(fallback.headers.get('cache-control'), 'no-store');
+  ports = { http: 80, https: 443, publicHttpReady: true };
+  assert.equal((await navigation()).headers.get('location'), 'http://compose-ui.localhost/');
+  ports = { http: 80, https: 443, publicHttpReady: false };
+  assert.equal((await navigation()).status, 200);
   assert.equal((await gateway.fetch(new Request('http://web.localhost:8094/'), env)).status, 403);
 });
 

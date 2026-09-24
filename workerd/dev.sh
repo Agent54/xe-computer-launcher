@@ -5,6 +5,8 @@ worker_dir="$(cd "$(dirname "$0")" && pwd)"
 : "${COMPOSE_SOCKET:?Set COMPOSE_SOCKET to the host Compose Unix socket}"
 : "${ROUTER_SOCKET:?Set ROUTER_SOCKET to the exposed guest workerd Unix socket}"
 worker_binary="${WORKERD_BIN:-$worker_dir/node_modules/.bin/workerd}"
+http_port="${HTTP_PORT:-5196}"
+https_port="${HTTPS_PORT:-5194}"
 runtime_dir="$(mktemp -d)"
 child=""
 cleanup() {
@@ -21,12 +23,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
     -subj '/CN=compose-ui.localhost' \
     -addext 'subjectAltName=DNS:compose-ui.localhost,DNS:*.app.localhost' >/dev/null 2>&1
 chmod 600 "$runtime_dir/ui.key"
-printf 'Compose UI: http://127.0.0.1:8094/\n'
+mkdir "$runtime_dir/status"
+printf '{"http":%s,"https":%s}\n' "$http_port" "$https_port" > "$runtime_dir/status/app-ports.json"
+public_http_port=""
+if [[ "$http_port" != 80 ]]; then public_http_port=":$http_port"; fi
+printf 'Compose UI: http://compose-ui.localhost%s/\n' "$public_http_port"
 "$worker_binary" serve --experimental --watch "$runtime_dir/config.capnp" \
     --inspector-addr=0.0.0.0:9229 --verbose \
     --directory-path "assets=$COMPOSE_UI_ASSETS" \
-    --socket-addr "ingest=127.0.0.1:${HTTP_PORT:-5196}" \
-    --socket-addr "tls=127.0.0.1:${HTTPS_PORT:-5194}" \
+    --directory-path "status=$runtime_dir/status" \
+    --socket-addr "ingest=127.0.0.1:$http_port" \
+    --socket-addr "tls=127.0.0.1:$https_port" \
     --socket-addr "ui-https=unix:$runtime_dir/ui-https.sock" \
     --external-addr "ui-tls=unix:$runtime_dir/ui-https.sock" \
     --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" &

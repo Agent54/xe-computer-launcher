@@ -248,6 +248,11 @@ try {
   assert.deepEqual(html.body, Buffer.from(await Deno.readFile(join(assets, 'index.html'))));
   assert.match(String(html.headers['content-type']), /^text\/html/);
   assert.equal(html.headers['x-frame-options'], 'DENY');
+  const browserNavigation = await request('/', { headers: { 'Sec-Fetch-Mode': 'navigate' } });
+  assert.equal(browserNavigation.status, 307);
+  assert.equal(browserNavigation.headers.location, `http://compose-ui.localhost:${routingPort}/`);
+  assert.equal(browserNavigation.headers['cache-control'], 'no-store');
+  assert.equal((await request('/', { host: 'app_flux.localhost:8094' })).status, 403);
   const appUI = await request('/', { app: true, host: 'compose-ui.localhost' });
   assert.equal(appUI.status, 200);
   assert.deepEqual(appUI.body, html.body);

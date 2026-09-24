@@ -7,6 +7,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "gateway.js", esModule = embed "gateway.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
+        (name = "app-ports.js", esModule = embed "app-ports.js"),
       ],
       globalOutbound = "deny",
       bindings = [

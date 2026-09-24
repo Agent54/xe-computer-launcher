@@ -11,7 +11,7 @@ enum PrivilegedPortError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .approvalRequired: "Approve the Xe Launcher port helper in System Settings, then restart the launcher."
+        case .approvalRequired: "Approve the Xe Launcher port helper in System Settings; Xe Launcher will detect approval automatically."
         case .unavailable: "The Xe Launcher port helper is unavailable."
         case .denied: "The Xe Launcher port helper refused the socket request."
         case .invalidSocket: "The port helper returned a socket that is not bound to loopback port 80 or 443."
@@ -48,7 +48,7 @@ private final class PortReplyGate: @unchecked Sendable {
 enum PrivilegedPortService {
     static let plistName = "dev.xe.computer.ports.plist"
     static let serviceName = "dev.xe.computer.ports"
-    private static let approvalMessage = "To use ports 80/443, allow Xe Launcher's background port helper. In the macOS Background Items Added notification choose Options → Allow, or enable Xe Launcher in System Settings → General → Login Items & Extensions. Authenticate as an administrator, then restart Xe Launcher."
+    private static let approvalMessage = "To use ports 80/443, allow Xe Launcher's background port helper. In the macOS Background Items Added notification choose Options → Allow, or enable Xe Launcher in System Settings → General → Login Items & Extensions. Authenticate as an administrator; Xe Launcher will detect approval automatically."
 
     static var status: SMAppService.Status {
         SMAppService.daemon(plistName: plistName).status

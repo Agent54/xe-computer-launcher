@@ -47,6 +47,9 @@ from the Compose API within two seconds.
 
 The Compose UI uses `compose-ui.localhost` on those same HTTP and HTTPS ports.
 It shares the application gateway and never needs a separate published port.
+Port 8094 is only the loopback management/API listener; app hostnames on it are
+forbidden. Browser navigation to its UI root redirects to the selected public
+Compose UI hostname and HTTP port.
 On HTTPS, a generated per-installation local authority signs a certificate for
 the UI and `*.app.localhost` HTTP application aliases; the certificate needs to be trusted
 locally before browsers accept it without warning.

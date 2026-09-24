@@ -770,17 +770,7 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
         || fail "macOS did not activate the approved port helper; leave its background switch on and complete administrator authentication"
 
-    log "restarting the installed launcher after port helper approval"
-    run_with_timeout 10 osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();'
-    deadline=$((SECONDS + 90))
-    while (( SECONDS < deadline )) && pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; do
-        sleep 0.5
-    done
-    pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null \
-        && fail "installed launcher did not quit after port helper approval"
-    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
-        || fail "port helper registration disappeared when Xe Launcher quit"
-    open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
+    log "Xe Launcher should activate ports 80/443 without restarting"
 fi
 
 log "accepting the native macOS Accessibility permission prompt"

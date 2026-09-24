@@ -1,4 +1,6 @@
 // Only the management socket can reach this worker. Backends have no listener of their own.
+import { readAppPorts } from './app-ports.js';
+
 const managementOrigin = 'http://127.0.0.1:8094';
 const repositoryCheckoutPath = '/v1.24/repos/checkout';
 const darcOrigins = new Set([
@@ -61,6 +63,22 @@ export default {
       if ((origin && origin !== managementOrigin && !darcAPIRequest) ||
           (request.headers.get('Sec-Fetch-Site') === 'cross-site' && !darcAPIRequest)) {
         return denied();
+      }
+      // A browser opened on the private management UI would otherwise build
+      // application links using :8094. Send navigations to the shared public
+      // listener; keep the management API and readiness probe on this socket.
+      if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html') &&
+          request.headers.get('Sec-Fetch-Mode') === 'navigate') {
+        const { http, publicHttpReady } = await readAppPorts(env);
+        if (publicHttpReady) {
+          const publicURL = new URL(url);
+          publicURL.hostname = 'compose-ui.localhost';
+          publicURL.port = http === 80 ? '' : String(http);
+          publicURL.pathname = '/';
+          return new Response(null, { status: 307, headers: {
+            Location: publicURL.href, 'Cache-Control': 'no-store',
+          } });
+        }
       }
       if (darcAPIRequest && request.method === 'OPTIONS') {
         return darcPreflight(request, url, origin);
