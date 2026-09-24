@@ -315,6 +315,7 @@ jobs:
       - name: Run full launcher integration test
         env:
           DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Launcher.dmg
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Verify version in About dialog

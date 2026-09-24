@@ -63,13 +63,17 @@ that as an already-clean permission state and continues.
 6. Approve Xe Launcher's background port helper once as an administrator.
    After the first signed install selects ports 80/443, macOS shows a
    **Background Items Added** notification. The test opens **System Settings →
-   General → Login Items & Extensions** and enables Xe Launcher under **Allow in
-   Background**. If macOS asks for administrator
-   authentication, complete that prompt in the runner's GUI session. The test
-   waits for the launch daemon and verifies both public ports without restarting
-   the launcher; it cannot supply administrator credentials. The approved helper
-   remains registered across normal app restarts, reserving 80/443 until custom
-   ports are selected.
+   General → Login Items & Extensions** and attempts to enable Xe Launcher under
+   **Allow in Background**. If the switch is not clicked automatically, enable
+   it in the runner's GUI session. For unattended CI, set the repository Actions
+   secret `XE_CI_MAC_PASSWORD` to the dedicated, administrator-capable macOS
+   runner account's password.
+   The installer test uses it only for the Xe Launcher permission dialogs; it
+   is not passed to the app or printed in logs. Without the secret, complete
+   any administrator prompt in the runner's GUI session. The test waits for the
+   launch daemon and verifies both public ports without restarting the launcher.
+   The approved helper remains registered across normal app restarts, reserving
+   80/443 until custom ports are selected.
 
 After installation, the Xe Launcher status menu has **Local App Ports** to
 switch between 80/443 and 5196/5194, and **Compose Storage Folder** to choose
@@ -77,8 +81,9 @@ a different folder. Either change takes effect after quitting and reopening the
 launcher. Choosing another storage folder does not move existing projects.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
-the installed copy relaunches, grant its Accessibility request in System
-Settings so first-run setup can continue. This interaction is part of the
+the installed copy relaunches, the test grants its Accessibility request in
+System Settings. If macOS requires a password to change that switch, the same
+optional `XE_CI_MAC_PASSWORD` secret is used. This interaction is part of the
 integration test, not a persistent one-time machine grant.
 
 An existing installation with a saved storage folder but no confirmed port

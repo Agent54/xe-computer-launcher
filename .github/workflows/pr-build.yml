@@ -152,6 +152,8 @@ jobs:
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
 
       - name: Run full launcher integration test
+        env:
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
         run: macos/Tests/Integration/install-from-dmg.sh
 
       - name: Verify version in About dialog

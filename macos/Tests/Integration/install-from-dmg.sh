@@ -15,6 +15,9 @@ DEV_MODE=false
 DEV_INSTALL_ARGUMENT="--xe-computer-development-install"
 INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
 TEST_STARTED_AT="$(date '+%Y-%m-%d %H:%M:%S')"
+runner_password="${XE_CI_MAC_PASSWORD:-}"
+unset XE_CI_MAC_PASSWORD
+runner_auth_pid=""
 
 log() {
     printf '[installer-integration] %s\n' "$*"
@@ -86,6 +89,79 @@ run_with_timeout() {
         return 124
     fi
     return "$command_status"
+}
+
+# The optional secret is passed only to this short-lived GUI helper, never as
+# a command-line argument or to the applications under test. Only enter it in
+# a frontmost macOS authorization dialog with a password field and text tying
+# the request to Xe Launcher or System Settings.
+start_runner_auth_helper() {
+    [[ -n "$runner_password" ]] || return 0
+    XE_CI_MAC_PASSWORD="$runner_password" osascript -l JavaScript - <<'JXA' 2>/dev/null &
+ObjC.import('Foundation');
+
+function run() {
+    const raw = $.NSProcessInfo.processInfo.environment.objectForKey('XE_CI_MAC_PASSWORD');
+    const password = ObjC.unwrap(raw);
+    if (typeof password !== 'string' || password.length === 0) {
+        return '[installer-integration] macOS authorization helper has no password';
+    }
+    let events;
+    try {
+        events = Application('/System/Library/CoreServices/System Events.app');
+    } catch {
+        return '[installer-integration] macOS authorization helper could not open System Events';
+    }
+    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent']);
+    const deadline = Date.now() + 90000;
+    let inspected = false;
+    while (Date.now() < deadline) {
+        try {
+            const frontmost = events.applicationProcesses.whose({ frontmost: true })();
+            for (const process of frontmost) {
+                if (!authProcesses.has(process.name())) continue;
+                for (const window of process.windows()) {
+                    const words = [String(window.name() || '')];
+                    let hasPasswordField = false;
+                    for (const element of window.entireContents()) {
+                        let role = '';
+                        let subrole = '';
+                        try { role = element.role(); } catch {}
+                        try { subrole = element.subrole(); } catch {}
+                        if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
+                            hasPasswordField = true;
+                        }
+                        if (role === 'AXStaticText') {
+                            try { words.push(String(element.value() || element.name() || '')); } catch {}
+                        }
+                    }
+                    const context = words.join(' ');
+                    if (!hasPasswordField || !/System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) ||
+                        /Helium|Keychain/i.test(context)) continue;
+                    events.keystroke(password);
+                    events.keyCode(36);
+                    return '[installer-integration] submitted macOS permission password';
+                }
+            }
+            inspected = true;
+        } catch {}
+        $.NSThread.sleepForTimeInterval(0.25);
+    }
+    if (!inspected) {
+        return '[installer-integration] macOS authorization helper could not inspect the permission dialog';
+    }
+    return '[installer-integration] no matching macOS permission password dialog appeared';
+}
+JXA
+    runner_auth_pid=$!
+    log "optional macOS authorization helper is watching for a permission password dialog"
+}
+
+stop_runner_auth_helper() {
+    [[ -n "$runner_auth_pid" ]] || return 0
+    kill "$runner_auth_pid" 2>/dev/null || true
+    wait "$runner_auth_pid" 2>/dev/null || true
+    runner_auth_pid=""
 }
 
 # Find a button anywhere in a process window. NSAlert buttons are commonly in
@@ -454,10 +530,9 @@ on run argv
     set appName to item 1 of argv
     set timeoutSeconds to item 2 of argv as integer
     set foundAppRow to false
-    set clickedToggle to false
-    set confirmedPolls to 0
+    set foundLoginWindow to false
 
-    tell application "System Settings" to activate
+    log "Inspecting System Settings for the " & appName & " background switch"
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
             if exists application process "System Settings" then
@@ -468,6 +543,10 @@ on run argv
                             set windowTitle to name of uiWindow as text
                         end try
                         if windowTitle contains "Login Items" then
+                            if not foundLoginWindow then
+                                log "Found the Login Items & Extensions window"
+                                set foundLoginWindow to true
+                            end if
                             set uiElements to {}
                             try
                                 set uiElements to entire contents of uiWindow
@@ -502,6 +581,7 @@ on run argv
                             end repeat
 
                             if appLabel is not missing value then
+                                if not foundAppRow then log "Found the " & appName & " background item"
                                 set foundAppRow to true
                                 if targetToggle is missing value then
                                     set labelPosition to position of appLabel
@@ -533,13 +613,8 @@ on run argv
                                 try
                                     set toggleValue to value of targetToggle as integer
                                 end try
-                                if toggleValue is 1 and not my authorizationPending() then
-                                    set confirmedPolls to confirmedPolls + 1
-                                    if confirmedPolls ≥ 8 then return "enabled"
-                                else
-                                    set confirmedPolls to 0
-                                end if
-                                if toggleValue is 0 and not clickedToggle then
+                                if toggleValue is 1 then return "switch-on"
+                                if toggleValue is 0 then
                                     set togglePosition to position of targetToggle
                                     set toggleSize to size of targetToggle
                                     try
@@ -547,8 +622,8 @@ on run argv
                                     on error
                                         click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
                                     end try
-                                    set clickedToggle to true
-                                    log "Clicked the Xe Launcher background switch; waiting for macOS approval"
+                                    log "Clicked the Xe Launcher background switch; approval will be checked through launchd"
+                                    return "switch-clicked"
                                 end if
                             end if
                         end if
@@ -556,9 +631,7 @@ on run argv
                 end tell
             end if
             if attemptNumber mod 40 is 0 then
-                if clickedToggle then
-                    log "Still waiting for the Xe Launcher background switch to turn on"
-                else if foundAppRow then
+                if foundAppRow then
                     log "Found the Xe Launcher row; still looking for its background switch"
                 else
                     log "Still looking for Xe Launcher in Login Items & Extensions"
@@ -569,31 +642,8 @@ on run argv
     end tell
 
     if not foundAppRow then error "The " & appName & " row did not appear in Login Items & Extensions > Allow in Background"
-    if not clickedToggle then error "The " & appName & " background switch was not found in System Settings"
-    error "The " & appName & " background switch did not turn on; complete the macOS administrator authentication prompt"
+    error "The " & appName & " background switch was not found in System Settings"
 end run
-
-on authorizationPending()
-    tell application "System Events"
-        repeat with processName in {"SecurityAgent", "AuthorizationHost"}
-            try
-                if exists application process (contents of processName) then
-                    if (count of windows of application process (contents of processName)) > 0 then return true
-                end if
-            end try
-        end repeat
-        if exists application process "System Settings" then
-            tell application process "System Settings"
-                repeat with uiWindow in windows
-                    try
-                        if (count of sheets of uiWindow) > 0 then return true
-                    end try
-                end repeat
-            end tell
-        end if
-    end tell
-    return false
-end authorizationPending
 APPLESCRIPT
 }
 
@@ -606,6 +656,7 @@ detach_disk_image() {
 }
 
 cleanup_mount() {
+    stop_runner_auth_helper
     if [[ -n "$MOUNT_POINT" ]]; then
         detach_disk_image "$MOUNT_POINT" || true
     fi
@@ -752,7 +803,16 @@ done
 log "checking whether the background port helper needs administrator approval"
 if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 5 >/dev/null 2>&1; then
     log "enabling Xe Launcher under Allow in Background"
-    grant_background_port_helper_permission "$APP_NAME" 120
+    # Opening the pane is asynchronous. Activate the already-open Settings app
+    # without a blocking Apple Event, then bound the optional AX click. macOS
+    # may put up a separate administrator dialog that requires a human response.
+    run_with_timeout 8 open -a "System Settings" || true
+    if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+        start_runner_auth_helper
+        if ! grant_background_port_helper_permission "$APP_NAME" 20; then
+            log "could not confirm the background switch through Accessibility; enable Xe Launcher in System Settings and complete any password prompt"
+        fi
+    fi
 
     log "waiting for macOS to finish approving the port helper"
     deadline=$((SECONDS + 120))
@@ -769,6 +829,7 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     done
     launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
         || fail "macOS did not activate the approved port helper; leave its background switch on and complete administrator authentication"
+    stop_runner_auth_helper
 
     log "Xe Launcher should activate ports 80/443 without restarting"
 fi
@@ -777,7 +838,9 @@ log "accepting the native macOS Accessibility permission prompt"
 drain_accessibility_permission_prompts "$APP_NAME" 60
 
 log "granting Accessibility access to the installed app"
+start_runner_auth_helper
 grant_accessibility_permission "$APP_NAME" 90
+stop_runner_auth_helper
 
 log "waiting for Compose UI on ports 80 and 443"
 standard_ports_ready=false
