@@ -97,14 +97,16 @@ press_ui_button() {
     local button_name="$2"
     local context_text="$3"
     local timeout_seconds="$4"
+    local control_role="${5:-AXButton}"
 
     run_with_timeout "$((timeout_seconds + 10))" osascript - \
-        "$process_bundle_id" "$button_name" "$context_text" "$timeout_seconds" <<'APPLESCRIPT'
+        "$process_bundle_id" "$button_name" "$context_text" "$timeout_seconds" "$control_role" <<'APPLESCRIPT'
 on run argv
     set wantedBundleID to item 1 of argv
     set wantedButtonName to item 2 of argv
     set wantedContext to item 3 of argv
     set timeoutSeconds to item 4 of argv as integer
+    set wantedRole to item 5 of argv
 
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
@@ -130,7 +132,7 @@ on run argv
                         repeat with uiElement in uiElements
                             try
                                 set elementName to name of uiElement as text
-                                if elementName is wantedButtonName and role of uiElement is "AXButton" then
+                                if elementName is wantedButtonName and role of uiElement is wantedRole then
                                     set targetButton to uiElement
                                 end if
                                 if wantedContext is not "" and elementName contains wantedContext then
@@ -150,6 +152,9 @@ on run argv
                             try
                                 set matchedProcessName to name of uiProcess as text
                             end try
+                            if wantedRole is "AXCheckBox" then
+                                if value of targetButton as integer is 1 then return matchedProcessName
+                            end if
                             set buttonPosition to position of targetButton
                             set buttonSize to size of targetButton
 
@@ -157,6 +162,14 @@ on run argv
                                 perform action "AXPress" of targetButton
                             end try
                             delay 0.5
+
+                            if wantedRole is "AXCheckBox" then
+                                if value of targetButton as integer is 1 then return matchedProcessName
+                                click at {item 1 of buttonPosition + (item 1 of buttonSize div 2), item 2 of buttonPosition + (item 2 of buttonSize div 2)}
+                                delay 0.5
+                                if value of targetButton as integer is not 1 then error "Could not select standard app ports"
+                                return matchedProcessName
+                            end if
 
                             set buttonStillExists to false
                             try
@@ -174,7 +187,7 @@ on run argv
 
             delay 0.25
         end repeat
-        error "Timed out waiting for button “" & wantedButtonName & "”"
+        error "Timed out waiting for control “" & wantedButtonName & "”"
     end tell
 end run
 APPLESCRIPT
@@ -540,14 +553,54 @@ else
     fi
 fi
 
-log "choosing the default user data storage folder and app ports"
+log "selecting standard app ports 80/443"
+if ! press_ui_button "$BUNDLE_ID" "Use ports 80/443 for local apps (requires administrator approval)" "Choose user data storage" 60 AXCheckBox; then
+    log "listeners on standard ports, if any:"
+    lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
+    fail "standard app ports could not be selected in the setup dialog"
+fi
+log "choosing the default user data storage folder"
 press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
+saved_http_port=""
+saved_https_port=""
+deadline=$((SECONDS + 10))
+while (( SECONDS < deadline )); do
+    saved_http_port="$(plutil -extract app_http_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    saved_https_port="$(plutil -extract app_https_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] && break
+    sleep 0.25
+done
+[[ "$saved_http_port" == "80" && "$saved_https_port" == "443" ]] \
+    || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset}, expected 80/443"
 
 log "accepting the native macOS Accessibility permission prompt"
 drain_accessibility_permission_prompts "$APP_NAME" 60
 
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90
+
+log "waiting for Compose UI on ports 80 and 443"
+standard_ports_ready=false
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
+    if /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
+        --resolve 'compose-ui.localhost:80:127.0.0.1' \
+        --output /dev/null 'http://compose-ui.localhost/' \
+        && [[ -f "$APP_DATA/workerd/ui-https/root.crt" ]] \
+        && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
+            --cacert "$APP_DATA/workerd/ui-https/root.crt" \
+            --resolve 'compose-ui.localhost:443:127.0.0.1' \
+            --output /dev/null 'https://compose-ui.localhost/'; then
+        standard_ports_ready=true
+        break
+    fi
+    sleep 1
+done
+if [[ "$standard_ports_ready" != true ]]; then
+    log "listeners on standard ports, if any:"
+    lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
+    fail "Compose UI did not answer on both 80 and 443; check that the port helper was approved and the ports are free"
+fi
 
 /bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/stacks/compose.sock"
 

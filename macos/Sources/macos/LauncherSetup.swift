@@ -17,7 +17,7 @@ enum LauncherSetup {
         while true {
             let alert = NSAlert()
             alert.messageText = "Choose user data storage"
-            let standardPortsAvailable = WorkerdPorts.standardPortsAvailable()
+            let standardPortsAvailable = standardPortsSelectable()
             alert.informativeText = "Choose a folder for your Compose projects and their files. The default is a stacks folder in Xe Launcher's app data directory:\n\n\(ComposeServerPaths.stacksURL.path)\n\n" +
                 (standardPortsAvailable
                     ? "Local apps use ports 5196 (HTTP) and 5194 (HTTPS) unless you select standard web ports below."
@@ -57,7 +57,7 @@ enum LauncherSetup {
             do {
                 try prepare(url)
                 let wantsStandardPorts = standardPortsCheckbox?.state == .on
-                let useStandardPorts = wantsStandardPorts && WorkerdPorts.standardPortsAvailable()
+                let useStandardPorts = wantsStandardPorts && standardPortsSelectable()
                 state.setInitialStorageAndPorts(path: url.path, useStandardPorts: useStandardPorts)
                 if wantsStandardPorts && !useStandardPorts {
                     let warning = NSAlert()
@@ -72,6 +72,12 @@ enum LauncherSetup {
                 failure.runModal()
             }
         }
+    }
+
+    private static func standardPortsSelectable() -> Bool {
+        // Once approved, launchd owns these listeners for our helper. A bind
+        // probe sees them as occupied even though Xe Launcher can use them.
+        PrivilegedPortService.status == .enabled || WorkerdPorts.standardPortsAvailable()
     }
 
     private static func prepare(_ url: URL) throws {
