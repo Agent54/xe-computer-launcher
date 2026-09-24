@@ -60,8 +60,17 @@ enum PrivilegedPortService {
     /// Registration is system-mediated and requires an administrator's approval.
     /// This is only called when an app route uses a standard privileged port.
     static func registerIfNeeded() -> String? {
+        let bundleURL = Bundle.main.bundleURL
+        let plistURL = bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(plistName)")
+        let helperURL = bundleURL.appendingPathComponent("Contents/MacOS/port-helper")
+        guard FileManager.default.fileExists(atPath: plistURL.path),
+              FileManager.default.isExecutableFile(atPath: helperURL.path) else {
+            return "The Xe Launcher port helper is missing from this app bundle."
+        }
         let service = SMAppService.daemon(plistName: plistName)
-        if service.status == .notRegistered {
+        // Service Management can report .notFound before this service has ever
+        // been registered, even when both bundle files are present.
+        if service.status == .notRegistered || service.status == .notFound {
             do { try service.register() }
             catch { return "Port helper registration failed: \(error.localizedDescription)" }
         }
@@ -69,7 +78,7 @@ enum PrivilegedPortService {
         case .enabled: return nil
         case .requiresApproval: return "Approve the Xe Launcher port helper in System Settings, then restart the launcher."
         case .notRegistered: return "The Xe Launcher port helper is not registered."
-        case .notFound: return "The Xe Launcher port helper is missing from this app bundle."
+        case .notFound: return "macOS could not find the Xe Launcher port helper service after registration."
         @unknown default: return "The Xe Launcher port helper is unavailable."
         }
     }

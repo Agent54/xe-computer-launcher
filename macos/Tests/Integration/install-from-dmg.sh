@@ -521,6 +521,10 @@ while (( SECONDS < deadline )) && [[ ! -d "$INSTALLED_APP" ]]; do
     sleep 0.25
 done
 [[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
+[[ -f "$INSTALLED_APP/Contents/Library/LaunchDaemons/dev.xe.computer.ports.plist" ]] \
+    || fail "installed app is missing the port helper launch daemon plist"
+[[ -x "$INSTALLED_APP/Contents/MacOS/port-helper" ]] \
+    || fail "installed app is missing the port helper executable"
 
 if [[ "$DEV_MODE" == true ]]; then
     log "development mode: skipping Gatekeeper confirmation for the installed copy"
