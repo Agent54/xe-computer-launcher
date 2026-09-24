@@ -41,6 +41,10 @@ HTTP port 5196 and HTTPS port 5194. The Compose UI and app links use the same
 listener port and protocol. Open the UI at `http://compose-ui.localhost/` or
 `https://compose-ui.localhost/`; on fallback ports, use `:5196` or `:5194`
 respectively.
+If 80/443 were selected but the port helper is unavailable, Xe Launcher keeps
+that selection and reports the public listeners as unavailable; it does not
+switch to 5196/5194. Port 8094 remains an internal management/API listener,
+not an alternate Compose UI address.
 
 Access running services at `http://<service>.localhost/` when using port 80,
 or `http://<service>.localhost:5196/` with the fallback. Use

@@ -118,11 +118,18 @@ final class WorkerdServer {
         var privilegedSockets: PrivilegedPortSockets?
         if needsPrivilegedPorts {
             do { privilegedSockets = try await acquirePrivilegedSockets() }
-            catch { log("Warning: \(error.localizedDescription) App routing on standard ports is unavailable; Xe Launcher will retry automatically.") }
+            catch { log("Warning: \(error.localizedDescription) Ports 80/443 remain selected but are unavailable; Xe Launcher will retry automatically.") }
         }
         if privilegedSockets != nil && !FileManager.default.isExecutableFile(atPath: portHelperURL.path) {
             log("Warning: Missing port-helper executable at \(portHelperURL.path); standard app ports are unavailable.")
             privilegedSockets = nil
+        }
+        let inactiveHTTPURL = stateURL.appendingPathComponent("inactive-http.sock")
+        let inactiveHTTPSURL = stateURL.appendingPathComponent("inactive-https.sock")
+        if needsPrivilegedPorts && privilegedSockets == nil {
+            for url in [inactiveHTTPURL, inactiveHTTPSURL] where FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
         }
         let appPorts = try JSONSerialization.data(withJSONObject: [
             "http": Int(routingPort), "https": Int(tlsPort),
@@ -147,13 +154,17 @@ final class WorkerdServer {
             "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
         if privilegedSockets != nil {
             workerArguments += ["--socket-fd", "ingest=3"]
+        } else if needsPrivilegedPorts {
+            workerArguments += ["--socket-addr", "ingest=unix:\(inactiveHTTPURL.path)"]
         } else {
-            workerArguments += ["--socket-addr", "ingest=127.0.0.1:\(needsPrivilegedPorts ? 0 : routingPort)"]
+            workerArguments += ["--socket-addr", "ingest=127.0.0.1:\(routingPort)"]
         }
         if privilegedSockets != nil {
             workerArguments += ["--socket-fd", "tls=4"]
+        } else if needsPrivilegedPorts {
+            workerArguments += ["--socket-addr", "tls=unix:\(inactiveHTTPSURL.path)"]
         } else {
-            workerArguments += ["--socket-addr", "tls=127.0.0.1:\(needsPrivilegedPorts ? 0 : tlsPort)"]
+            workerArguments += ["--socket-addr", "tls=127.0.0.1:\(tlsPort)"]
         }
         child.arguments = privilegedSockets == nil ? workerArguments : ["--exec-workerd", executableURL.path] + workerArguments
         // No inherited inspector flags, npm paths, or proxy settings.

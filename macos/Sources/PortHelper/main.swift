@@ -71,7 +71,7 @@ private func runDaemon() -> Never {
                String(cString: operation) == "acquire" {
                 xpc_dictionary_set_fd(reply, "http", http)
                 xpc_dictionary_set_fd(reply, "https", https)
-                xpc_dictionary_set_int64(reply, "version", 1)
+                xpc_dictionary_set_int64(reply, "version", 2)
                 xpc_dictionary_set_string(reply, "status", "ok")
             } else {
                 xpc_dictionary_set_string(reply, "status", "denied")

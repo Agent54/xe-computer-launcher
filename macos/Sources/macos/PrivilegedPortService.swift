@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 import ServiceManagement
 @preconcurrency import XPC
 
@@ -60,7 +61,7 @@ enum PrivilegedPortService {
 
     /// Registration is system-mediated and requires an administrator's approval.
     /// This is only called when an app route uses a standard privileged port.
-    static func registerIfNeeded() -> String? {
+    static func registerIfNeeded() async -> String? {
         let bundleURL = Bundle.main.bundleURL
         let plistURL = bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(plistName)")
         let helperURL = bundleURL.appendingPathComponent("Contents/MacOS/port-helper")
@@ -68,10 +69,49 @@ enum PrivilegedPortService {
               FileManager.default.isExecutableFile(atPath: helperURL.path) else {
             return "The Xe Launcher port helper is missing from this app bundle."
         }
+        let fingerprint: String
+        do {
+            var hash = SHA256()
+            hash.update(data: Data(bundleURL.resolvingSymlinksInPath().path.utf8))
+            hash.update(data: try Data(contentsOf: helperURL, options: .mappedIfSafe))
+            hash.update(data: try Data(contentsOf: plistURL))
+            fingerprint = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch {
+            return "Could not inspect the Xe Launcher port helper: \(error.localizedDescription)"
+        }
+        let markerURL = ExternalState.appDataURL.appendingPathComponent("workerd/port-helper-registration.sha256")
+        let recordedFingerprint = try? String(contentsOf: markerURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let service = SMAppService.daemon(plistName: plistName)
+        var needsRegistration = service.status == .notRegistered || service.status == .notFound
+        // A second macOS account has no per-user marker. Do not tear down a
+        // working machine-wide daemon merely because this account is new.
+        if service.status == .enabled, recordedFingerprint == nil,
+           (try? await acquire()) != nil {
+            do { try recordFingerprint(fingerprint, at: markerURL) }
+            catch { return "Port helper is active, but its update state could not be saved: \(error.localizedDescription)" }
+            return nil
+        }
+        // SMAppService does not replace an enabled daemon just because the app
+        // bundle was updated. Refresh only when the bundled helper or plist
+        // changed; unregister must finish killing the old process first.
+        if (service.status == .enabled || service.status == .requiresApproval),
+           recordedFingerprint != fingerprint {
+            ExternalState.shared.appendLog("launcher", "Refreshing the port helper registration for the installed Xe Launcher bundle.")
+            do {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    service.unregister { error in
+                        if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume() }
+                    }
+                }
+                needsRegistration = true
+            } catch {
+                return "Port helper update could not remove the old registration: \(error.localizedDescription)"
+            }
+        }
         // Service Management can report .notFound before this service has ever
         // been registered, even when both bundle files are present.
-        if service.status == .notRegistered || service.status == .notFound {
+        if needsRegistration {
             do { try service.register() }
             catch {
                 let failure = error as NSError
@@ -79,10 +119,13 @@ enum PrivilegedPortService {
                 // macOS waits for an administrator to approve the background item.
                 if service.status == .requiresApproval ||
                     (failure.domain == SMAppServiceErrorDomain && failure.code == 1) {
+                    try? recordFingerprint(fingerprint, at: markerURL)
                     return approvalMessage
                 }
                 return "Port helper registration failed (\(failure.domain) code \(failure.code)): \(failure.localizedDescription)"
             }
+            do { try recordFingerprint(fingerprint, at: markerURL) }
+            catch { return "Port helper registered, but its update state could not be saved: \(error.localizedDescription)" }
         }
         switch service.status {
         case .enabled: return nil
@@ -91,6 +134,13 @@ enum PrivilegedPortService {
         case .notFound: return "macOS could not find the Xe Launcher port helper service after registration."
         @unknown default: return "The Xe Launcher port helper is unavailable."
         }
+    }
+
+    private static func recordFingerprint(_ fingerprint: String, at url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try fingerprint.write(to: url, atomically: true, encoding: .utf8)
     }
 
     static func unregisterIfRegistered() -> String? {
@@ -129,7 +179,8 @@ enum PrivilegedPortService {
         guard xpc_get_type(reply) == XPC_TYPE_DICTIONARY else { throw PrivilegedPortError.unavailable }
         guard let status = xpc_dictionary_get_string(reply, "status"),
               String(cString: status) == "ok" else { throw PrivilegedPortError.denied }
-        guard xpc_dictionary_get_int64(reply, "version") == 1 else { throw PrivilegedPortError.unavailable }
+        // A helper from an earlier app bundle must not satisfy the update probe.
+        guard xpc_dictionary_get_int64(reply, "version") == 2 else { throw PrivilegedPortError.unavailable }
         let http = xpc_dictionary_dup_fd(reply, "http")
         let https = xpc_dictionary_dup_fd(reply, "https")
         guard http >= 0, https >= 0 else {

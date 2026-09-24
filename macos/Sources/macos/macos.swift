@@ -176,7 +176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
+    private var advancedItemsSeparator: NSMenuItem?
     private var localAppPortsItem: NSMenuItem?
+    private var composeStorageFolderItem: NSMenuItem?
     private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -224,15 +226,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             state.appendLog("launcher", "Warning: \(warning)")
         }
         let needsPortHelper = workerdPorts.http == WorkerdPorts.standardHTTP
-        let helperWarning = setupDeferredOnThisLaunch ? nil :
-            (needsPortHelper ? PrivilegedPortService.registerIfNeeded() :
-                PrivilegedPortService.unregisterIfRegistered())
-        let portWarnings = setupDeferredOnThisLaunch ? [] :
-            workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
-                (helperWarning.map { [$0] } ?? [])
-        for warning in portWarnings {
-            state.appendLog("launcher", "Warning: \(warning)")
-        }
         // Updating a copy on a read-only disk image cannot succeed. The copy
         // installed into /Applications or ~/Applications starts Sparkle on its
         // first normal launch instead.
@@ -244,10 +237,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             _ = updaterController
         }
 
-        if !setupDeferredOnThisLaunch { startHostServices() }
-        startBackgroundInitialization()
-        if !portWarnings.isEmpty {
-            DispatchQueue.main.async {
+        Task { @MainActor in
+            let helperWarning = setupDeferredOnThisLaunch ? nil :
+                (needsPortHelper ? await PrivilegedPortService.registerIfNeeded() :
+                    PrivilegedPortService.unregisterIfRegistered())
+            let portWarnings = setupDeferredOnThisLaunch ? [] :
+                workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
+                    (helperWarning.map { [$0] } ?? [])
+            for warning in portWarnings {
+                state.appendLog("launcher", "Warning: \(warning)")
+            }
+            if !setupDeferredOnThisLaunch { startHostServices() }
+            startBackgroundInitialization()
+            if !portWarnings.isEmpty {
                 if needsPortHelper && helperWarning != nil && PrivilegedPortService.status == .enabled {
                     return
                 }
@@ -668,7 +670,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(newProfileItem)
         self.newProfileItem = newProfileItem
 
-        menu.addItem(.separator())
+        let advancedSeparator = NSMenuItem.separator()
+        advancedSeparator.isHidden = true
+        menu.addItem(advancedSeparator)
+        advancedItemsSeparator = advancedSeparator
         let saveWindowPositionsItem = NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: "")
         saveWindowPositionsItem.isHidden = true
         menu.addItem(saveWindowPositionsItem)
@@ -692,12 +697,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(appDataItem)
         openAppDataFolderItem = appDataItem
 
-        menu.addItem(.separator())
-
         let portsItem = NSMenuItem(title: "Local App Ports…", action: #selector(changeLocalAppPortsAction), keyEquivalent: "")
+        portsItem.isHidden = true
         menu.addItem(portsItem)
         localAppPortsItem = portsItem
-        menu.addItem(NSMenuItem(title: "Compose Storage Folder…", action: #selector(changeStorageFolderAction), keyEquivalent: ""))
+        let storageFolderItem = NSMenuItem(title: "Compose Storage Folder…", action: #selector(changeStorageFolderAction), keyEquivalent: "")
+        storageFolderItem.isHidden = true
+        menu.addItem(storageFolderItem)
+        composeStorageFolderItem = storageFolderItem
 
         menu.addItem(.separator())
 
@@ -1058,6 +1065,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
+        advancedItemsSeparator?.isHidden = !optionHeld
+        localAppPortsItem?.isHidden = !optionHeld
+        composeStorageFolderItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }

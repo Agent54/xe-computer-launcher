@@ -173,6 +173,8 @@ struct WorkerdServerTests {
         do {
             #expect(server.isRunning)
             #expect(logs.lines.contains { $0.contains("port helper") })
+            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("inactive-http.sock").path))
+            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("inactive-https.sock").path))
             let savedPorts = try Data(contentsOf: root.appendingPathComponent("status/app-ports.json"))
             #expect(String(decoding: savedPorts, as: UTF8.self).contains("\"publicHttpReady\":false"))
             let session = URLSession(configuration: .ephemeral)

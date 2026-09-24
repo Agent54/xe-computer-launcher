@@ -12,11 +12,15 @@ function denied() {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const { http, https } = await readAppPorts(env);
-    const expectedPort = url.protocol === 'https:' ? https : http;
     if (!['http:', 'https:'].includes(url.protocol) ||
-        url.port !== (expectedPort === (url.protocol === 'https:' ? 443 : 80) ? '' : String(expectedPort)) ||
-        !applicationHost.test(url.hostname) || url.hostname === 'api.moby.localhost') {
+        !applicationHost.test(url.hostname) || url.hostname === 'api.moby.localhost') return denied();
+    const ports = await readAppPorts(env);
+    if (!ports || !ports.publicHttpReady) {
+      return new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+    const { http, https } = ports;
+    const expectedPort = url.protocol === 'https:' ? https : http;
+    if (url.port !== (expectedPort === (url.protocol === 'https:' ? 443 : 80) ? '' : String(expectedPort))) {
       return denied();
     }
     if (url.hostname === uiHost) {

@@ -89,7 +89,16 @@ Deno.test('management UI does not require a launcher session token', async () =>
   ports = { http: 80, https: 443, publicHttpReady: true };
   assert.equal((await navigation()).headers.get('location'), 'http://compose-ui.localhost/');
   ports = { http: 80, https: 443, publicHttpReady: false };
-  assert.equal((await navigation()).status, 200);
+  const unavailable = await navigation();
+  assert.equal(unavailable.status, 503);
+  assert.match(await unavailable.text(), /selected HTTP port 80/);
+  const missingStatus = { ...env, RUNTIME_STATUS: { fetch: () => Promise.resolve(new Response(null, { status: 404 })) } };
+  const missingNavigation = await gateway.fetch(new Request('http://127.0.0.1:8094/', {
+    headers: { 'Sec-Fetch-Mode': 'navigate' },
+  }), missingStatus);
+  assert.equal(missingNavigation.status, 503);
+  assert.equal((await appGateway.fetch(new Request('http://compose-ui.localhost:5196/'), missingStatus)).status, 503);
+  assert.equal((await appGateway.fetch(new Request('http://evil.test:5196/'), missingStatus)).status, 403);
   assert.equal((await gateway.fetch(new Request('http://web.localhost:8094/'), env)).status, 403);
 });
 

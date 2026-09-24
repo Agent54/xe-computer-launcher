@@ -61,7 +61,11 @@ async function protocolResponse(request, service, port, env, canonical = false) 
   if (url.hostname.endsWith('.app.localhost')) {
     url.hostname = `${url.hostname.slice(0, -'.app.localhost'.length)}.localhost`;
   } else if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
-  const { https } = await readAppPorts(env);
+  const ports = await readAppPorts(env);
+  if (!ports || !ports.publicHttpReady) {
+    return new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+  }
+  const { https } = ports;
   url.port = https === 443 ? '' : String(https);
   return new Response(null, {
     status: 307,

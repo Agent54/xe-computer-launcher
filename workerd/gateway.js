@@ -69,7 +69,13 @@ export default {
       // listener; keep the management API and readiness probe on this socket.
       if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html') &&
           request.headers.get('Sec-Fetch-Mode') === 'navigate') {
-        const { http, publicHttpReady } = await readAppPorts(env);
+        const ports = await readAppPorts(env);
+        if (!ports) {
+          return new Response('Xe Launcher app port configuration is unavailable.', {
+            status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+          });
+        }
+        const { http, publicHttpReady } = ports;
         if (publicHttpReady) {
           const publicURL = new URL(url);
           publicURL.hostname = 'compose-ui.localhost';
@@ -79,6 +85,9 @@ export default {
             Location: publicURL.href, 'Cache-Control': 'no-store',
           } });
         }
+        return new Response(`Xe Launcher has not activated the selected HTTP port ${http}. Check the port helper in System Logs.`, {
+          status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+        });
       }
       if (darcAPIRequest && request.method === 'OPTIONS') {
         return darcPreflight(request, url, origin);
