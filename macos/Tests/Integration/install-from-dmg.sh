@@ -866,7 +866,13 @@ done
 if [[ "$standard_ports_ready" != true ]]; then
     log "listeners on standard ports, if any:"
     lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
-    fail "Compose UI did not answer on both 80 and 443; check that the port helper was approved and the ports are free"
+    log "port helper launchd state:"
+    launchctl print system/dev.xe.computer.ports || true
+    log "recent port helper startup messages:"
+    /usr/bin/log show --last 5m --style compact \
+        --predicate 'subsystem == "dev.xe.computer" AND category == "port-helper"' \
+        2>/dev/null || true
+    fail "Compose UI did not answer on both 80 and 443; inspect the port helper state and startup messages above"
 fi
 
 /bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/stacks/compose.sock"

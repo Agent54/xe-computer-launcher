@@ -61,7 +61,7 @@ enum PrivilegedPortService {
 
     /// Registration is system-mediated and requires an administrator's approval.
     /// This is only called when an app route uses a standard privileged port.
-    static func registerIfNeeded() async -> String? {
+    static func registerIfNeeded(forceRefresh: Bool = false) async -> String? {
         let bundleURL = Bundle.main.bundleURL
         let plistURL = bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons/\(plistName)")
         let helperURL = bundleURL.appendingPathComponent("Contents/MacOS/port-helper")
@@ -85,7 +85,7 @@ enum PrivilegedPortService {
         var needsRegistration = service.status == .notRegistered || service.status == .notFound
         // A second macOS account has no per-user marker. Do not tear down a
         // working machine-wide daemon merely because this account is new.
-        if service.status == .enabled, recordedFingerprint == nil,
+        if !forceRefresh, service.status == .enabled, recordedFingerprint == nil,
            (try? await acquire()) != nil {
             do { try recordFingerprint(fingerprint, at: markerURL) }
             catch { return "Port helper is active, but its update state could not be saved: \(error.localizedDescription)" }
@@ -95,7 +95,7 @@ enum PrivilegedPortService {
         // bundle was updated. Refresh only when the bundled helper or plist
         // changed; unregister must finish killing the old process first.
         if (service.status == .enabled || service.status == .requiresApproval),
-           recordedFingerprint != fingerprint {
+           (recordedFingerprint != fingerprint || forceRefresh) {
             ExternalState.shared.appendLog("launcher", "Refreshing the port helper registration for the installed Xe Launcher bundle.")
             do {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -103,6 +103,14 @@ enum PrivilegedPortService {
                         if let error { continuation.resume(throwing: error) }
                         else { continuation.resume() }
                     }
+                }
+                let removalDeadline = Date().addingTimeInterval(5)
+                while (service.status == .enabled || service.status == .requiresApproval),
+                      Date() < removalDeadline {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                guard service.status == .notRegistered || service.status == .notFound else {
+                    return "macOS has not finished removing the previous port helper registration. Choose Try Again once it does."
                 }
                 needsRegistration = true
             } catch {

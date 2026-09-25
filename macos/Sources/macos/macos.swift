@@ -254,52 +254,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let helperWarning = setupDeferredOnThisLaunch ? nil :
                 (needsPortHelper ? await PrivilegedPortService.registerIfNeeded() :
                     PrivilegedPortService.unregisterIfRegistered())
-            let portWarnings = setupDeferredOnThisLaunch ? [] :
-                workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper) +
-                    (helperWarning.map { [$0] } ?? [])
+            let bindingWarnings = setupDeferredOnThisLaunch ? [] :
+                workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper)
+            let portWarnings = bindingWarnings + (helperWarning.map { [$0] } ?? [])
             for warning in portWarnings {
                 state.appendLog("launcher", "Warning: \(warning)")
             }
             var helperProgressVisible = wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch
+            var nextHelperRecoveryAt = Date().addingTimeInterval(12)
             if needsPortHelper && helperWarning != nil && PrivilegedPortService.status != .enabled {
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = "Port Helper Needs Attention"
                 alert.informativeText = portWarnings.joined(separator: "\n")
                 alert.alertStyle = .warning
-                if PrivilegedPortService.status == .requiresApproval {
-                    if !helperProgressVisible {
-                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
-                        setSetupProgressIndeterminate(true)
-                        helperProgressVisible = true
-                    }
-                    updateSetupProgress(status: "Enable Xe Launcher under Allow in Background. Enter your password if asked; setup will continue automatically.")
-                    alert.addButton(withTitle: "Open System Settings")
-                    alert.addButton(withTitle: "Wait for Approval")
-                    let approvalTimer = Timer(timeInterval: 1, repeats: true) { _ in
-                        if PrivilegedPortService.status == .enabled {
-                            MainActor.assumeIsolated {
-                                NSApp.stopModal(withCode: .alertSecondButtonReturn)
-                            }
+                if !helperProgressVisible {
+                    showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                    setSetupProgressIndeterminate(true)
+                    helperProgressVisible = true
+                }
+                setSetupProgressAction(title: "Open System Settings") {
+                    PrivilegedPortService.openSystemSettings()
+                }
+                let needsApproval = PrivilegedPortService.status == .requiresApproval
+                updateSetupProgress(status: needsApproval
+                    ? "Enable Xe Launcher under Allow in Background in System Settings. Setup will continue automatically."
+                    : "The port helper is not ready. Open System Settings or retry its registration.")
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: needsApproval ? "Wait for Approval" : "Try Again")
+                alert.addButton(withTitle: "Not Now")
+                let approvalTimer = Timer(timeInterval: 1, repeats: true) { _ in
+                    if PrivilegedPortService.status == .enabled {
+                        MainActor.assumeIsolated {
+                            NSApp.stopModal(withCode: .alertSecondButtonReturn)
                         }
                     }
-                    RunLoop.main.add(approvalTimer, forMode: .common)
-                    let response = alert.runModal()
-                    approvalTimer.invalidate()
-                    alert.window.orderOut(nil)
-                    if response == .alertFirstButtonReturn {
-                        PrivilegedPortService.openSystemSettings()
+                }
+                RunLoop.main.add(approvalTimer, forMode: .common)
+                let response = alert.runModal()
+                approvalTimer.invalidate()
+                alert.window.orderOut(nil)
+                if response == .alertFirstButtonReturn {
+                    PrivilegedPortService.openSystemSettings()
+                    nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                } else if response == .alertSecondButtonReturn {
+                    if !needsApproval && PrivilegedPortService.status != .enabled {
+                        if let retryWarning = await PrivilegedPortService.registerIfNeeded() {
+                            state.appendLog("launcher", "Port helper retry: \(retryWarning)")
+                        }
                     }
+                    nextHelperRecoveryAt = Date().addingTimeInterval(needsApproval ? 120 : 20)
                 } else {
-                    alert.runModal()
-                    if helperProgressVisible { closeSetupProgress() }
+                    closeSetupProgress()
                     return
                 }
-            } else if !portWarnings.isEmpty {
+            } else if !bindingWarnings.isEmpty {
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = "Local App Ports Are Unavailable"
-                alert.informativeText = portWarnings.joined(separator: "\n") +
+                alert.informativeText = bindingWarnings.joined(separator: "\n") +
                     "\n\nFree occupied ports; Xe Launcher will retry automatically."
                 alert.alertStyle = .warning
                 alert.runModal()
@@ -309,22 +322,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             // the daemon. Confirm the actual socket handoff before starting
             // Workerd or the browser on standard ports.
             if needsPortHelper && !setupDeferredOnThisLaunch {
-                while true {
-                    if PrivilegedPortService.status == .enabled,
-                       (try? await PrivilegedPortService.acquire()) != nil { break }
+                while !Task.isCancelled {
+                    let helperStatus = PrivilegedPortService.status
+                    var acquireFailure: String?
+                    if helperStatus == .enabled {
+                        do {
+                            _ = try await PrivilegedPortService.acquire()
+                            break
+                        } catch {
+                            acquireFailure = error.localizedDescription
+                        }
+                    }
                     if !helperProgressVisible {
                         showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
                         setSetupProgressIndeterminate(true)
                         helperProgressVisible = true
                     }
-                    updateSetupProgress(status: PrivilegedPortService.status == .enabled
-                        ? "Waiting for macOS to activate the Xe Launcher port helper on ports 80/443…"
-                        : "Enable Xe Launcher under Allow in Background. Enter your password if asked; setup will continue automatically.")
-                    if Task.isCancelled {
-                        closeSetupProgress()
-                        return
+                    setSetupProgressAction(title: "Open System Settings") {
+                        PrivilegedPortService.openSystemSettings()
+                    }
+                    updateSetupProgress(status: helperStatus == .enabled
+                        ? "Xe Launcher is allowed in the background, but its port helper is not responding. Open System Settings or use Try Again when prompted."
+                        : "Enable Xe Launcher under Allow in Background in System Settings. Enter your password if asked; setup will continue automatically.")
+                    if Date() >= nextHelperRecoveryAt {
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = "Port Helper Could Not Start"
+                        alert.informativeText = (acquireFailure.map { "The helper did not respond: \($0)\n\n" } ?? "") +
+                            (helperStatus == .enabled
+                                ? "macOS already lists Xe Launcher as allowed in the background, but its port helper is not responding on ports 80/443. Choose Try Again to refresh the helper registration, or open System Settings to inspect its background switch."
+                                : "Xe Launcher needs its background port helper for local apps on ports 80/443. Open System Settings → General → Login Items & Extensions and allow Xe Launcher, or retry registration.")
+                        alert.addButton(withTitle: "Open System Settings")
+                        alert.addButton(withTitle: "Try Again")
+                        alert.addButton(withTitle: "Not Now")
+                        NSApp.activate(ignoringOtherApps: true)
+                        let response = alert.runModal()
+                        alert.window.orderOut(nil)
+                        if response == .alertFirstButtonReturn {
+                            PrivilegedPortService.openSystemSettings()
+                            nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                        } else if response == .alertSecondButtonReturn {
+                            if let warning = await PrivilegedPortService.registerIfNeeded(forceRefresh: helperStatus == .enabled) {
+                                state.appendLog("launcher", "Port helper retry: \(warning)")
+                            }
+                            nextHelperRecoveryAt = Date().addingTimeInterval(20)
+                        } else {
+                            closeSetupProgress()
+                            return
+                        }
                     }
                     try? await Task.sleep(for: .milliseconds(500))
+                }
+                if Task.isCancelled {
+                    closeSetupProgress()
+                    return
                 }
                 if helperProgressVisible { closeSetupProgress() }
                 state.appendLog("launcher", "Port helper ready; continuing launcher setup.")

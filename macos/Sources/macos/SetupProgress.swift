@@ -32,6 +32,8 @@ nonisolated(unsafe) private var _progressBar: NSProgressIndicator?
 nonisolated(unsafe) private var _titleLabel: NSTextField?
 nonisolated(unsafe) private var _statusLabel: NSTextField?
 nonisolated(unsafe) private var _cancelButton: NSButton?
+nonisolated(unsafe) private var _setupActionButton: NSButton?
+nonisolated(unsafe) private var _setupActionHandler: (() -> Void)?
 private let _cancellation = CancellationToken()
 
 private var setupAppDisplayName: String {
@@ -113,6 +115,8 @@ func showSetupProgress(
             positionSetupPanel(panel, placement: placement)
             _titleLabel?.stringValue = title ?? "Setting up \(setupAppDisplayName)"
             _cancelButton?.isHidden = !allowsCancellation
+            _setupActionButton?.isHidden = true
+            _setupActionHandler = nil
             panel.orderFrontRegardless()
             return
         }
@@ -222,6 +226,14 @@ func showSetupProgress(
     vfx.addSubview(cancelButton)
     _cancelButton = cancelButton
 
+    let actionButton = NSButton(title: "Open System Settings", target: SetupActionHelper.shared,
+                                action: #selector(SetupActionHelper.performAction))
+    actionButton.frame = NSRect(x: (w - 190) / 2, y: 15, width: 190, height: 28)
+    actionButton.bezelStyle = .rounded
+    actionButton.isHidden = true
+    vfx.addSubview(actionButton)
+    _setupActionButton = actionButton
+
     // Dock visibility belongs to the running launcher, not to setup windows.
     // In particular, showing setup during the DMG installation flow must never
     // create a temporary Dock icon or override the user's launcher preference.
@@ -250,6 +262,20 @@ func setSetupProgressIndeterminate(_ isIndeterminate: Bool) {
     } else {
         _progressBar?.stopAnimation(nil)
     }
+}
+
+/// Keep the next macOS permission action available while setup waits.
+@MainActor
+func setSetupProgressAction(title: String, action: @escaping () -> Void) {
+    _setupActionHandler = action
+    _setupActionButton?.title = title
+    _setupActionButton?.isHidden = false
+}
+
+@MainActor
+private class SetupActionHelper: NSObject {
+    static let shared = SetupActionHelper()
+    @objc func performAction() { _setupActionHandler?() }
 }
 
 /// Possible user responses from the error dialog.
@@ -335,6 +361,8 @@ func closeSetupProgress() {
     _titleLabel = nil
     _statusLabel = nil
     _cancelButton = nil
+    _setupActionButton = nil
+    _setupActionHandler = nil
 }
 
 // Clickable label that opens the folder path in Finder on click

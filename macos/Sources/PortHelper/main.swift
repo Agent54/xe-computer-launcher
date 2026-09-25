@@ -1,8 +1,10 @@
 import Foundation
 import Darwin
+import os
 @preconcurrency import XPC
 
 private let serviceName = "dev.xe.computer.ports"
+private let logger = Logger(subsystem: "dev.xe.computer", category: "port-helper")
 
 private func activatedSocket(_ name: String, port: UInt16) -> Int32 {
     var descriptors: UnsafeMutablePointer<Int32>?
@@ -12,24 +14,38 @@ private func activatedSocket(_ name: String, port: UInt16) -> Int32 {
             rebound in name.withCString { launch_activate_socket($0, rebound, &count) }
         }
     }
-    guard result == 0, count == 1, let descriptors else {
+    guard result == 0, count > 0, let descriptors else {
+        logger.error("launchd socket \(name, privacy: .public) unavailable (result \(result), count \(count))")
         fputs("port-helper: launchd socket \(name) unavailable (\(result), count \(count))\n", stderr)
         exit(1)
     }
-    let descriptor = descriptors[0]
-    free(descriptors)
-    var address = sockaddr_in()
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let found = withUnsafeMutablePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+    logger.notice("launchd socket \(name, privacy: .public) supplied \(count) descriptor(s)")
+    // launch_activate_socket may return several descriptors for one named
+    // socket. Keep only the exact IPv4 loopback listener we requested.
+    var selected: Int32?
+    for index in 0..<count {
+        let descriptor = descriptors[index]
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let found = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+        }
+        if found == 0, address.sin_family == AF_INET,
+           address.sin_addr.s_addr == INADDR_LOOPBACK.bigEndian,
+           address.sin_port.bigEndian == port, selected == nil {
+            selected = descriptor
+        } else {
+            logger.error("Ignoring launchd socket \(name, privacy: .public) descriptor (getsockname \(found), family \(address.sin_family), address \(address.sin_addr.s_addr), port \(address.sin_port.bigEndian))")
+            close(descriptor)
+        }
     }
-    guard found == 0, address.sin_family == AF_INET,
-          address.sin_addr.s_addr == INADDR_LOOPBACK.bigEndian,
-          address.sin_port.bigEndian == port else {
-        fputs("port-helper: launchd socket \(name) is not 127.0.0.1:\(port)\n", stderr)
+    free(descriptors)
+    guard let selected else {
+        logger.error("No launchd socket \(name, privacy: .public) descriptor matched 127.0.0.1:\(port)")
+        fputs("port-helper: no launchd socket \(name) matched 127.0.0.1:\(port)\n", stderr)
         exit(1)
     }
-    return descriptor
+    return selected
 }
 
 private func executablePath(pid: Int32) -> String? {
@@ -56,8 +72,10 @@ private func authorizedLauncher(_ peer: xpc_connection_t) -> Bool {
 }
 
 private func runDaemon() -> Never {
+    logger.notice("Starting port helper and activating launchd sockets")
     let http = activatedSocket("ingest", port: 80)
     let https = activatedSocket("tls", port: 443)
+    logger.notice("Port helper acquired loopback sockets for ports 80 and 443")
     let listener = serviceName.withCString {
         xpc_connection_create_mach_service($0, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_LISTENER))
     }
