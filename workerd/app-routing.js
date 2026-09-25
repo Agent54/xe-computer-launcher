@@ -12,9 +12,12 @@ function applicationProtocol(port) {
 }
 
 function routeLabels(hostname) {
-  return hostname.endsWith('.app.localhost')
-    ? [hostname.slice(0, -'.app.localhost'.length), 'localhost']
-    : hostname.split('.');
+  if (!hostname.endsWith('.app.localhost')) return hostname.split('.');
+  const alias = hostname.slice(0, -'.app.localhost'.length);
+  const selectedPort = /^(.*)--p([1-9]\d{0,4})$/.exec(alias);
+  if (selectedPort) return [selectedPort[1], selectedPort[2], 'localhost'];
+  const namedPort = /^(.*)--n([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(alias);
+  return namedPort ? [namedPort[1], namedPort[2], 'localhost'] : [alias, 'localhost'];
 }
 
 export async function resolveApplicationPort(hostname, env) {
@@ -59,7 +62,8 @@ async function protocolResponse(request, service, port, env, canonical = false) 
   }
   url.protocol = 'https:';
   if (url.hostname.endsWith('.app.localhost')) {
-    url.hostname = `${url.hostname.slice(0, -'.app.localhost'.length)}.localhost`;
+    const [name, selector] = routeLabels(url.hostname);
+    url.hostname = canonical ? `${name}.localhost` : `${name}.${selector || published}.localhost`;
   } else if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
   const ports = await readAppPorts(env);
   if (!ports || !ports.publicHttpReady) {

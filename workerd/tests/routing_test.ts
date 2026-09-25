@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import gateway from '../gateway.js';
 import appGateway from '../app-gateway.js';
+import management from '../management.js';
 import tlsGateway from '../tls-gateway.js';
 import router from '../router.js';
 import { surfaceRuntimeFailure } from '../runtime-status.js';
@@ -178,6 +179,52 @@ Deno.test('signed Xe Computer origin can use only the Compose UI routes', async 
   assert.equal(denied.status, 403);
 });
 
+Deno.test('signed Xe Computer origin uses Compose API on the HTTPS UI domain', async () => {
+  const origin = 'isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic';
+  const url = 'https://compose-ui.localhost:5194';
+  let upstream: Request | undefined;
+  const env = {
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ http: 5196, https: 5194, publicHttpReady: true })) },
+    COMPOSE: { fetch: (request: Request) => {
+      upstream = request;
+      return Promise.resolve(Response.json(request.method === 'POST' ? { path: 'stacks/demo' } : []));
+    } },
+    ASSETS: { fetch: () => Promise.resolve(new Response('index')) },
+    MANAGEMENT: { fetch: (request: Request) => management.fetch(request, env) },
+  };
+  const headers = { Origin: origin, 'Sec-Fetch-Site': 'cross-site' };
+  const ports = await appGateway.fetch(new Request(`${url}/v1.24/app-ports`, { headers }), env);
+  assert.equal(ports.status, 200);
+  assert.equal(ports.headers.get('access-control-allow-origin'), origin);
+  assert.deepEqual(await ports.json(), { http: 5196, https: 5194, publicHttpReady: true });
+  for (const path of ['/v1.24/ls?all=true', '/v1.24/config/demo?format=json', '/v1.24/ps/demo?all=true']) {
+    const response = await appGateway.fetch(new Request(`${url}${path}`, { headers }), env);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get('access-control-allow-origin'), origin);
+  }
+  const preflight = await appGateway.fetch(new Request(`${url}/v1.24/repos/checkout`, {
+    method: 'OPTIONS', headers: { ...headers,
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'content-type',
+      'Access-Control-Request-Private-Network': 'true',
+    },
+  }), env);
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-origin'), origin);
+  assert.equal(preflight.headers.get('access-control-allow-private-network'), 'true');
+  const checkout = await appGateway.fetch(new Request(`${url}/v1.24/repos/checkout`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: '{"url":"https://example.com"}',
+  }), env);
+  assert.equal(checkout.status, 200);
+  assert.equal(checkout.headers.get('access-control-allow-origin'), origin);
+  assert.equal(upstream?.url, `${url}/v1.24/repos/checkout`);
+  assert.equal((await appGateway.fetch(new Request(`${url}/v1.24/system`, { headers }), env)).status, 403);
+  assert.equal((await appGateway.fetch(new Request(`${url}/v1.24/ls`, {
+    headers: { Origin: 'https://evil.test', 'Sec-Fetch-Site': 'cross-site' },
+  }), env)).status, 403);
+  assert.equal((await appGateway.fetch(new Request('http://compose-ui.localhost:5196/v1.24/ls', { headers }), env)).status, 403);
+});
+
 Deno.test('runtime failures are enriched only while the supervisor reports an outage', async () => {
   let phase = 'healthy';
   const env = { RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({
@@ -281,6 +328,23 @@ Deno.test('application port selection', async t => {
       const aliased = await alias.json();
       assert.equal(aliased.url, 'http://172.18.0.2:9000/hello');
       assert.equal(aliased.headers['x-forwarded-host'], 'service.app.localhost');
+    });
+    await t.step('certificate-covered HTTPS aliases select published ports', async () => {
+      const response = await appGateway.fetch(new Request('https://service--p8080.app.localhost/hello'), env);
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.url, 'http://172.18.0.2:3000/hello');
+      assert.equal(result.headers['x-forwarded-host'], 'service--p8080.app.localhost');
+      assert.equal(result.headers['x-forwarded-proto'], 'https');
+      const projectRoute = await appGateway.fetch(new Request('https://service_demo--p8080.app.localhost/hello'), env);
+      assert.equal((await projectRoute.json()).url, 'http://172.18.0.2:3000/hello');
+      const named = await appGateway.fetch(new Request('https://service--nweb.app.localhost/hello'), env);
+      assert.equal((await named.json()).url, 'http://172.18.0.2:3000/hello');
+      const secure = await appGateway.fetch(new Request('https://service--p9443.app.localhost/hello'), env);
+      assert.equal(secure.status, 307);
+      assert.equal(secure.headers.get('location'), 'https://service.9443.localhost/hello');
+      const namedSecure = await appGateway.fetch(new Request('https://service--nsecure.app.localhost/hello'), env);
+      assert.equal(namedSecure.headers.get('location'), 'https://service.secure.localhost/hello');
     });
     await t.step('HTTPS application ports redirect to the shared TLS endpoint', async () => {
       const named = await request('service.secure.localhost');

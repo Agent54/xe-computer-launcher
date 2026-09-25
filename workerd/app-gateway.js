@@ -1,6 +1,7 @@
 import { readAppPorts } from './app-ports.js';
 import { routeApplication } from './app-routing.js';
 import { runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
+import { isDarcAPIRequest, addDarcCors, darcPreflight } from './darc-api.js';
 
 const applicationHost = /^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/;
 const uiHost = 'compose-ui.localhost';
@@ -25,12 +26,23 @@ export default {
     }
     if (url.hostname === uiHost) {
       const origin = request.headers.get('Origin');
-      if ((origin && origin !== url.origin) || request.headers.get('Sec-Fetch-Site') === 'cross-site') return denied();
-      const response = await env.MANAGEMENT.fetch(request);
+      const darcAPIRequest = url.protocol === 'https:' && isDarcAPIRequest(request, url, origin);
+      if ((origin && origin !== url.origin && !darcAPIRequest) ||
+          (request.headers.get('Sec-Fetch-Site') === 'cross-site' && !darcAPIRequest)) return denied();
+      if (darcAPIRequest && request.method === 'OPTIONS') return darcPreflight(request, url, origin);
+      const forwardedHeaders = new Headers(request.headers);
+      if (darcAPIRequest) {
+        // The public gateway has already checked the signed app and API route.
+        // The private management worker still rejects browser cross-site headers.
+        forwardedHeaders.delete('Origin');
+        forwardedHeaders.delete('Sec-Fetch-Site');
+      }
+      const response = await env.MANAGEMENT.fetch(new Request(request, { headers: forwardedHeaders }));
       const headers = new Headers(response.headers);
       headers.set('X-Content-Type-Options', 'nosniff');
       headers.set('Referrer-Policy', 'no-referrer');
       headers.set('X-Frame-Options', 'DENY');
+      if (darcAPIRequest) addDarcCors(headers, origin);
       headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }

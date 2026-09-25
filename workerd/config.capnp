@@ -8,6 +8,7 @@ const config :Workerd.Config = (
         (name = "gateway.js", esModule = embed "gateway.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
+        (name = "darc-api.js", esModule = embed "darc-api.js"),
       ],
       globalOutbound = "deny",
       bindings = [
@@ -23,6 +24,7 @@ const config :Workerd.Config = (
         (name = "app-routing.js", esModule = embed "app-routing.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
+        (name = "darc-api.js", esModule = embed "darc-api.js"),
       ],
       globalOutbound = "deny",
       bindings = [
@@ -37,6 +39,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "management.js", esModule = embed "management.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
+        (name = "app-ports.js", esModule = embed "app-ports.js"),
       ],
       globalOutbound = "deny",
       bindings = [

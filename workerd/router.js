@@ -71,8 +71,12 @@ export default {
       return new Response('Invalid application hostname', { status: 403 });
     }
     const appAlias = url.hostname.endsWith('.app.localhost');
+    const alias = appAlias ? url.hostname.slice(0, -'.app.localhost'.length) : '';
+    const selectedPort = /^(.*)--p([1-9]\d{0,4})$/.exec(alias);
+    const namedPort = /^(.*)--n([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(alias);
     const [name, portPart] = appAlias
-      ? [url.hostname.slice(0, -'.app.localhost'.length), undefined]
+      ? selectedPort ? [selectedPort[1], selectedPort[2]] :
+        namedPort ? [namedPort[1], namedPort[2]] : [alias, undefined]
       : url.hostname.split('.');
     try {
       const containers = await discover(env);

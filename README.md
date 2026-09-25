@@ -57,6 +57,11 @@ HTTP services also work from the shared HTTPS listener. Their HTTPS UI links
 use `<service>_<project>.app.localhost` on that same port, where Workerd
 terminates TLS with a generated local certificate. HTTPS services keep their
 existing `<service>_<project>.localhost` names and container certificates.
+The Xe Computer launcher links to each published port using
+`https://<service>_<project>--n<name>.app.localhost` for named ports, or
+`https://<service>_<project>--p<published>.app.localhost` for numeric ports, on
+the selected HTTPS port. An HTTPS service redirects from that alias to its
+container TLS route.
 
 On first launch, Xe Launcher generates a private local certificate authority
 and a server certificate for `compose-ui.localhost` and single-label

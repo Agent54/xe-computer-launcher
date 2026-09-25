@@ -38,6 +38,8 @@ services:
 - `app.localhost` uses the first TCP entry in YAML order (`8080` → `3000`).
 - `app.8080.localhost` selects the published port `8080`.
 - `app.web.localhost` selects the port named `web`.
+- `app--p8080.app.localhost` selects published port `8080` through the shared HTTPS listener using the launcher's certificate. Add the selected HTTPS listener port when it is not 443.
+- `app--nweb.app.localhost` selects the named `web` port on that HTTPS listener.
 
 Short syntax such as `"8080:3000"` supports default and numeric routes too.
 Names used in URLs must be a single hostname label (letters, digits or hyphens);
@@ -47,6 +49,9 @@ from the Compose API within two seconds.
 
 The Compose UI uses `compose-ui.localhost` on those same HTTP and HTTPS ports.
 It shares the application gateway and never needs a separate published port.
+The signed Xe Computer app can fetch its selected ports and the limited Compose
+project and checkout API at the HTTPS UI origin. Custom HTTPS ports are discovered
+through the private management listener before those API requests use HTTPS.
 Port 8094 is only the loopback management/API listener; app hostnames on it are
 forbidden. Browser navigation to its UI root redirects to the selected public
 Compose UI hostname and HTTP port only when that listener is ready; otherwise

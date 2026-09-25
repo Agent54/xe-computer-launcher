@@ -1,4 +1,5 @@
 import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
+import { readAppPorts } from './app-ports.js';
 
 const mimeTypes = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
@@ -18,6 +19,12 @@ export default {
     }
     if (url.pathname === '/v1.24/runtime-status' && request.method === 'GET') {
       return Response.json(await readRuntimeStatus(env), { headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/v1.24/app-ports' && request.method === 'GET') {
+      const ports = await readAppPorts(env);
+      return ports
+        ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
+        : new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
     if (/^\/v1\.24\//.test(url.pathname)) {
       const headers = new Headers(request.headers);
