@@ -689,7 +689,7 @@ else
     open "$SOURCE_APP"
 
     log "checking for the Gatekeeper first-open confirmation"
-    if press_ui_button "" "Open" "downloaded from the Internet" 15; then
+    if press_ui_button "" "Open" "downloaded from the Internet" 15 2>/dev/null; then
         log "approved the Gatekeeper first-open confirmation"
     else
         log "no Gatekeeper first-open confirmation appeared"
@@ -738,7 +738,7 @@ if [[ "$DEV_MODE" == true ]]; then
     open -n "$INSTALLED_APP" --args "$INSTALLED_RELAUNCH_ARGUMENT"
 else
     log "checking for a Gatekeeper confirmation for the installed copy"
-    if press_ui_button "" "Open" "downloaded from the Internet" 10; then
+    if press_ui_button "" "Open" "downloaded from the Internet" 10 2>/dev/null; then
         log "approved the Gatekeeper confirmation for the installed copy"
     else
         log "no Gatekeeper confirmation appeared for the installed copy"
@@ -908,7 +908,21 @@ helium_sha256="$(plutil -extract helium.sha256 raw "$sources_manifest")"
 [[ "$helium_sha256" == "f1a3fecde3c08254f1b1eec30e36ecd25f98cf3799644427fbcefd6e6beafacf" ]] \
     || fail "unexpected pinned Helium SHA-256: $helium_sha256"
 installed_helium="$APP_DATA/helium/$helium_version/Helium.app"
-[[ -d "$installed_helium" ]] || fail "versioned Helium engine was not installed"
+log "waiting for the versioned Helium browser engine"
+deadline=$((SECONDS + 240))
+next_progress_report=$((SECONDS + 30))
+while [[ ! -d "$installed_helium" ]] && (( SECONDS < deadline )); do
+    if (( SECONDS >= next_progress_report )); then
+        log "still waiting for Helium $helium_version to finish downloading and installing"
+        next_progress_report=$((SECONDS + 30))
+    fi
+    sleep 1
+done
+if [[ ! -d "$installed_helium" ]]; then
+    log "Helium staging directories, if any:"
+    find "$APP_DATA" -maxdepth 1 -type d -name '.helium-update-*' -print || true
+    fail "versioned Helium engine was not installed within 240 seconds"
+fi
 installed_helium_version="$(plutil -extract CFBundleShortVersionString raw "$installed_helium/Contents/Info.plist")"
 [[ "$installed_helium_version" == "$helium_version" ]] \
     || fail "installed Helium $installed_helium_version does not match pin $helium_version"
@@ -930,7 +944,7 @@ if pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null; then
 fi
 
 log "waiting for the managed Xe Computer app shim"
-deadline=$((SECONDS + 90))
+deadline=$((SECONDS + 240))
 while (( SECONDS < deadline )); do
     if [[ -d "$MANAGED_XE_COMPUTER_APP" ]] \
         && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
