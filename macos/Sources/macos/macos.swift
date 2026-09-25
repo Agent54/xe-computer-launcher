@@ -405,9 +405,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             } catch {
                 installationError = error
             }
-            let nowTrusted = await Task.detached(priority: .userInitiated) {
-                LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
-            }.value
+            // The security tool exits after authorization, but the new user
+            // trust setting can take a moment to become visible to a separate
+            // Security.framework evaluation.
+            let trustDeadline = Date().addingTimeInterval(10)
+            var nowTrusted = false
+            repeat {
+                nowTrusted = await Task.detached(priority: .userInitiated) {
+                    LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
+                }.value
+                if nowTrusted || installationError != nil || Date() >= trustDeadline { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            } while !Task.isCancelled
             closeSetupProgress()
             if nowTrusted {
                 ExternalState.shared.appendLog("launcher", "Local HTTPS certificate trusted for this macOS user.")

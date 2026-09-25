@@ -8,10 +8,12 @@ struct LocalTLSCertificateTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let prepared = try LocalTLSCertificate.prepare(stateURL: root)
         #expect(prepared.createdCertificate)
+        #expect(LocalHTTPSTrust.loadCertificate(at: prepared.certificateURL) != nil)
         #expect(!LocalHTTPSTrust.isTrusted(certificateURL: prepared.certificateURL))
         #expect(String(decoding: try Data(contentsOf: prepared.certificateURL), as: UTF8.self)
             .contains("BEGIN CERTIFICATE"))
         let leaf = root.appendingPathComponent("ui-https/ui.crt")
+        #expect(LocalHTTPSTrust.loadCertificate(at: leaf) != nil)
         let leafData = try Data(contentsOf: leaf)
         let key = root.appendingPathComponent("ui-https/ui.key")
         let attributes = try FileManager.default.attributesOfItem(atPath: key.path)

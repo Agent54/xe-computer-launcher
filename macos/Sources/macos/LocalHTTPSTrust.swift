@@ -20,10 +20,8 @@ enum LocalHTTPSTrustError: LocalizedError {
 enum LocalHTTPSTrust {
     static func isTrusted(certificateURL: URL) -> Bool {
         let leafURL = certificateURL.deletingLastPathComponent().appendingPathComponent("ui.crt")
-        guard let rootData = try? Data(contentsOf: certificateURL),
-              let leafData = try? Data(contentsOf: leafURL),
-              let root = SecCertificateCreateWithData(nil, rootData as CFData),
-              let leaf = SecCertificateCreateWithData(nil, leafData as CFData) else {
+        guard let root = loadCertificate(at: certificateURL),
+              let leaf = loadCertificate(at: leafURL) else {
             return false
         }
 
@@ -34,6 +32,22 @@ enum LocalHTTPSTrust {
             return false
         }
         return SecTrustEvaluateWithError(trust, nil)
+    }
+
+    /// OpenSSL writes our certificates in PEM format, while Security.framework
+    /// requires DER bytes when creating a SecCertificate.
+    static func loadCertificate(at url: URL) -> SecCertificate? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let certificate = SecCertificateCreateWithData(nil, data as CFData) {
+            return certificate
+        }
+        guard let text = String(data: data, encoding: .utf8),
+              let begin = text.range(of: "-----BEGIN CERTIFICATE-----"),
+              let end = text.range(of: "-----END CERTIFICATE-----", range: begin.upperBound..<text.endIndex),
+              let der = Data(base64Encoded: String(text[begin.upperBound..<end.lowerBound].filter { !$0.isWhitespace })) else {
+            return nil
+        }
+        return SecCertificateCreateWithData(nil, der as CFData)
     }
 
     /// Apple's security tool adds the CA to the current user's default Keychain
