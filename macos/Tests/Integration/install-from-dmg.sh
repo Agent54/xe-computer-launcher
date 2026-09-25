@@ -129,6 +129,24 @@ stop_runner_auth_helper() {
     fi
 }
 
+wait_for_certificate_auth_helper() {
+    [[ -n "$runner_certificate_auth_pid" ]] || return 0
+    local helper_pid="$runner_certificate_auth_pid"
+    local watchdog_pid
+    local helper_status
+    (
+        sleep 45
+        kill -TERM "$helper_pid" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+    if wait "$helper_pid"; then helper_status=0; else helper_status=$?; fi
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    runner_certificate_auth_pid=""
+    [[ "$helper_status" -eq 0 ]] \
+        || fail "certificate authorization helper could not complete the macOS password prompt (status $helper_status)"
+}
+
 # Find a button anywhere in a process window. NSAlert buttons are commonly in
 # sheets or nested groups, so addressing "button ... of window 1" is not
 # reliable. AXPress is preferred; a click at the AX frame center is the
@@ -812,6 +830,7 @@ stop_runner_auth_helper permission
 log "approving the generated local HTTPS certificate in the macOS user Keychain"
 root_certificate="$APP_DATA/workerd/ui-https/root.crt"
 leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
+wait_for_certificate_auth_helper
 certificate_trusted=false
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
