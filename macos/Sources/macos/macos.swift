@@ -251,6 +251,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         Task { @MainActor in
+            let workerdStateURL = WorkerdPaths.stateURL
+            let orphanMessages = await Task.detached(priority: .userInitiated) {
+                WorkerdOrphanCleanup.stopOrphans(stateURL: workerdStateURL)
+            }.value
+            for message in orphanMessages { state.appendLog("launcher", message) }
             let helperWarning = setupDeferredOnThisLaunch ? nil :
                 (needsPortHelper ? await PrivilegedPortService.registerIfNeeded() :
                     PrivilegedPortService.unregisterIfRegistered())
@@ -262,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
             var helperProgressVisible = wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch
             var nextHelperRecoveryAt = Date().addingTimeInterval(12)
+            var nextHelperRegistrationAt = Date().addingTimeInterval(5)
             if needsPortHelper && helperWarning != nil && PrivilegedPortService.status != .enabled {
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
@@ -332,6 +338,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         } catch {
                             acquireFailure = error.localizedDescription
                         }
+                    } else if (helperStatus == .notRegistered || helperStatus == .notFound),
+                              Date() >= nextHelperRegistrationAt {
+                        // Re-enabling the background item in System Settings
+                        // does not register a daemon that was removed during an
+                        // app update. Retry the app's registration after consent.
+                        if let warning = await PrivilegedPortService.registerIfNeeded() {
+                            state.appendLog("launcher", "Port helper registration retry: \(warning)")
+                        }
+                        nextHelperRegistrationAt = Date().addingTimeInterval(10)
+                        continue
                     }
                     if !helperProgressVisible {
                         showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
@@ -341,9 +357,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     setSetupProgressAction(title: "Open System Settings") {
                         PrivilegedPortService.openSystemSettings()
                     }
-                    updateSetupProgress(status: helperStatus == .enabled
-                        ? "Xe Launcher is allowed in the background, but its port helper is not responding. Open System Settings or use Try Again when prompted."
-                        : "Enable Xe Launcher under Allow in Background in System Settings. Enter your password if asked; setup will continue automatically.")
+                    let helperStatusMessage: String
+                    if helperStatus == .enabled {
+                        helperStatusMessage = "Xe Launcher is allowed in the background, but its port helper is not responding. Open System Settings or use Try Again when prompted."
+                    } else if helperStatus == .requiresApproval {
+                        helperStatusMessage = "Enable Xe Launcher under Allow in Background in System Settings. Enter your password if asked; setup will continue automatically."
+                    } else {
+                        helperStatusMessage = "macOS removed the port helper registration. Xe Launcher is retrying it; keep Xe Launcher enabled under Allow in Background."
+                    }
+                    updateSetupProgress(status: helperStatusMessage)
                     if Date() >= nextHelperRecoveryAt {
                         let alert = NSAlert()
                         alert.alertStyle = .warning
@@ -394,17 +416,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
             if !setupDeferredOnThisLaunch { startHostServices() }
             if needsPortHelper && !setupDeferredOnThisLaunch {
-                showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
-                updateSetupProgress(status: "Starting local app routing on ports 80/443…")
-                setSetupProgressIndeterminate(true)
+                let showRoutingProgressAt = ContinuousClock.now + .seconds(wasChoosingPorts ? 0 : 2)
+                var routingProgressVisible = false
                 while !workerdServer.servingStandardPorts {
                     if Task.isCancelled {
-                        closeSetupProgress()
+                        if routingProgressVisible { closeSetupProgress() }
                         return
+                    }
+                    if !routingProgressVisible && ContinuousClock.now >= showRoutingProgressAt {
+                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                        updateSetupProgress(status: "Starting local app routing on ports 80/443…")
+                        setSetupProgressIndeterminate(true)
+                        routingProgressVisible = true
                     }
                     try? await Task.sleep(for: .milliseconds(500))
                 }
-                closeSetupProgress()
+                if routingProgressVisible { closeSetupProgress() }
             }
             startBackgroundInitialization()
         }

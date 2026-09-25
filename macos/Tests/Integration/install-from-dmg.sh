@@ -791,13 +791,18 @@ elif press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Atte
             break
         fi
         if (( SECONDS >= next_approval_update )); then
-            log "port helper is not active yet; complete any macOS password prompt"
+            log "port helper is not active yet; complete any macOS password prompt while Xe Launcher retries registration"
             next_approval_update=$((SECONDS + 10))
         fi
         sleep 1
     done
-    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
-        || fail "macOS did not activate the approved port helper; leave its background switch on and complete administrator authentication"
+    if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+        log "recent Service Management registration events:"
+        /usr/bin/log show --last 5m --style compact \
+            --predicate 'process == "smd" AND eventMessage CONTAINS "dev.xe.computer.ports"' \
+            2>/dev/null || true
+        fail "macOS did not register the port helper after approval; inspect the registration events above"
+    fi
     stop_runner_auth_helper
 
     log "Xe Launcher should activate ports 80/443 without restarting"
@@ -836,15 +841,20 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         && security verify-cert -q -L -p ssl -n compose-ui.localhost \
-            -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
+            -c "$leaf_certificate" >/dev/null 2>&1; then
         certificate_trusted=true
         break
     fi
     sleep 1
 done
 stop_runner_auth_helper certificate
-[[ "$certificate_trusted" == true ]] \
-    || fail "macOS did not trust Xe Launcher's generated local HTTPS certificate; approve the Keychain authentication prompt"
+if [[ "$certificate_trusted" != true ]]; then
+    log "current user's default Keychain:"
+    security default-keychain -d user || true
+    log "installed Xe Launcher CA certificates:"
+    security find-certificate -a -c 'Xe Computer Local Development CA' -Z || true
+    fail "macOS did not trust Xe Launcher's generated local HTTPS certificate; inspect the Keychain installation above"
+fi
 
 log "waiting for Compose UI on ports 80 and 443"
 standard_ports_ready=false
@@ -855,7 +865,6 @@ while (( SECONDS < deadline )); do
         --output /dev/null 'http://compose-ui.localhost/' \
         && [[ -f "$APP_DATA/workerd/ui-https/root.crt" ]] \
         && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
-            --cacert "$APP_DATA/workerd/ui-https/root.crt" \
             --resolve 'compose-ui.localhost:443:127.0.0.1' \
             --output /dev/null 'https://compose-ui.localhost/'; then
         standard_ports_ready=true
@@ -866,6 +875,9 @@ done
 if [[ "$standard_ports_ready" != true ]]; then
     log "listeners on standard ports, if any:"
     lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
+    log "Xe Launcher workerd processes and their parents:"
+    /bin/ps -ww -eo pid=,ppid=,uid=,args= \
+        | /usr/bin/grep '[C]ontents/Helpers/workerd serve --experimental' || true
     log "port helper launchd state:"
     launchctl print system/dev.xe.computer.ports || true
     log "recent port helper startup messages:"

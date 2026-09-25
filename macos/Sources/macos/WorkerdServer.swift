@@ -10,6 +10,94 @@ enum WorkerdPaths {
     static let uiURL = URL(string: "http://127.0.0.1:8094/")!
 }
 
+/// A Sparkle replacement can end the old launcher before its Workerd child
+/// exits. The child is then adopted by launchd and keeps ports 80/443 open,
+/// preventing the new launchd socket activation from binding them.
+enum WorkerdOrphanCleanup {
+    static func stopOrphans(stateURL: URL) -> [String] {
+        let result: ProcessCaptureResult
+        do {
+            result = try ProcessCapture.standardOutput(
+                executableURL: URL(fileURLWithPath: "/bin/ps"),
+                arguments: ["-ww", "-eo", "pid=,ppid=,uid=,args="]
+            )
+        } catch {
+            return ["Could not inspect earlier workerd processes: \(error.localizedDescription)"]
+        }
+        guard result.exitCode == 0 else {
+            return ["Could not inspect earlier workerd processes (ps exited \(result.exitCode))."]
+        }
+        let currentUID = getuid()
+        let output = String(decoding: result.standardOutput, as: UTF8.self)
+        var messages: [String] = []
+        for pid in candidatePIDs(in: output, stateURL: stateURL, currentUID: currentUID) {
+            guard isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) else { continue }
+
+            guard kill(pid, SIGTERM) == 0 else {
+                messages.append("Could not stop an earlier Xe Launcher workerd (pid \(pid)): \(String(cString: strerror(errno))).")
+                continue
+            }
+            messages.append("Stopping an orphaned Xe Launcher workerd from a previous app launch (pid \(pid)).")
+            let deadline = Date().addingTimeInterval(2)
+            while Date() < deadline && isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) {
+                if kill(pid, SIGKILL) == 0 {
+                    messages.append("The orphaned workerd did not stop after 2 seconds; force-stopped pid \(pid).")
+                } else {
+                    messages.append("Could not force-stop orphaned workerd pid \(pid): \(String(cString: strerror(errno))).")
+                }
+            }
+        }
+        return messages
+    }
+
+    static func candidatePIDs(in output: String, stateURL: URL, currentUID: uid_t) -> [pid_t] {
+        var candidates: [pid_t] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let fields = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
+            guard fields.count == 4,
+                  let pid = pid_t(fields[0]),
+                  let parentPID = pid_t(fields[1]), parentPID == 1,
+                  let uid = uid_t(fields[2]), uid == currentUID,
+                  matchesOwnedOrphan(parentPID: parentPID, uid: uid,
+                                     commandAndArguments: String(fields[3]),
+                                     stateURL: stateURL, currentUID: currentUID) else { continue }
+            candidates.append(pid)
+        }
+        return candidates
+    }
+
+    private static func isOwnedOrphan(pid: pid_t, stateURL: URL, currentUID: uid_t) -> Bool {
+        guard let result = try? ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-ww", "-p", "\(pid)", "-o", "ppid=,uid=,args="]
+        ), result.exitCode == 0 else { return false }
+        let line = String(decoding: result.standardOutput, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = line.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+        guard fields.count == 3,
+              let parentPID = pid_t(fields[0]),
+              let uid = uid_t(fields[1]) else { return false }
+        let commandAndArguments = String(fields[2])
+        // `comm` is truncated at spaces in /Applications/Xe Launcher.app;
+        // use the full argument line and this user's private config instead.
+        return matchesOwnedOrphan(parentPID: parentPID, uid: uid,
+                                  commandAndArguments: commandAndArguments,
+                                  stateURL: stateURL, currentUID: currentUID)
+    }
+
+    static func matchesOwnedOrphan(parentPID: pid_t, uid: uid_t,
+                                   commandAndArguments: String, stateURL: URL,
+                                   currentUID: uid_t) -> Bool {
+        let configPath = stateURL.appendingPathComponent("ui-https/config.capnp").path
+        return parentPID == 1 && uid == currentUID &&
+            commandAndArguments.contains("/Contents/Helpers/workerd serve --experimental \(configPath) --socket-addr") &&
+            commandAndArguments.contains("management=127.0.0.1:8094")
+    }
+}
+
 enum WorkerdError: LocalizedError {
     case missingResource(String)
     case exited(Int32)

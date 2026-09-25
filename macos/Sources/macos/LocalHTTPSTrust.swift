@@ -3,14 +3,17 @@ import Security
 
 enum LocalHTTPSTrustError: LocalizedError {
     case certificateUnavailable
-    case installationFailed
+    case keychainUnavailable
+    case installationFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .certificateUnavailable:
             "The local HTTPS certificate is unavailable."
-        case .installationFailed:
-            "macOS did not install the local HTTPS certificate."
+        case .keychainUnavailable:
+            "macOS did not identify the current user's default Keychain."
+        case .installationFailed(let detail):
+            "macOS did not install the local HTTPS certificate: \(detail)"
         }
     }
 }
@@ -20,14 +23,17 @@ enum LocalHTTPSTrustError: LocalizedError {
 enum LocalHTTPSTrust {
     static func isTrusted(certificateURL: URL) -> Bool {
         let leafURL = certificateURL.deletingLastPathComponent().appendingPathComponent("ui.crt")
-        guard let root = loadCertificate(at: certificateURL),
+        guard loadCertificate(at: certificateURL) != nil,
               let leaf = loadCertificate(at: leafURL) else {
             return false
         }
 
         let policy = SecPolicyCreateSSL(true, "compose-ui.localhost" as CFString)
         var trust: SecTrust?
-        guard SecTrustCreateWithCertificates([leaf, root] as CFArray, policy, &trust) == errSecSuccess,
+        // Supplying the self-signed root in this chain can make macOS accept
+        // it even when no Keychain trusts it. Browser verification starts with
+        // the leaf and must discover the installed root on its own.
+        guard SecTrustCreateWithCertificates(leaf, policy, &trust) == errSecSuccess,
               let trust else {
             return false
         }
@@ -56,16 +62,33 @@ enum LocalHTTPSTrust {
         guard FileManager.default.fileExists(atPath: certificateURL.path) else {
             throw LocalHTTPSTrustError.certificateUnavailable
         }
+        let keychainResult = try ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/usr/bin/security"),
+            arguments: ["default-keychain", "-d", "user"]
+        )
+        let keychainPath = String(decoding: keychainResult.standardOutput, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        guard keychainResult.exitCode == 0, keychainPath.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: keychainPath) else {
+            throw LocalHTTPSTrustError.keychainUnavailable
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", certificateURL.path]
+        process.arguments = ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl",
+                             "-k", keychainPath, certificateURL.path]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        let errors = Pipe()
+        process.standardError = errors
         try process.run()
+        let errorData = errors.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-            throw LocalHTTPSTrustError.installationFailed
+            let detail = String(decoding: errorData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw LocalHTTPSTrustError.installationFailed(
+                detail.isEmpty ? "security exited \(process.terminationStatus)" : detail)
         }
     }
 }

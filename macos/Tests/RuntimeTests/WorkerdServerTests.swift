@@ -10,6 +10,32 @@ struct WorkerdServerTests {
     private let macosRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 
+    @Test func orphanCleanupOnlySelectsThisAccountsXeWorkerd() {
+        let stateURL = URL(fileURLWithPath: "/Users/test/Library/Application Support/dev.xe.computer/workerd")
+        let command = "/Applications/Xe Launcher.app/Contents/Helpers/workerd serve --experimental " +
+            stateURL.appendingPathComponent("ui-https/config.capnp").path +
+            " --socket-addr management=127.0.0.1:8094 --socket-fd ingest=3"
+        func matches(_ parentPID: pid_t = 1, _ uid: uid_t = 501, _ args: String = command,
+                     _ directory: URL = stateURL) -> Bool {
+            WorkerdOrphanCleanup.matchesOwnedOrphan(parentPID: parentPID, uid: uid,
+                                                    commandAndArguments: args, stateURL: directory,
+                                                    currentUID: 501)
+        }
+        #expect(matches())
+        #expect(!matches(42))
+        #expect(!matches(1, 502))
+        #expect(!matches(1, 501, command.replacingOccurrences(of: "/Contents/Helpers/workerd", with: "/Other/workerd")))
+        #expect(!matches(1, 501, command.replacingOccurrences(of: "management=127.0.0.1:8094", with: "management=127.0.0.1:8095")))
+        #expect(!matches(1, 501, command, stateURL.appendingPathComponent("another-app")))
+        let psOutput = """
+           77     1   501 \(command)
+           78    77   501 \(command)
+           79     1   502 \(command)
+           80     1   501 /usr/local/bin/workerd serve --experimental \(stateURL.path)/ui-https/config.capnp --socket-addr management=127.0.0.1:8094
+           """
+        #expect(WorkerdOrphanCleanup.candidatePIDs(in: psOutput, stateURL: stateURL, currentUID: 501) == [77])
+    }
+
     @Test func hostLifecycleWithoutVM() async throws {
         let root = URL(fileURLWithPath: "/tmp/xe-workerd-\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: root) }
