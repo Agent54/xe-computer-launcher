@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Sparkle
 
@@ -85,6 +86,10 @@ private enum ShutdownComponent: CaseIterable, Hashable {
 @main
 struct MacOSApp {
     static func main() {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--xe-accessibility-trust-probe" {
+            exit(AXIsProcessTrusted() ? 0 : 1)
+        }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--unregister-port-helper" {
             if let warning = PrivilegedPortService.unregisterIfRegistered() {

@@ -17,7 +17,8 @@ INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
 TEST_STARTED_AT="$(date '+%Y-%m-%d %H:%M:%S')"
 runner_password="${XE_CI_MAC_PASSWORD:-}"
 unset XE_CI_MAC_PASSWORD
-runner_auth_pid=""
+runner_permission_auth_pid=""
+runner_certificate_auth_pid=""
 
 log() {
     printf '[installer-integration] %s\n' "$*"
@@ -93,7 +94,7 @@ run_with_timeout() {
 
 # The optional secret is passed only to this short-lived GUI helper, never as
 # a command-line argument or to the applications under test. Only enter it in
-# a frontmost macOS authorization dialog with a password field and text tying
+# a matching macOS authorization dialog with a password field and text tying
 # the request to Xe Launcher, System Settings, or Xe's generated certificate.
 start_runner_auth_helper() {
     local auth_kind="${1:-permission}"
@@ -102,15 +103,30 @@ start_runner_auth_helper() {
         XE_CI_AUTH_KIND="$auth_kind" \
         XE_CI_CERT_PATH="$APP_DATA/workerd/ui-https/root.crt" \
         osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" 2>/dev/null &
-    runner_auth_pid=$!
+    if [[ "$auth_kind" == certificate ]]; then
+        runner_certificate_auth_pid=$!
+    else
+        runner_permission_auth_pid=$!
+    fi
     log "optional macOS authorization helper is watching for a $auth_kind password dialog"
 }
 
 stop_runner_auth_helper() {
-    [[ -n "$runner_auth_pid" ]] || return 0
-    kill "$runner_auth_pid" 2>/dev/null || true
-    wait "$runner_auth_pid" 2>/dev/null || true
-    runner_auth_pid=""
+    local auth_kind="${1:-all}"
+    if [[ "$auth_kind" == all || "$auth_kind" == permission ]]; then
+        if [[ -n "$runner_permission_auth_pid" ]]; then
+            kill "$runner_permission_auth_pid" 2>/dev/null || true
+            wait "$runner_permission_auth_pid" 2>/dev/null || true
+            runner_permission_auth_pid=""
+        fi
+    fi
+    if [[ "$auth_kind" == all || "$auth_kind" == certificate ]]; then
+        if [[ -n "$runner_certificate_auth_pid" ]]; then
+            kill "$runner_certificate_auth_pid" 2>/dev/null || true
+            wait "$runner_certificate_auth_pid" 2>/dev/null || true
+            runner_certificate_auth_pid=""
+        fi
+    fi
 }
 
 # Find a button anywhere in a process window. NSAlert buttons are commonly in
@@ -384,11 +400,10 @@ on run argv
     set timeoutSeconds to item 2 of argv as integer
     set certificatePath to item 3 of argv
     set wantedIdentifier to appName & "_Toggle"
-    set pressedToggle to false
-    set confirmedPolls to 0
 
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
+            if exists disk item certificatePath of application "System Events" then return "app continued"
             if exists application process "System Settings" then
                 tell application process "System Settings"
                     repeat with uiWindow in windows
@@ -414,23 +429,8 @@ on run argv
                                     try
                                         set toggleValue to value of uiElement as integer
                                     end try
-                                    if toggleValue is 1 then
-                                        -- Xe Launcher creates this certificate only after
-                                        -- AXIsProcessTrusted() succeeds. Its next macOS
-                                        -- password dialog can open before this poll finishes;
-                                        -- that dialog must not keep Accessibility pending.
-                                        if exists disk item certificatePath of application "System Events" then return "enabled"
-                                        if not my authorizationPending() then
-                                            set confirmedPolls to confirmedPolls + 1
-                                            if confirmedPolls ≥ 8 then return "enabled"
-                                        else
-                                            set confirmedPolls to 0
-                                        end if
-                                    else
-                                        set confirmedPolls to 0
-                                    end if
-
-                                    if toggleValue is 0 and not pressedToggle then
+                                    if toggleValue is 1 then return "Accessibility switch is on"
+                                    if toggleValue is 0 then
                                         set togglePosition to position of uiElement
                                         set toggleSize to size of uiElement
                                         try
@@ -438,8 +438,8 @@ on run argv
                                         on error
                                             click at {item 1 of togglePosition + (item 1 of toggleSize div 2), item 2 of togglePosition + (item 2 of toggleSize div 2)}
                                         end try
-                                        set pressedToggle to true
                                         log "Clicked the Xe Launcher Accessibility switch; waiting for macOS approval"
+                                        return "Accessibility switch was clicked"
                                     end if
                                     exit repeat
                                 end if
@@ -449,35 +449,24 @@ on run argv
                 end tell
             end if
 
-            if attemptNumber mod 40 is 0 then log "Still waiting for confirmed Accessibility access for " & appName
+            if attemptNumber mod 40 is 0 then log "Still waiting for the Accessibility switch for " & appName
             delay 0.25
         end repeat
         error "Timed out waiting for the Accessibility switch for " & appName
     end tell
 end run
-
-on authorizationPending()
-    tell application "System Events"
-        repeat with processName in {"SecurityAgent", "AuthorizationHost", "CoreAuthenticationAgent"}
-            try
-                if exists application process (contents of processName) then
-                    if (count of windows of application process (contents of processName)) > 0 then return true
-                end if
-            end try
-        end repeat
-        if exists application process "System Settings" then
-            tell application process "System Settings"
-                repeat with uiWindow in windows
-                    try
-                        if (count of sheets of uiWindow) > 0 then return true
-                    end try
-                end repeat
-            end tell
-        end if
-    end tell
-    return false
-end authorizationPending
 APPLESCRIPT
+
+    # The switch can show on before the running app sees its new TCC grant.
+    # Certificate generation is the first step after the app's own trust check.
+    # Poll the filesystem here so a subsequent password prompt cannot block
+    # another System Settings Accessibility traversal.
+    local deadline=$((SECONDS + timeout_seconds))
+    while (( SECONDS < deadline )); do
+        [[ -f "$certificate_path" ]] && return 0
+        sleep 1
+    done
+    fail "Xe Launcher did not continue after Accessibility approval; no local HTTPS certificate was generated"
 }
 
 grant_background_port_helper_permission() {
@@ -816,11 +805,11 @@ start_runner_auth_helper
 drain_accessibility_permission_prompts "$APP_NAME" 60
 
 log "granting Accessibility access to the installed app"
+start_runner_auth_helper certificate
 grant_accessibility_permission "$APP_NAME" 90
-stop_runner_auth_helper
+stop_runner_auth_helper permission
 
 log "approving the generated local HTTPS certificate in the macOS user Keychain"
-start_runner_auth_helper certificate
 root_certificate="$APP_DATA/workerd/ui-https/root.crt"
 leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
 certificate_trusted=false
@@ -834,7 +823,7 @@ while (( SECONDS < deadline )); do
     fi
     sleep 1
 done
-stop_runner_auth_helper
+stop_runner_auth_helper certificate
 [[ "$certificate_trusted" == true ]] \
     || fail "macOS did not trust Xe Launcher's generated local HTTPS certificate; approve the Keychain authentication prompt"
 

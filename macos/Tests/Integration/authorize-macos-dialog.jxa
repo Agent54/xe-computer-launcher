@@ -18,9 +18,16 @@ function run() {
     // Terminal owns the menu bar. Inspect only known authorization processes,
     // then focus the matching secure field before typing the secret.
     const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings', 'security']);
-    const deadline = Date.now() + 180000;
+    const deadline = Date.now() + 240000;
     let inspected = false;
     while (Date.now() < deadline) {
+        // Start before the Accessibility switch is approved so the following
+        // certificate prompt cannot appear and disappear between test phases.
+        if (authKind === 'certificate' &&
+            !$.NSFileManager.defaultManager.fileExistsAtPath(certPath)) {
+            $.NSThread.sleepForTimeInterval(0.25);
+            continue;
+        }
         try {
             for (const process of events.applicationProcesses()) {
                 const processName = process.name();
