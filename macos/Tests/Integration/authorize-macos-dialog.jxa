@@ -1,0 +1,79 @@
+ObjC.import('Foundation');
+
+function run() {
+    const environment = $.NSProcessInfo.processInfo.environment;
+    const password = ObjC.unwrap(environment.objectForKey('XE_CI_MAC_PASSWORD'));
+    const authKind = ObjC.unwrap(environment.objectForKey('XE_CI_AUTH_KIND'));
+    const certPath = environment.objectForKey('XE_CI_CERT_PATH');
+    if (typeof password !== 'string' || password.length === 0) {
+        return '[installer-integration] macOS authorization helper has no password';
+    }
+    let events;
+    try {
+        events = Application('/System/Library/CoreServices/System Events.app');
+    } catch {
+        return '[installer-integration] macOS authorization helper could not open System Events';
+    }
+    // Inspect only the frontmost macOS authorization UI. Require a secure
+    // field and context matching the specific setup operation before typing.
+    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings']);
+    const deadline = Date.now() + 180000;
+    let inspected = false;
+    while (Date.now() < deadline) {
+        try {
+            const frontmost = events.applicationProcesses.whose({ frontmost: true })();
+            for (const process of frontmost) {
+                const processName = process.name();
+                if (!authProcesses.has(processName)) continue;
+                for (const window of process.windows()) {
+                    const windowName = String(window.name() || '');
+                    let surfaces = [window];
+                    if (processName === 'System Settings') {
+                        // Large settings panes can block AX traversal while a
+                        // smaller password sheet is opening.
+                        let sheets = [];
+                        try { sheets = window.sheets(); } catch {}
+                        if (sheets.length > 0) surfaces = sheets;
+                        else if (/^(Login Items & Extensions|Accessibility)$/.test(windowName)) continue;
+                    }
+                    for (const surface of surfaces) {
+                        const words = [processName, windowName];
+                        try { words.push(String(surface.name() || '')); } catch {}
+                        let hasPasswordField = false;
+                        for (const element of surface.entireContents()) {
+                            let role = '';
+                            let subrole = '';
+                            try { role = element.role(); } catch {}
+                            try { subrole = element.subrole(); } catch {}
+                            if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
+                                hasPasswordField = true;
+                            }
+                            if (role === 'AXStaticText') {
+                                try { words.push(String(element.value() || element.name() || '')); } catch {}
+                            }
+                        }
+                        const context = words.join(' ');
+                        const permissionDialog = authKind === 'permission' &&
+                            /System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) &&
+                            !/Helium|Keychain/i.test(context);
+                        const certificateDialog = authKind === 'certificate' &&
+                            $.NSFileManager.defaultManager.fileExistsAtPath(certPath) &&
+                            /Keychain|certificate|trust/i.test(context) &&
+                            /security|Xe Launcher|Xe Computer Local Development CA/i.test(context) &&
+                            !/Helium/i.test(context);
+                        if (!hasPasswordField || !(permissionDialog || certificateDialog)) continue;
+                        events.keystroke(password);
+                        events.keyCode(36);
+                        return '[installer-integration] submitted macOS authorization password';
+                    }
+                }
+            }
+            inspected = true;
+        } catch {}
+        $.NSThread.sleepForTimeInterval(0.25);
+    }
+    if (!inspected) {
+        return '[installer-integration] macOS authorization helper could not inspect the dialog';
+    }
+    return '[installer-integration] no matching macOS authorization dialog appeared';
+}

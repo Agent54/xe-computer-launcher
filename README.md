@@ -60,12 +60,14 @@ existing `<service>_<project>.localhost` names and container certificates.
 
 On first launch, Xe Launcher generates a private local certificate authority
 and a server certificate for `compose-ui.localhost` and single-label
-`*.app.localhost` HTTP app names. Browsers will warn until you import
-`~/Library/Application Support/dev.xe.computer/workerd/ui-https/root.crt` into
-Keychain Access and set that certificate to **Always Trust**. Only trust this
-locally generated authority on your own Mac. Its private key remains in the
-launcher state directory with owner-only permissions; the server certificate
-renews without having to trust it again. HTTPS container apps still present
+`*.app.localhost` HTTP app names. Xe Launcher asks macOS to trust this
+certificate for SSL for the current user; approve the authentication prompt to
+finish setup. If you decline, Xe Launcher offers a retry and asks again on its
+next launch. The certificate is stored at
+`~/Library/Application Support/dev.xe.computer/workerd/ui-https/root.crt`.
+This user-level trust also applies to other browsers. Its private key remains
+in the launcher state directory with owner-only permissions; the server
+certificate renews without another prompt. HTTPS container apps still present
 their own certificates, which must be trusted separately.
 
 When standard ports are selected, a small Swift `launchd` helper reserves only `127.0.0.1:80` and

@@ -224,6 +224,18 @@ if [[ "$STOP_ONLY" == "1" ]]; then
     exit 0
 fi
 
+# Removing the app data would otherwise strand a trusted CA in the user's
+# Keychain with no remaining certificate file for a later cleanup to identify.
+root_certificate="$APP_DATA/workerd/ui-https/root.crt"
+leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
+if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
+    && security verify-cert -q -L -p ssl -n compose-ui.localhost \
+        -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
+    log "removing local HTTPS certificate trust"
+    security remove-trusted-cert "$root_certificate" \
+        || fail "could not remove local HTTPS certificate trust before deleting its source"
+fi
+
 if [[ -x "$INSTALLED_APP/Contents/MacOS/bin" ]] \
     && [[ "$(plutil -extract XePortHelperUnregisterCLI raw "$INSTALLED_APP/Contents/Info.plist" 2>/dev/null || true)" == "true" ]]; then
     log "unregistering Xe Launcher's port helper"

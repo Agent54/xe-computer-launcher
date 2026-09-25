@@ -111,7 +111,7 @@ final class WorkerdServer {
             return certificate
         }.value
         if prepared.createdCertificate {
-            log("Local Compose UI certificate authority created at \(prepared.certificateURL.path). Trust this certificate in Keychain Access to avoid browser warnings for compose-ui.localhost and HTTP apps on HTTPS.")
+            log("Local Compose UI certificate authority created at \(prepared.certificateURL.path).")
         }
         let uiSocketURL = stateURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
         let needsPrivilegedPorts = usesStandardPorts

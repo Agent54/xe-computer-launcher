@@ -329,6 +329,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             // approvals. Starting services sooner races the system dialogs and
             // lets a fresh installation appear ready before its ports are usable.
             guard await AccessibilityPermission.requestIfNeeded() else { return }
+            if !setupDeferredOnThisLaunch {
+                guard await requestLocalHTTPSTrustIfNeeded() else {
+                    setupDeferredOnThisLaunch = true
+                    state.appendLog("launcher", "Local HTTPS certificate approval deferred; browser startup will resume on the next launch.")
+                    return
+                }
+            }
             if !setupDeferredOnThisLaunch { startHostServices() }
             if needsPortHelper && !setupDeferredOnThisLaunch {
                 showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
@@ -345,6 +352,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
             startBackgroundInitialization()
         }
+    }
+
+    private func requestLocalHTTPSTrustIfNeeded() async -> Bool {
+        let stateURL = WorkerdPaths.stateURL
+        while !Task.isCancelled {
+            let certificateURL: URL
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try LocalTLSCertificate.prepare(stateURL: stateURL)
+                }.value
+                certificateURL = prepared.certificateURL
+            } catch {
+                if !retryLocalHTTPSTrust(after: "Xe Launcher could not create its local HTTPS certificate: \(error.localizedDescription)") {
+                    return false
+                }
+                continue
+            }
+
+            let trusted = await Task.detached(priority: .userInitiated) {
+                LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
+            }.value
+            if trusted { return true }
+
+            showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+            updateSetupProgress(status: "Approve the macOS prompt to trust Xe Launcher's local HTTPS certificate. This grants SSL trust for your macOS user, including other browsers.")
+            setSetupProgressIndeterminate(true)
+            NSApp.activate(ignoringOtherApps: true)
+
+            var installationError: Error?
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try LocalHTTPSTrust.requestUserTrust(certificateURL: certificateURL)
+                }.value
+            } catch {
+                installationError = error
+            }
+            let nowTrusted = await Task.detached(priority: .userInitiated) {
+                LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
+            }.value
+            closeSetupProgress()
+            if nowTrusted {
+                ExternalState.shared.appendLog("launcher", "Local HTTPS certificate trusted for this macOS user.")
+                return true
+            }
+            let detail = installationError?.localizedDescription ??
+                "macOS did not report the local HTTPS certificate as trusted."
+            guard retryLocalHTTPSTrust(after: detail) else { return false }
+        }
+        return false
+    }
+
+    private func retryLocalHTTPSTrust(after detail: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Local HTTPS Certificate Needs Approval"
+        alert.informativeText = detail +
+            "\n\nXe Launcher needs this certificate for compose-ui.localhost and local HTTP apps. Choose Try Again to reopen the macOS approval prompt, or Not Now to retry on the next launch."
+        alert.addButton(withTitle: "Try Again")
+        alert.addButton(withTitle: "Not Now")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func startBackgroundInitialization() {

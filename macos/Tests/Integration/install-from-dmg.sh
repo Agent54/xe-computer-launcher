@@ -94,85 +94,16 @@ run_with_timeout() {
 # The optional secret is passed only to this short-lived GUI helper, never as
 # a command-line argument or to the applications under test. Only enter it in
 # a frontmost macOS authorization dialog with a password field and text tying
-# the request to Xe Launcher or System Settings.
+# the request to Xe Launcher, System Settings, or Xe's generated certificate.
 start_runner_auth_helper() {
+    local auth_kind="${1:-permission}"
     [[ -n "$runner_password" ]] || return 0
-    XE_CI_MAC_PASSWORD="$runner_password" osascript -l JavaScript - <<'JXA' 2>/dev/null &
-ObjC.import('Foundation');
-
-function run() {
-    const raw = $.NSProcessInfo.processInfo.environment.objectForKey('XE_CI_MAC_PASSWORD');
-    const password = ObjC.unwrap(raw);
-    if (typeof password !== 'string' || password.length === 0) {
-        return '[installer-integration] macOS authorization helper has no password';
-    }
-    let events;
-    try {
-        events = Application('/System/Library/CoreServices/System Events.app');
-    } catch {
-        return '[installer-integration] macOS authorization helper could not open System Events';
-    }
-    // macOS can present the administrator sheet either in its own process or
-    // as a window owned by System Settings. Inspect only the frontmost app and
-    // require a secure field plus permission-related text before typing.
-    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings']);
-    const deadline = Date.now() + 180000;
-    let inspected = false;
-    while (Date.now() < deadline) {
-        try {
-            const frontmost = events.applicationProcesses.whose({ frontmost: true })();
-            for (const process of frontmost) {
-                const processName = process.name();
-                if (!authProcesses.has(processName)) continue;
-                for (const window of process.windows()) {
-                    const windowName = String(window.name() || '');
-                    let surfaces = [window];
-                    if (processName === 'System Settings') {
-                        // Do not repeatedly traverse the large Login Items or
-                        // Accessibility pane while another AX script is trying
-                        // to find its switch. A password sheet is much smaller.
-                        let sheets = [];
-                        try { sheets = window.sheets(); } catch {}
-                        if (sheets.length > 0) surfaces = sheets;
-                        else if (/^(Login Items & Extensions|Accessibility)$/.test(windowName)) continue;
-                    }
-                    for (const surface of surfaces) {
-                        const words = [processName, windowName];
-                        try { words.push(String(surface.name() || '')); } catch {}
-                        let hasPasswordField = false;
-                        for (const element of surface.entireContents()) {
-                            let role = '';
-                            let subrole = '';
-                            try { role = element.role(); } catch {}
-                            try { subrole = element.subrole(); } catch {}
-                            if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
-                                hasPasswordField = true;
-                            }
-                            if (role === 'AXStaticText') {
-                                try { words.push(String(element.value() || element.name() || '')); } catch {}
-                            }
-                        }
-                        const context = words.join(' ');
-                        if (!hasPasswordField || !/System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) ||
-                            /Helium|Keychain/i.test(context)) continue;
-                        events.keystroke(password);
-                        events.keyCode(36);
-                        return '[installer-integration] submitted macOS permission password';
-                    }
-                }
-            }
-            inspected = true;
-        } catch {}
-        $.NSThread.sleepForTimeInterval(0.25);
-    }
-    if (!inspected) {
-        return '[installer-integration] macOS authorization helper could not inspect the permission dialog';
-    }
-    return '[installer-integration] no matching macOS permission password dialog appeared';
-}
-JXA
+    XE_CI_MAC_PASSWORD="$runner_password" \
+        XE_CI_AUTH_KIND="$auth_kind" \
+        XE_CI_CERT_PATH="$APP_DATA/workerd/ui-https/root.crt" \
+        osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" 2>/dev/null &
     runner_auth_pid=$!
-    log "optional macOS authorization helper is watching for a permission password dialog"
+    log "optional macOS authorization helper is watching for a $auth_kind password dialog"
 }
 
 stop_runner_auth_helper() {
@@ -876,6 +807,25 @@ drain_accessibility_permission_prompts "$APP_NAME" 60
 log "granting Accessibility access to the installed app"
 grant_accessibility_permission "$APP_NAME" 90
 stop_runner_auth_helper
+
+log "approving the generated local HTTPS certificate in the macOS user Keychain"
+start_runner_auth_helper certificate
+root_certificate="$APP_DATA/workerd/ui-https/root.crt"
+leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
+certificate_trusted=false
+deadline=$((SECONDS + 90))
+while (( SECONDS < deadline )); do
+    if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
+        && security verify-cert -q -L -p ssl -n compose-ui.localhost \
+            -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
+        certificate_trusted=true
+        break
+    fi
+    sleep 1
+done
+stop_runner_auth_helper
+[[ "$certificate_trusted" == true ]] \
+    || fail "macOS did not trust Xe Launcher's generated local HTTPS certificate; approve the Keychain authentication prompt"
 
 log "waiting for Compose UI on ports 80 and 443"
 standard_ports_ready=false

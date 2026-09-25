@@ -31,6 +31,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Reset launcher integration environment
+        env:
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
         run: bash macos/Tests/Integration/cleanup-ci.sh
 
       - name: Verify Sparkle delta appcast fixture

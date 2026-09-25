@@ -4,7 +4,9 @@
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
 installer test also accepts the first-run user data storage prompt using the
-default `stacks` folder and selects local HTTP/HTTPS ports 80/443. The
+default `stacks` folder and selects local HTTP/HTTPS ports 80/443. It approves
+Xe Launcher's macOS user-Keychain prompt for its generated local HTTPS
+certificate and verifies SSL trust before waiting for Compose UI. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on
@@ -18,6 +20,7 @@ Run destructive cleanup only in a disposable test account or VM. `cleanup.sh`:
 - quits running Xe Launcher, Helium, and Xe Computer shim processes;
 - unregisters the standard-port helper when the installed app supports CI teardown;
 - resets TCC permissions for `dev.xe.computer`;
+- removes trust for the generated local HTTPS certificate from the test user's Keychain;
 - removes `/Applications/Xe Launcher.app`;
 - moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
@@ -25,7 +28,8 @@ Run destructive cleanup only in a disposable test account or VM. `cleanup.sh`:
 
 The release and pull-request workflows run `cleanup-ci.sh` only before
 installation. It explicitly disables Trash and permanently removes only the
-exact previous Xe test installation, data, and owned generated-shim paths. It refuses to run outside
+exact previous Xe test installation, data, and owned generated-shim paths after
+removing trust for the prior run's local HTTPS certificate. It refuses to run outside
 the launcher's release or integration jobs on the self-hosted macOS ARM64 GitHub Actions runner,
 and permanent removal refuses targets that contain mounted filesystems. Manual
 runs use `cleanup.sh` and retain the recoverable behavior described above;
@@ -68,8 +72,9 @@ that as an already-clean permission state and continues.
    it in the runner's GUI session. For unattended CI, set the repository Actions
    secret `XE_CI_MAC_PASSWORD` to the dedicated, administrator-capable macOS
    runner account's password.
-   The installer test uses it only for the Xe Launcher permission dialogs; it
-   is not passed to the app or printed in logs. Without the secret, complete
+   The installer test and CI cleanup use it only for Xe Launcher permission
+   and local HTTPS certificate dialogs; it is not passed to the app or printed
+   in logs. Without the secret, complete
    any administrator prompt in the runner's GUI session. The test waits for the
    launch daemon and verifies both public ports without restarting the launcher.
    The approved helper remains registered across normal app restarts, reserving

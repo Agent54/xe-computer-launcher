@@ -13,7 +13,7 @@ enum LocalTLSCertificateError: LocalizedError {
 /// Creates and reuses the per-user CA and HTTPS certificate. Workerd reads the
 /// leaf keypair from its text configuration when it starts.
 enum LocalTLSCertificate {
-    struct Prepared {
+    struct Prepared: Sendable {
         let directoryURL: URL
         let certificateURL: URL
         let createdCertificate: Bool
