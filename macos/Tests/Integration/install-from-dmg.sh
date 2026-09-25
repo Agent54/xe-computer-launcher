@@ -112,35 +112,53 @@ function run() {
     } catch {
         return '[installer-integration] macOS authorization helper could not open System Events';
     }
-    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent']);
-    const deadline = Date.now() + 90000;
+    // macOS can present the administrator sheet either in its own process or
+    // as a window owned by System Settings. Inspect only the frontmost app and
+    // require a secure field plus permission-related text before typing.
+    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings']);
+    const deadline = Date.now() + 180000;
     let inspected = false;
     while (Date.now() < deadline) {
         try {
             const frontmost = events.applicationProcesses.whose({ frontmost: true })();
             for (const process of frontmost) {
-                if (!authProcesses.has(process.name())) continue;
+                const processName = process.name();
+                if (!authProcesses.has(processName)) continue;
                 for (const window of process.windows()) {
-                    const words = [String(window.name() || '')];
-                    let hasPasswordField = false;
-                    for (const element of window.entireContents()) {
-                        let role = '';
-                        let subrole = '';
-                        try { role = element.role(); } catch {}
-                        try { subrole = element.subrole(); } catch {}
-                        if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
-                            hasPasswordField = true;
-                        }
-                        if (role === 'AXStaticText') {
-                            try { words.push(String(element.value() || element.name() || '')); } catch {}
-                        }
+                    const windowName = String(window.name() || '');
+                    let surfaces = [window];
+                    if (processName === 'System Settings') {
+                        // Do not repeatedly traverse the large Login Items or
+                        // Accessibility pane while another AX script is trying
+                        // to find its switch. A password sheet is much smaller.
+                        let sheets = [];
+                        try { sheets = window.sheets(); } catch {}
+                        if (sheets.length > 0) surfaces = sheets;
+                        else if (/^(Login Items & Extensions|Accessibility)$/.test(windowName)) continue;
                     }
-                    const context = words.join(' ');
-                    if (!hasPasswordField || !/System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) ||
-                        /Helium|Keychain/i.test(context)) continue;
-                    events.keystroke(password);
-                    events.keyCode(36);
-                    return '[installer-integration] submitted macOS permission password';
+                    for (const surface of surfaces) {
+                        const words = [processName, windowName];
+                        try { words.push(String(surface.name() || '')); } catch {}
+                        let hasPasswordField = false;
+                        for (const element of surface.entireContents()) {
+                            let role = '';
+                            let subrole = '';
+                            try { role = element.role(); } catch {}
+                            try { subrole = element.subrole(); } catch {}
+                            if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
+                                hasPasswordField = true;
+                            }
+                            if (role === 'AXStaticText') {
+                                try { words.push(String(element.value() || element.name() || '')); } catch {}
+                            }
+                        }
+                        const context = words.join(' ');
+                        if (!hasPasswordField || !/System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) ||
+                            /Helium|Keychain/i.test(context)) continue;
+                        events.keystroke(password);
+                        events.keyCode(36);
+                        return '[installer-integration] submitted macOS permission password';
+                    }
                 }
             }
             inspected = true;
@@ -498,7 +516,7 @@ end run
 
 on authorizationPending()
     tell application "System Events"
-        repeat with processName in {"SecurityAgent", "AuthorizationHost"}
+        repeat with processName in {"SecurityAgent", "AuthorizationHost", "CoreAuthenticationAgent"}
             try
                 if exists application process (contents of processName) then
                     if (count of windows of application process (contents of processName)) > 0 then return true
@@ -801,7 +819,9 @@ done
     || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset} (confirmed: ${saved_port_choice:-unset}), expected confirmed 80/443"
 
 log "checking whether the background port helper needs administrator approval"
-if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 5 >/dev/null 2>&1; then
+if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+    log "port helper is already active"
+elif press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 30 >/dev/null 2>&1; then
     log "enabling Xe Launcher under Allow in Background"
     # Opening the pane is asynchronous. Activate the already-open Settings app
     # without a blocking Apple Event, then bound the optional AX click. macOS
@@ -809,7 +829,7 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     run_with_timeout 8 open -a "System Settings" || true
     if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
         start_runner_auth_helper
-        if ! grant_background_port_helper_permission "$APP_NAME" 20; then
+        if ! grant_background_port_helper_permission "$APP_NAME" 60; then
             log "could not confirm the background switch through Accessibility; enable Xe Launcher in System Settings and complete any password prompt"
         fi
     fi
@@ -832,13 +852,28 @@ if press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attent
     stop_runner_auth_helper
 
     log "Xe Launcher should activate ports 80/443 without restarting"
+else
+    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
+        || fail "port helper is not active and its approval dialog did not appear"
+fi
+
+# The background-item pane must not be reused for the next permission. The
+# native Accessibility prompt opens its own System Settings destination.
+log "closing System Settings before Accessibility approval"
+pkill -x "System Settings" 2>/dev/null || true
+for _ in {1..20}; do
+    pgrep -x "System Settings" >/dev/null 2>&1 || break
+    sleep 0.25
+done
+if pgrep -x "System Settings" >/dev/null 2>&1; then
+    fail "System Settings did not close before Accessibility approval"
 fi
 
 log "accepting the native macOS Accessibility permission prompt"
+start_runner_auth_helper
 drain_accessibility_permission_prompts "$APP_NAME" 60
 
 log "granting Accessibility access to the installed app"
-start_runner_auth_helper
 grant_accessibility_permission "$APP_NAME" 90
 stop_runner_auth_helper
 

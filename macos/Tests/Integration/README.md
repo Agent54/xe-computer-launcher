@@ -75,16 +75,20 @@ that as an already-clean permission state and continues.
    The approved helper remains registered across normal app restarts, reserving
    80/443 until custom ports are selected.
 
-After installation, the Xe Launcher status menu has **Local App Ports** to
-switch between 80/443 and 5196/5194, and **Compose Storage Folder** to choose
-a different folder. Either change takes effect after quitting and reopening the
-launcher. Choosing another storage folder does not move existing projects.
+After installation, hold Option while opening the Xe Launcher status menu to
+show **Local App Ports** (80/443 or 5196/5194) and **Compose Storage Folder**.
+Either change takes effect after quitting and reopening the launcher. Choosing
+another storage folder does not move existing projects.
 
 The cleanup deliberately resets Xe Launcher's own permissions on every run. After
 the installed copy relaunches, the test grants its Accessibility request in
 System Settings. If macOS requires a password to change that switch, the same
 optional `XE_CI_MAC_PASSWORD` secret is used. This interaction is part of the
-integration test, not a persistent one-time machine grant.
+integration test, not a persistent one-time machine grant. CI closes System
+Settings before the test and between the background-item and Accessibility
+steps, so each macOS permission action opens its intended pane. Xe Launcher
+keeps its setup message visible and does not start services until both the
+port helper and Accessibility are confirmed.
 
 An existing installation with a saved storage folder but no confirmed port
 choice—including older setups that silently saved 5196/5194—gets a one-time

@@ -31,13 +31,15 @@ enum AccessibilityPermission {
         let promptKey = "AXTrustedCheckOptionPrompt"
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
 
-        for _ in 0..<120 {
-            if AXIsProcessTrusted() { break }
+        while !AXIsProcessTrusted() {
+            if Task.isCancelled {
+                closeSetupProgress()
+                return false
+            }
             try? await Task.sleep(for: .milliseconds(500))
         }
 
-        let isTrusted = AXIsProcessTrusted()
         closeSetupProgress()
-        return isTrusted
+        return true
     }
 }

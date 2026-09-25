@@ -35,4 +35,15 @@ fi
 [[ -n "$WORKSPACE" && "$SCRIPT_DIR" == "${WORKSPACE%/}/macos/Tests/Integration" ]] \
     || fail "cleanup-ci.sh must run from the checked-out launcher workspace"
 
-exec bash "${SCRIPT_DIR}/cleanup.sh" --ci-permanent
+bash "${SCRIPT_DIR}/cleanup.sh" --ci-permanent
+
+# System Settings restores its last pane across launches. A previous CI run
+# may leave Login Items or Accessibility open, so start each installer test
+# with a fresh Settings window and let the native permission action navigate.
+printf '[installer-cleanup] closing System Settings before the next test\n'
+pkill -x "System Settings" 2>/dev/null || true
+for _ in {1..20}; do
+    pgrep -x "System Settings" >/dev/null 2>&1 || exit 0
+    sleep 0.25
+done
+fail "System Settings did not close before the next test"

@@ -208,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         // First-run setup and legacy settings without a port choice both need
         // a decision before Workerd starts, even without virtualization.
+        let wasChoosingPorts = WorkerdPorts.needsPortChoice(state.settings.rawData)
         if LauncherSetup.needsChoice() {
             do {
                 setupDeferredOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
@@ -226,6 +227,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             state.appendLog("launcher", "Warning: \(warning)")
         }
         let needsPortHelper = workerdPorts.http == WorkerdPorts.standardHTTP
+        if wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch {
+            // The migration dialog has just closed. Keep setup visibly in
+            // progress while macOS registers and activates the selected helper.
+            showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+            updateSetupProgress(status: "Setting up ports 80/443. Approve Xe Launcher in System Settings if asked; setup will continue automatically.")
+            setSetupProgressIndeterminate(true)
+        }
         // Updating a copy on a read-only disk image cannot succeed. The copy
         // installed into /Applications or ~/Applications starts Sparkle on its
         // first normal launch instead.
@@ -247,26 +255,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             for warning in portWarnings {
                 state.appendLog("launcher", "Warning: \(warning)")
             }
-            if !setupDeferredOnThisLaunch { startHostServices() }
-            startBackgroundInitialization()
-            if !portWarnings.isEmpty {
-                if needsPortHelper && helperWarning != nil && PrivilegedPortService.status == .enabled {
-                    return
-                }
+            var helperProgressVisible = wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch
+            if needsPortHelper && helperWarning != nil && PrivilegedPortService.status != .enabled {
                 NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
-                alert.messageText = needsPortHelper && helperWarning != nil
-                    ? "Port Helper Needs Attention" : "Local App Ports Are Unavailable"
+                alert.messageText = "Port Helper Needs Attention"
                 alert.informativeText = portWarnings.joined(separator: "\n")
-                if helperWarning == nil {
-                    alert.informativeText += needsPortHelper
-                        ? "\n\nFree occupied ports or approve the port helper; Xe Launcher will retry automatically."
-                        : "\n\nFree occupied ports; Xe Launcher will retry automatically."
-                }
                 alert.alertStyle = .warning
-                if needsPortHelper && helperWarning != nil {
+                if PrivilegedPortService.status == .requiresApproval {
+                    if !helperProgressVisible {
+                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                        setSetupProgressIndeterminate(true)
+                        helperProgressVisible = true
+                    }
+                    updateSetupProgress(status: "Enable Xe Launcher under Allow in Background. Enter your password if asked; setup will continue automatically.")
                     alert.addButton(withTitle: "Open System Settings")
-                    alert.addButton(withTitle: "Later")
+                    alert.addButton(withTitle: "Wait for Approval")
                     let approvalTimer = Timer(timeInterval: 1, repeats: true) { _ in
                         if PrivilegedPortService.status == .enabled {
                             MainActor.assumeIsolated {
@@ -283,15 +287,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     }
                 } else {
                     alert.runModal()
+                    if helperProgressVisible { closeSetupProgress() }
+                    return
                 }
+            } else if !portWarnings.isEmpty {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Local App Ports Are Unavailable"
+                alert.informativeText = portWarnings.joined(separator: "\n") +
+                    "\n\nFree occupied ports; Xe Launcher will retry automatically."
+                alert.alertStyle = .warning
+                alert.runModal()
             }
-        }
 
-        // Accessibility onboarding is independent from browser and VM startup.
-        // Waiting for the user here used to delay state restoration by up to a
-        // minute even though launching the browser requires no AX permission.
-        Task { @MainActor in
-            _ = await AccessibilityPermission.requestIfNeeded()
+            // A Settings switch can report enabled before launchd has started
+            // the daemon. Confirm the actual socket handoff before starting
+            // Workerd or the browser on standard ports.
+            if needsPortHelper && !setupDeferredOnThisLaunch {
+                while true {
+                    if PrivilegedPortService.status == .enabled,
+                       (try? await PrivilegedPortService.acquire()) != nil { break }
+                    if !helperProgressVisible {
+                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                        setSetupProgressIndeterminate(true)
+                        helperProgressVisible = true
+                    }
+                    updateSetupProgress(status: PrivilegedPortService.status == .enabled
+                        ? "Waiting for macOS to activate the Xe Launcher port helper on ports 80/443…"
+                        : "Enable Xe Launcher under Allow in Background. Enter your password if asked; setup will continue automatically.")
+                    if Task.isCancelled {
+                        closeSetupProgress()
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                if helperProgressVisible { closeSetupProgress() }
+                state.appendLog("launcher", "Port helper ready; continuing launcher setup.")
+            }
+
+            // Keep the permission companion visible until macOS confirms both
+            // approvals. Starting services sooner races the system dialogs and
+            // lets a fresh installation appear ready before its ports are usable.
+            guard await AccessibilityPermission.requestIfNeeded() else { return }
+            if !setupDeferredOnThisLaunch { startHostServices() }
+            if needsPortHelper && !setupDeferredOnThisLaunch {
+                showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                updateSetupProgress(status: "Starting local app routing on ports 80/443…")
+                setSetupProgressIndeterminate(true)
+                while !workerdServer.servingStandardPorts {
+                    if Task.isCancelled {
+                        closeSetupProgress()
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                closeSetupProgress()
+            }
+            startBackgroundInitialization()
         }
     }
 
