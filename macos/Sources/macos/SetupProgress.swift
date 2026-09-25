@@ -97,20 +97,27 @@ private func loadAppIcon() -> NSImage? {
 func showSetupProgress(
     message: String,
     placement: SetupProgressPlacement = .centered,
-    allowsCancellation: Bool = true
+    allowsCancellation: Bool = true,
+    title: String? = nil,
+    minimumSize: NSSize = NSSize(width: 420, height: 320)
 ) {
-    if let panel = _setupWindow {
-        positionSetupPanel(panel, placement: placement)
-        _cancelButton?.isHidden = !allowsCancellation
-        panel.orderFrontRegardless()
-        return
-    }
-
-    // Size window to fit the path
     let pathFont = NSFont.systemFont(ofSize: 11)
     let pathTextWidth = (message as NSString).size(withAttributes: [.font: pathFont]).width + 100
-    let w = max(420, min(pathTextWidth, 700))
-    let h: CGFloat = 320
+    let w = max(minimumSize.width, min(pathTextWidth, 700))
+    let h = max(minimumSize.height, 320)
+
+    if let panel = _setupWindow {
+        if panel.frame.width < w || panel.frame.height < h {
+            closeSetupProgress()
+        } else {
+            positionSetupPanel(panel, placement: placement)
+            _titleLabel?.stringValue = title ?? "Setting up \(setupAppDisplayName)"
+            _cancelButton?.isHidden = !allowsCancellation
+            panel.orderFrontRegardless()
+            return
+        }
+    }
+
     let panel = NSPanel(
         contentRect: NSRect(x: 0, y: 0, width: w, height: h),
         styleMask: [.titled, .fullSizeContentView],
@@ -160,13 +167,13 @@ func showSetupProgress(
     vfx.addSubview(iconView)
 
     // App setup title centered below icon
-    let title = NSTextField(labelWithString: "Setting up \(setupAppDisplayName)")
-    title.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
-    title.font = .systemFont(ofSize: 15, weight: .semibold)
-    title.textColor = .white
-    title.alignment = .center
-    vfx.addSubview(title)
-    _titleLabel = title
+    let titleLabel = NSTextField(labelWithString: title ?? "Setting up \(setupAppDisplayName)")
+    titleLabel.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
+    titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+    titleLabel.textColor = .white
+    titleLabel.alignment = .center
+    vfx.addSubview(titleLabel)
+    _titleLabel = titleLabel
 
     // Path on its own line (clickable to open in Finder)
     let pathString = message.isEmpty ? "" : "App Dir: \(message)"
@@ -183,11 +190,12 @@ func showSetupProgress(
     let status = NSTextField(labelWithString: "Preparing...")
     status.frame = NSRect(x: pad, y: 70, width: w - pad * 2, height: h - iconSize - 125 - 70)
     status.font = .systemFont(ofSize: 12)
-    status.textColor = NSColor.white.withAlphaComponent(0.6)
+    status.textColor = NSColor.white.withAlphaComponent(0.8)
     status.alignment = .center
     status.maximumNumberOfLines = 0
     status.lineBreakMode = .byWordWrapping
     status.cell?.wraps = true
+    status.cell?.usesSingleLineMode = false
     status.cell?.isScrollable = false
     vfx.addSubview(status)
     _statusLabel = status

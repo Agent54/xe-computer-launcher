@@ -375,8 +375,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }.value
             if trusted { return true }
 
-            showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
-            updateSetupProgress(status: "Approve the macOS prompt to trust Xe Launcher's local HTTPS certificate. This grants SSL trust for your macOS user, including other browsers.")
+            showSetupProgress(
+                message: "",
+                placement: .topTrailing,
+                allowsCancellation: false,
+                title: "Trust Local HTTPS for Xe Launcher",
+                minimumSize: NSSize(width: 540, height: 430)
+            )
+            updateSetupProgress(status: """
+                Browsers need this trust to open Compose UI and local apps over HTTPS without certificate warnings. The certificate Xe Launcher serves covers compose-ui.localhost and *.app.localhost.
+
+                Approving the macOS prompt trusts Xe Launcher's local CA for SSL in this user account, including other browsers. CA trust can apply to other domains it signs, not just those two local names.
+
+                Enter your Mac password in the macOS prompt to continue.
+                """)
             setSetupProgressIndeterminate(true)
             NSApp.activate(ignoringOtherApps: true)
 
@@ -409,7 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         alert.alertStyle = .warning
         alert.messageText = "Local HTTPS Certificate Needs Approval"
         alert.informativeText = detail +
-            "\n\nXe Launcher needs this certificate for compose-ui.localhost and local HTTP apps. Choose Try Again to reopen the macOS approval prompt, or Not Now to retry on the next launch."
+            "\n\nXe Launcher serves HTTPS for compose-ui.localhost and *.app.localhost. The local CA is trusted for SSL in this macOS account and can sign for other domains. Choose Try Again to reopen the macOS approval prompt, or Not Now to retry on the next launch."
         alert.addButton(withTitle: "Try Again")
         alert.addButton(withTitle: "Not Now")
         return alert.runModal() == .alertFirstButtonReturn

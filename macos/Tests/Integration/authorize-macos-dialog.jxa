@@ -14,15 +14,15 @@ function run() {
     } catch {
         return '[installer-integration] macOS authorization helper could not open System Events';
     }
-    // Inspect only the frontmost macOS authorization UI. Require a secure
-    // field and context matching the specific setup operation before typing.
-    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings']);
+    // A SecurityAgent password panel can be visible while System Settings or
+    // Terminal owns the menu bar. Inspect only known authorization processes,
+    // then focus the matching secure field before typing the secret.
+    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings', 'security']);
     const deadline = Date.now() + 180000;
     let inspected = false;
     while (Date.now() < deadline) {
         try {
-            const frontmost = events.applicationProcesses.whose({ frontmost: true })();
-            for (const process of frontmost) {
+            for (const process of events.applicationProcesses()) {
                 const processName = process.name();
                 if (!authProcesses.has(processName)) continue;
                 for (const window of process.windows()) {
@@ -39,14 +39,14 @@ function run() {
                     for (const surface of surfaces) {
                         const words = [processName, windowName];
                         try { words.push(String(surface.name() || '')); } catch {}
-                        let hasPasswordField = false;
+                        let passwordField = null;
                         for (const element of surface.entireContents()) {
                             let role = '';
                             let subrole = '';
                             try { role = element.role(); } catch {}
                             try { subrole = element.subrole(); } catch {}
                             if (subrole === 'AXSecureTextField' || role === 'AXSecureTextField') {
-                                hasPasswordField = true;
+                                passwordField = element;
                             }
                             if (role === 'AXStaticText') {
                                 try { words.push(String(element.value() || element.name() || '')); } catch {}
@@ -55,16 +55,21 @@ function run() {
                         const context = words.join(' ');
                         const permissionDialog = authKind === 'permission' &&
                             /System Settings|Xe Launcher|Accessibility|Login Items|Background Items/i.test(context) &&
-                            !/Helium|Keychain/i.test(context);
+                            !/Helium|Keychain|Certificate Trust Settings/i.test(context);
                         const certificateDialog = authKind === 'certificate' &&
                             $.NSFileManager.defaultManager.fileExistsAtPath(certPath) &&
-                            /Keychain|certificate|trust/i.test(context) &&
+                            /Certificate Trust Settings/i.test(context) &&
                             /security|Xe Launcher|Xe Computer Local Development CA/i.test(context) &&
                             !/Helium/i.test(context);
-                        if (!hasPasswordField || !(permissionDialog || certificateDialog)) continue;
+                        if (!passwordField || !(permissionDialog || certificateDialog)) continue;
+                        // System Events sends keystrokes to the focused UI, not
+                        // to the process we just inspected. Verify focus so a
+                        // password cannot land in the underlying Terminal.
+                        passwordField.click();
+                        if (passwordField.focused() !== true) continue;
                         events.keystroke(password);
                         events.keyCode(36);
-                        return '[installer-integration] submitted macOS authorization password';
+                        return '[installer-integration] entered password in matching macOS authorization dialog';
                     }
                 }
             }

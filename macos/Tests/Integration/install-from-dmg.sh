@@ -375,12 +375,14 @@ APPLESCRIPT
 grant_accessibility_permission() {
     local app_name="$1"
     local timeout_seconds="$2"
+    local certificate_path="$APP_DATA/workerd/ui-https/root.crt"
 
     run_with_timeout "$((timeout_seconds + 10))" osascript - \
-        "$app_name" "$timeout_seconds" <<'APPLESCRIPT'
+        "$app_name" "$timeout_seconds" "$certificate_path" <<'APPLESCRIPT'
 on run argv
     set appName to item 1 of argv
     set timeoutSeconds to item 2 of argv as integer
+    set certificatePath to item 3 of argv
     set wantedIdentifier to appName & "_Toggle"
     set pressedToggle to false
     set confirmedPolls to 0
@@ -412,9 +414,18 @@ on run argv
                                     try
                                         set toggleValue to value of uiElement as integer
                                     end try
-                                    if toggleValue is 1 and not my authorizationPending() then
-                                        set confirmedPolls to confirmedPolls + 1
-                                        if confirmedPolls ≥ 8 then return "enabled"
+                                    if toggleValue is 1 then
+                                        -- Xe Launcher creates this certificate only after
+                                        -- AXIsProcessTrusted() succeeds. Its next macOS
+                                        -- password dialog can open before this poll finishes;
+                                        -- that dialog must not keep Accessibility pending.
+                                        if exists disk item certificatePath of application "System Events" then return "enabled"
+                                        if not my authorizationPending() then
+                                            set confirmedPolls to confirmedPolls + 1
+                                            if confirmedPolls ≥ 8 then return "enabled"
+                                        else
+                                            set confirmedPolls to 0
+                                        end if
                                     else
                                         set confirmedPolls to 0
                                     end if

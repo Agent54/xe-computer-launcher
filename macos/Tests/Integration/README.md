@@ -40,7 +40,8 @@ require one-time runner maintenance.
 
 After the About-dialog test, both workflows run `cleanup.sh --stop-only` even
 if the test fails. It asks Xe Launcher to quit gracefully, then stops any
-remaining Workerd, SmolVM, Helium, or Xe Computer shim processes. It does not
+remaining Workerd, SmolVM, Helium, Xe Computer shim, or pending Xe certificate
+approval processes. It does not
 delete the installed app or data, unregister the port helper, reset permissions,
 or detach the DMG; those remain available to inspect until the next run starts.
 The launchd helper itself remains registered and keeps 80/443 reserved.

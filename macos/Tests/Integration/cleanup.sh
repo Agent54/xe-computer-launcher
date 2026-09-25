@@ -201,6 +201,9 @@ stop_matching_processes \
     "Xe Launcher instances" \
     "$launcher_pattern"
 stop_matching_processes \
+    "orphaned Xe Launcher certificate approval" \
+    '/usr/bin/security add-trusted-cert -r trustRoot -p ssl .*/Library/Application Support/dev[.]xe[.]computer/workerd/ui-https/root[.]crt'
+stop_matching_processes \
     "orphaned Xe Launcher workerd processes" \
     '/X[Ee] Launcher[.]app/Contents/Helpers/workerd( |$)'
 stop_matching_processes \
