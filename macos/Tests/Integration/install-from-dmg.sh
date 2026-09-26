@@ -1015,6 +1015,42 @@ app_management_denials="$(
 [[ -z "$app_management_denials" ]] \
     || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
 
+log "verifying an approved port helper survives update bookkeeping migration"
+helper_pid_before="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
+[[ -n "$helper_pid_before" ]] || fail "approved port helper has no running process"
+run_with_timeout 10 osascript -l JavaScript -e \
+    'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();'
+deadline=$((SECONDS + 70))
+while pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null && (( SECONDS < deadline )); do
+    sleep 0.5
+done
+if pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; then
+    fail "launcher did not quit before the approved-helper relaunch check"
+fi
+# Model an older release's whole-file hash changing after code signing. The
+# working, already-approved helper must be adopted without unregistering it.
+registration_marker="$APP_DATA/workerd/port-helper-registration.sha256"
+printf '%064d\n' 0 > "$registration_marker"
+open -a "$INSTALLED_APP"
+relaunch_ready=false
+deadline=$((SECONDS + 90))
+while (( SECONDS < deadline )); do
+    if grep -q '^cdhash-v1:' "$registration_marker" \
+        && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
+            --resolve 'compose-ui.localhost:443:127.0.0.1' \
+            --output /dev/null 'https://compose-ui.localhost/' \
+        && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
+        relaunch_ready=true
+        break
+    fi
+    sleep 1
+done
+[[ "$relaunch_ready" == true ]] \
+    || fail "approved installation did not resume automatically after relaunch"
+helper_pid_after="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
+[[ "$helper_pid_after" == "$helper_pid_before" ]] \
+    || fail "update bookkeeping unnecessarily replaced the approved helper ($helper_pid_before -> $helper_pid_after)"
+
 if [[ "$DEV_MODE" == true ]]; then
     log "PASS: development DMG installation, relaunch, signature, quarantine, Xe Computer, and permission checks succeeded"
 else

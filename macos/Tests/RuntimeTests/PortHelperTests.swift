@@ -5,6 +5,32 @@ import Testing
 
 @Suite(.serialized)
 struct PortHelperTests {
+    @Test func registrationFingerprintUsesCodeIdentity() throws {
+        let macosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = macosRoot.appendingPathComponent(".build/debug/port-helper")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("xe-helper-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let helper = directory.appendingPathComponent("port-helper")
+        let plist = directory.appendingPathComponent("ports.plist")
+        try FileManager.default.copyItem(at: source, to: helper)
+        try Data("original service configuration".utf8).write(to: plist)
+        let bundle = URL(fileURLWithPath: "/Applications/Xe Launcher.app")
+        let original = try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist)
+        // Trailing signing-envelope bytes change the old whole-file hash but
+        // do not change the executable's CodeDirectory identity.
+        let writer = try FileHandle(forWritingTo: helper)
+        try writer.seekToEnd()
+        try writer.write(contentsOf: Data(repeating: 0, count: 16))
+        try writer.close()
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist) == original)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle.appendingPathComponent("moved"), helperURL: helper, plistURL: plist) != original)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: URL(fileURLWithPath: "/usr/bin/true"), plistURL: plist) != original)
+        try Data("changed service configuration".utf8).write(to: plist)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist) != original)
+    }
+
     @Test func bootstrapPassesBothListenerDescriptorsToWorkerd() throws {
         let macosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

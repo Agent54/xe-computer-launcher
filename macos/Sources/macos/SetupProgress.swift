@@ -273,6 +273,12 @@ func setSetupProgressAction(title: String, action: @escaping () -> Void) {
 }
 
 @MainActor
+func hideSetupProgressAction() {
+    _setupActionButton?.isHidden = true
+    _setupActionHandler = nil
+}
+
+@MainActor
 private class SetupActionHelper: NSObject {
     static let shared = SetupActionHelper()
     @objc func performAction() { _setupActionHandler?() }

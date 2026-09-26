@@ -7,6 +7,9 @@ installer test also accepts the first-run user data storage prompt using the
 default `stacks` folder and selects local HTTP/HTTPS ports 80/443. It approves
 Xe Launcher's macOS user-Keychain prompt for its generated local HTTPS
 certificate and verifies SSL trust before waiting for Compose UI. The
+test then relaunches an approved installation with an older registration marker
+and verifies that HTTPS and Xe Computer resume without replacing the running
+port helper or asking for its approval again. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on

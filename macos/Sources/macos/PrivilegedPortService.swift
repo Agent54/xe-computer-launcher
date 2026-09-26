@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import CryptoKit
 import ServiceManagement
+import Security
 @preconcurrency import XPC
 
 enum PrivilegedPortError: LocalizedError {
@@ -71,11 +72,7 @@ enum PrivilegedPortService {
         }
         let fingerprint: String
         do {
-            var hash = SHA256()
-            hash.update(data: Data(bundleURL.resolvingSymlinksInPath().path.utf8))
-            hash.update(data: try Data(contentsOf: helperURL, options: .mappedIfSafe))
-            hash.update(data: try Data(contentsOf: plistURL))
-            fingerprint = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            fingerprint = try registrationFingerprint(bundleURL: bundleURL, helperURL: helperURL, plistURL: plistURL)
         } catch {
             return "Could not inspect the Xe Launcher port helper: \(error.localizedDescription)"
         }
@@ -83,9 +80,10 @@ enum PrivilegedPortService {
         let recordedFingerprint = try? String(contentsOf: markerURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let service = SMAppService.daemon(plistName: plistName)
         var needsRegistration = service.status == .notRegistered || service.status == .notFound
-        // A second macOS account has no per-user marker. Do not tear down a
-        // working machine-wide daemon merely because this account is new.
-        if !forceRefresh, service.status == .enabled, recordedFingerprint == nil,
+        // Adopt a healthy service when migrating the old whole-file hash or
+        // starting in another account. The XPC probe verifies compatibility
+        // and both listener addresses before we preserve the registration.
+        if !forceRefresh, recordedFingerprint?.hasPrefix("cdhash-v1:") != true,
            (try? await acquire()) != nil {
             do { try recordFingerprint(fingerprint, at: markerURL) }
             catch { return "Port helper is active, but its update state could not be saved: \(error.localizedDescription)" }
@@ -93,8 +91,9 @@ enum PrivilegedPortService {
         }
         // SMAppService does not replace an enabled daemon just because the app
         // bundle was updated. Refresh only when the bundled helper or plist
-        // changed; unregister must finish killing the old process first.
-        if (service.status == .enabled || service.status == .requiresApproval),
+        // changed; unregister must finish killing the old process first. Keep
+        // pending approval intact instead of withdrawing it on each update.
+        if service.status == .enabled,
            (recordedFingerprint != fingerprint || forceRefresh) {
             ExternalState.shared.appendLog("launcher", "Refreshing the port helper registration for the installed Xe Launcher bundle.")
             do {
@@ -144,6 +143,36 @@ enum PrivilegedPortService {
         }
     }
 
+    static func registrationFingerprint(bundleURL: URL, helperURL: URL, plistURL: URL) throws -> String {
+        var code: SecStaticCode?
+        let created = SecStaticCodeCreateWithPath(helperURL as CFURL, [], &code)
+        guard created == errSecSuccess, let code else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(created))
+        }
+        var information: CFDictionary?
+        let copied = SecCodeCopySigningInformation(code, [], &information)
+        guard copied == errSecSuccess,
+              let identity = (information as? [String: Any])?[kSecCodeInfoUnique as String] as? Data else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(copied == errSecSuccess ? errSecCSUnsigned : copied))
+        }
+        // CodeDirectory identity covers executable code and signing requirements,
+        // but excludes the CMS signing timestamp that changes on every release.
+        var hash = SHA256()
+        hash.update(data: Data(bundleURL.resolvingSymlinksInPath().path.utf8))
+        hash.update(data: identity)
+        hash.update(data: try Data(contentsOf: plistURL))
+        return "cdhash-v1:" + hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func waitUntilReady(timeout: Duration = .seconds(3)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        repeat {
+            if (try? await acquire()) != nil { return true }
+            if Task.isCancelled || ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(250))
+        } while true
+    }
+
     private static func recordFingerprint(_ fingerprint: String, at url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true,
@@ -159,7 +188,9 @@ enum PrivilegedPortService {
     }
 
     static func acquire() async throws -> PrivilegedPortSockets {
-        guard status == .enabled else { throw PrivilegedPortError.approvalRequired }
+        // Service Management's status can lag during an app replacement. The
+        // system Mach service and daemon still enforce authorization; a valid
+        // socket handoff is the authoritative readiness check.
         return try await withCheckedThrowingContinuation { continuation in
             let connection = serviceName.withCString {
                 xpc_connection_create_mach_service($0, nil, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
@@ -187,7 +218,7 @@ enum PrivilegedPortService {
         guard xpc_get_type(reply) == XPC_TYPE_DICTIONARY else { throw PrivilegedPortError.unavailable }
         guard let status = xpc_dictionary_get_string(reply, "status"),
               String(cString: status) == "ok" else { throw PrivilegedPortError.denied }
-        // A helper from an earlier app bundle must not satisfy the update probe.
+        // Only a helper with the supported socket-handoff protocol may be used.
         guard xpc_dictionary_get_int64(reply, "version") == 2 else { throw PrivilegedPortError.unavailable }
         let http = xpc_dictionary_dup_fd(reply, "http")
         let https = xpc_dictionary_dup_fd(reply, "https")
