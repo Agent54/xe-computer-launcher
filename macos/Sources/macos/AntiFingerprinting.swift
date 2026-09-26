@@ -1,6 +1,6 @@
 import Foundation
 
-// Anti-detection patches for headless Chrome.
+// Anti-fingerprinting patches for headless Chrome.
 // Uses CDP (Chrome DevTools Protocol) over the debugging pipe to inject
 // scripts that mask headless/automation signals in webview targets.
 //
@@ -10,12 +10,12 @@ import Foundation
 
 extension ExternalState {
 
-    // MARK: - Anti-Detection
+    // MARK: - Anti-Fingerprinting
 
-    /// Comprehensive anti-detection JavaScript.
+    /// Comprehensive anti-fingerprinting JavaScript.
     /// Patches: navigator.webdriver, WebGL renderer, plugins, languages,
     /// permissions, chrome runtime object, and other headless signals.
-    private static let antiDetectionScript = """
+    private static let antiFingerprintingScript = """
     (() => {
         // 1. navigator.webdriver
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -135,24 +135,24 @@ extension ExternalState {
     })();
     """
 
-    /// Apply anti-detection patches to webview targets via CDP.
+    /// Apply anti-fingerprinting patches to webview targets via CDP.
     /// Discovers existing targets, attaches only to webview targets, injects
-    /// the anti-detection script, then reloads them so the script runs before page JS.
-    func preventDetection() {
+    /// the anti-fingerprinting script, then reloads them so the script runs before page JS.
+    func applyAntiFingerprinting() {
         DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self, self.chromeRunning else { return }
 
-            let script = Self.antiDetectionScript
+            let script = Self.antiFingerprintingScript
 
             // Discover existing targets
             guard let getTargetsResp = self.sendCDP(method: "Target.getTargets"),
                   let result = getTargetsResp["result"] as? [String: Any],
                   let targetInfos = result["targetInfos"] as? [[String: Any]] else {
-                self.appendLog("launcher", "CDP preventDetection: failed to get targets")
+                self.appendLog("launcher", "CDP applyAntiFingerprinting: failed to get targets")
                 return
             }
 
-            self.appendLog("launcher", "CDP preventDetection: found \(targetInfos.count) targets")
+            self.appendLog("launcher", "CDP applyAntiFingerprinting: found \(targetInfos.count) targets")
 
             for info in targetInfos {
                 let type = info["type"] as? String ?? ""
@@ -162,7 +162,7 @@ extension ExternalState {
                 // Only patch webview targets (third-party pages loaded in controlled frames)
                 guard type == "webview" else { continue }
 
-                self.appendLog("launcher", "CDP preventDetection: patching webview id=\(targetId) url=\(url)")
+                self.appendLog("launcher", "CDP applyAntiFingerprinting: patching webview id=\(targetId) url=\(url)")
 
                 guard let attachResp = self.sendCDP(method: "Target.attachToTarget", params: [
                     "targetId": targetId,
@@ -172,12 +172,12 @@ extension ExternalState {
                 let sessionId = attachResult["sessionId"] as? String else {
                     // Attach failed — webview may be a child target that requires
                     // attaching through the parent (IWA app) session instead.
-                    self.appendLog("launcher", "CDP preventDetection: direct attach failed for \(targetId), trying via parent")
+                    self.appendLog("launcher", "CDP applyAntiFingerprinting: direct attach failed for \(targetId), trying via parent")
                     self.patchWebviewViaParent(targetId: targetId, script: script, targetInfos: targetInfos)
                     continue
                 }
 
-                self.injectAntiDetection(sessionId: sessionId, targetId: targetId, type: type, script: script, reload: true)
+                self.injectAntiFingerprinting(sessionId: sessionId, targetId: targetId, type: type, script: script, reload: true)
             }
         }
     }
@@ -198,7 +198,7 @@ extension ExternalState {
             ]),
             let parentResult = parentAttach["result"] as? [String: Any],
             let parentSession = parentResult["sessionId"] as? String else {
-                appendLog("launcher", "CDP preventDetection: failed to attach to parent app \(parentId)")
+                appendLog("launcher", "CDP applyAntiFingerprinting: failed to attach to parent app \(parentId)")
                 continue
             }
 
@@ -209,18 +209,18 @@ extension ExternalState {
             ], sessionId: parentSession),
             let childResult = childAttach["result"] as? [String: Any],
             let childSession = childResult["sessionId"] as? String else {
-                appendLog("launcher", "CDP preventDetection: failed to attach to webview \(targetId) via parent \(parentId)")
+                appendLog("launcher", "CDP applyAntiFingerprinting: failed to attach to webview \(targetId) via parent \(parentId)")
                 continue
             }
 
-            injectAntiDetection(sessionId: childSession, targetId: targetId, type: "webview", script: script, reload: true)
+            injectAntiFingerprinting(sessionId: childSession, targetId: targetId, type: "webview", script: script, reload: true)
             return
         }
-        appendLog("launcher", "CDP preventDetection: no parent found for webview \(targetId)")
+        appendLog("launcher", "CDP applyAntiFingerprinting: no parent found for webview \(targetId)")
     }
 
-    /// Inject the anti-detection script into a target session.
-    private func injectAntiDetection(sessionId: String, targetId: String, type: String, script: String, reload: Bool) {
+    /// Inject the anti-fingerprinting script into a target session.
+    private func injectAntiFingerprinting(sessionId: String, targetId: String, type: String, script: String, reload: Bool) {
         // Override User-Agent at the network level (HTTP headers).
         // The JS patch only fixes navigator.userAgent; servers see the real header.
         // Get current UA and always strip "HeadlessChrome" → "Chrome".

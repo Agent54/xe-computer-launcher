@@ -152,9 +152,9 @@ extension ExternalState {
             appendLog("launcher", "Chrome started with debug pipe (\(chrome.name), pid=\(_browserPid), isRunning=\(chromeRunning))")
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
-            // Apply anti-detection patches when running in headless mode
+            // Apply anti-fingerprinting patches when running in headless mode
             if runsHeadless {
-                preventDetection()
+                applyAntiFingerprinting()
             }
 
             // Check if app shim needs provisioning (in parallel)
