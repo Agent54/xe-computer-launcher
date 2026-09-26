@@ -1018,8 +1018,9 @@ app_management_denials="$(
 log "verifying an approved port helper survives update bookkeeping migration"
 helper_pid_before="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
 [[ -n "$helper_pid_before" ]] || fail "approved port helper has no running process"
+# JXA invokes no-argument Objective-C methods on property access.
 run_with_timeout 10 osascript -l JavaScript -e \
-    'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();'
+    'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate;'
 deadline=$((SECONDS + 70))
 while pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null && (( SECONDS < deadline )); do
     sleep 0.5

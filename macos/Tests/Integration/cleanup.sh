@@ -188,9 +188,10 @@ launcher_pattern='/X[Ee] Launcher[.]app/Contents/MacOS/bin'
 if [[ "$STOP_ONLY" == "1" ]]; then
     # Ask Cocoa to quit normally so the launcher can stop Workerd, Compose,
     # Helium, the shim, and its VM before we force any remaining process out.
+    # JXA invokes no-argument Objective-C methods on property access.
     log "requesting graceful Xe Launcher shutdown"
     perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 10 \
-        osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate();' \
+        osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate;' \
         || log "Launch Services quit request failed; falling back to process signals"
     for _ in {1..140}; do
         pgrep -f "$launcher_pattern" >/dev/null 2>&1 || break
