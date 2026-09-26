@@ -12,8 +12,11 @@ Sparkle validates three things before replacing the installed application:
 3. the application's Apple Developer ID signature.
 
 Sparkle checks automatically without showing its update-check permission
-question. When a new version is available, users choose whether and when to
-install it: automatic downloading and installation are explicitly disallowed.
+question and downloads updates in the background by default. Downloaded updates
+are verified and prepared for installation when the launcher next quits normally;
+Sparkle does not force a quit or restart. Users can also choose **Install and
+Relaunch** to apply a prepared update immediately. Sparkle's saved user preference
+for automatic updates takes precedence over the bundled default.
 Users can also choose **Check for Updates…** from stable builds or **Update
 (int)** from prerelease builds at any time. Holding Option while the status menu
 is open reveals the embedded channel as **Prerelease (int)** or **Release
