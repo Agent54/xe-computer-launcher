@@ -11,7 +11,7 @@ function denied() {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (!['http:', 'https:'].includes(url.protocol) ||
         !applicationHost.test(url.hostname) || url.hostname === 'api.moby.localhost') return denied();
@@ -47,7 +47,7 @@ export default {
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
     try {
-      const response = await routeApplication(request, env);
+      const response = await routeApplication(request, env, ctx);
       return response.status >= 500 ? await surfaceRuntimeFailure(response, env) : response;
     } catch {
       return await runtimeUnavailable(env);

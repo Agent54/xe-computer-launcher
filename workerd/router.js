@@ -9,7 +9,7 @@ let loading = null;
 async function discover(env) {
   if (cached && Date.now() < expires) return cached;
   if (!loading) loading = (async () => {
-    const response = await env.DOCKER.fetch('http://docker/containers/json');
+    const response = await env.DOCKER.fetch('http://docker/containers/json?all=true');
     if (!response.ok) throw new Error('Docker discovery unavailable');
     const containers = await response.json();
     if (!Array.isArray(containers)) throw new Error('Invalid Docker response');
@@ -26,10 +26,39 @@ function matchService(containers, name) {
     const project = c.Labels?.['com.docker.compose.project'];
     const number = c.Labels?.['com.docker.compose.container-number'];
     const suffix = Number(number) > 1 ? `_${number}` : '';
-    return service && (name === `${service}${suffix}` || name === `${service}_${project}${suffix}`);
+    return c.Labels?.['com.docker.compose.oneoff']?.toLowerCase() !== 'true' && service &&
+      (name === `${service}${suffix}` || name === `${service}_${project}${suffix}`);
   });
   return matches.length === 1 ? matches[0] : new Response(
     matches.length ? 'Ambiguous service; include its project name.' : 'Service not found', { status: 404 });
+}
+
+async function serviceDetails(container, env) {
+  let ports = container.Ports || [];
+  // Docker omits published ports from the list for created/exited containers.
+  // Their saved bindings still identify which routes are allowed to start them.
+  if (container.State && container.State !== 'running') {
+    const response = await env.DOCKER.fetch(`http://docker/containers/${encodeURIComponent(container.Id)}/json`);
+    if (!response.ok) throw new Error('Container configuration unavailable');
+    const detail = await response.json();
+    ports = Object.entries(detail.HostConfig?.PortBindings || {}).flatMap(([target, bindings]) => {
+      const [port, protocol] = target.split('/');
+      return (bindings || []).map(binding => ({
+        Type: protocol, PrivatePort: Number(port), PublicPort: Number(binding.HostPort),
+      }));
+    });
+  }
+  return {
+    id: container.Id,
+    state: container.State,
+    service: container.Labels['com.docker.compose.service'],
+    project: container.Labels['com.docker.compose.project'],
+    configFiles: container.Labels['com.docker.compose.project.config_files'],
+    publishedPorts: ports.filter(p => p.Type === 'tcp' &&
+      Number.isInteger(p.PrivatePort) && Number.isInteger(p.PublicPort) &&
+      p.PrivatePort > 0 && p.PrivatePort < 65536 && p.PublicPort > 0 && p.PublicPort < 65536)
+      .map(p => ({ target: p.PrivatePort, published: p.PublicPort })),
+  };
 }
 
 export default {
@@ -82,16 +111,7 @@ export default {
       const containers = await discover(env);
       const container = matchService(containers, lookup ? url.searchParams.get('name') : name);
       if (container instanceof Response) return container;
-      if (lookup) return Response.json({
-        id: container.Id,
-        service: container.Labels['com.docker.compose.service'],
-        project: container.Labels['com.docker.compose.project'],
-        configFiles: container.Labels['com.docker.compose.project.config_files'],
-        publishedPorts: (container.Ports || []).filter(p => p.Type === 'tcp' &&
-          Number.isInteger(p.PrivatePort) && Number.isInteger(p.PublicPort) &&
-          p.PrivatePort > 0 && p.PrivatePort < 65536 && p.PublicPort > 0 && p.PublicPort < 65536)
-          .map(p => ({ target: p.PrivatePort, published: p.PublicPort })),
-      });
+      if (lookup) return Response.json(await serviceDetails(container, env));
       const numeric = /^\d+$/.test(portPart);
       const published = (container.Ports || []).filter(p => p.Type === 'tcp' &&
         Number.isInteger(p.PublicPort) && p.PublicPort > 0 && p.PublicPort < 65536);
@@ -125,12 +145,17 @@ export default {
       url.port = String(port);
       // Manual redirects ensure a backend cannot make the router fetch another
       // host. Passing the response through also preserves WebSocket upgrades.
-      return await fetch(new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+      const response = await fetch(new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+      // This header belongs to the router, never to an upstream application.
+      if (!response.headers.has('x-xe-router-unavailable')) return response;
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.delete('x-xe-router-unavailable');
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders });
     } catch {
       cached = null;
       expires = 0;
       return new Response('Container runtime unavailable. Retry when the VM is ready.',
-        { status: 503, headers: { 'Retry-After': '2', 'Cache-Control': 'no-store' } });
+        { status: 503, headers: { 'Retry-After': '2', 'Cache-Control': 'no-store', 'x-xe-router-unavailable': 'true' } });
     }
   },
 };

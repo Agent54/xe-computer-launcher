@@ -22,6 +22,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "app-gateway.js", esModule = embed "app-gateway.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),
+        (name = "app-startup.js", esModule = embed "app-startup.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
         (name = "darc-api.js", esModule = embed "darc-api.js"),
@@ -55,6 +56,7 @@ const config :Workerd.Config = (
         (name = "tls-gateway.js", esModule = embed "tls-gateway.js"),
         (name = "tls-client-hello.js", esModule = embed "tls-client-hello.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),
+        (name = "app-startup.js", esModule = embed "app-startup.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
         (name = "socket-bridge.js", esModule = embed "socket-bridge.js"),
       ],

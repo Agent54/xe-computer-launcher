@@ -448,3 +448,166 @@ Deno.test('application port selection', async t => {
     Date.now = originalNow;
   }
 });
+
+Deno.test('application access starts exactly the selected stopped container', async t => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = originalNow() + 100_000;
+  Date.now = () => now;
+  const labels: Record<string, string> = {
+    'com.docker.compose.service': 'sleeping', 'com.docker.compose.project': 'startup-test',
+    'com.docker.compose.project.config_files': '/stacks/startup-test/compose.yaml',
+    'com.docker.compose.container-number': '1',
+  };
+  const first = { Id: 'sleeping-1', State: 'exited', Labels: labels,
+    Ports: [] as { Type: string; PrivatePort: number; PublicPort: number }[],
+    NetworkSettings: { Networks: { default: { IPAddress: '172.18.0.3' } } } };
+  let containers = [first];
+  const starts: { path: string; body: unknown }[] = [];
+  const background: Promise<unknown>[] = [];
+  const ctx = { waitUntil(promise: Promise<unknown>) { background.push(promise); } };
+  let releaseStart: (() => void) | undefined;
+  let startStatus = 200;
+  let upstreamReady = false;
+  let upstreamStatus = 200;
+  let upstreamRequests = 0;
+  const guestEnv = { DOCKER: { fetch: (input: string) => {
+    const url = new URL(input);
+    if (url.pathname === '/containers/json') {
+      assert.equal(url.searchParams.get('all'), 'true');
+      return Promise.resolve(Response.json(containers));
+    }
+    assert.match(url.pathname, /^\/containers\/sleeping-\d+\/json$/);
+    return Promise.resolve(Response.json({ HostConfig: { PortBindings: {
+      '3000/tcp': [{ HostIp: '', HostPort: '8080' }],
+      '3000/udp': [{ HostIp: '', HostPort: '5353' }],
+    } } }));
+  } } };
+  const env = {
+    ROUTER: { fetch: (input: Request | string) => router.fetch(input instanceof Request ? input : new Request(input), guestEnv) },
+    COMPOSE: { fetch: async (input: Request | string) => {
+      const request = input instanceof Request ? input : new Request(input);
+      const url = new URL(request.url);
+      if (request.method === 'POST') {
+        starts.push({ path: url.pathname, body: await request.json() });
+        if (releaseStart) await new Promise<void>(resolve => { releaseStart = resolve; });
+        return Response.json({ ok: startStatus === 200 }, { status: startStatus });
+      }
+      assert.equal(url.pathname, '/v1.24/config/startup-test');
+      return Response.json({ services: { sleeping: { ports: [{ name: 'web', target: 3000, published: '8080' }] } } });
+    } },
+    RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('app-ports.json')
+      ? { http: 80, https: 443 } : { phase: 'healthy', message: 'ready' })) },
+  };
+  function request(host = 'sleeping.localhost', options: RequestInit = {}) {
+    return appGateway.fetch(new Request(`https://${host}/deep/link?q=1`, options), env, ctx);
+  }
+  globalThis.fetch = () => {
+    upstreamRequests++;
+    if (!upstreamReady) throw new Error('Connection refused');
+    return Promise.resolve(new Response('application response', { status: upstreamStatus }));
+  };
+  try {
+    await t.step('invalid routes do not start any container', async () => {
+      for (const host of ['missing.localhost', 'sleeping.missing.localhost', 'sleeping.3000.localhost', 'sleeping.5353.localhost']) {
+        assert.equal((await request(host)).status, 404, host);
+      }
+      assert.equal(starts.length, 0);
+    });
+    await t.step('all selectors share one background start and return the black loader immediately', async () => {
+      releaseStart = () => {};
+      const responses = await Promise.all([
+        request(), request('sleeping.web.localhost'), request('sleeping.8080.localhost'),
+        request('sleeping_startup-test--nweb.app.localhost'), request('sleeping--p8080.app.localhost'),
+      ]);
+      for (const response of responses) {
+        assert.equal(response.status, 503);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.equal(response.headers.get('retry-after'), '2');
+        assert.match(response.headers.get('content-type')!, /text\/html/);
+        const html = await response.text();
+        assert.match(html, /<h1>sleeping<\/h1>/);
+        assert.match(html, /Starting…/);
+        assert.match(html, /--background: #000000/);
+        assert.match(html, /http-equiv="refresh" content="2"/);
+      }
+      assert.deepEqual(starts, [{ path: '/v1.24/start/startup-test/container',
+        body: { container: 'sleeping-1', path: '/stacks/startup-test/compose.yaml' } }]);
+      assert.equal(upstreamRequests, 0);
+      releaseStart!();
+      releaseStart = undefined;
+      await Promise.all(background);
+    });
+    await t.step('POST and WebSocket requests get retryable JSON; HEAD has no body', async () => {
+      const posted = await request('sleeping.localhost', { method: 'POST', body: 'must not replay' });
+      assert.equal(posted.status, 503);
+      assert.equal((await posted.json()).state, 'starting');
+      const upgrade = await request('sleeping.localhost', { headers: { Upgrade: 'websocket' } });
+      assert.equal((await upgrade.json()).state, 'starting');
+      const head = await request('sleeping.localhost', { method: 'HEAD' });
+      assert.equal(head.status, 503);
+      assert.equal(await head.text(), '');
+      assert.equal(starts.length, 1);
+    });
+    await t.step('the loader survives connection refusal until the application is reachable', async () => {
+      containers = [{ ...first, State: 'running', Ports: [{ Type: 'tcp', PrivatePort: 3000, PublicPort: 8080 }] }];
+      now += 3000;
+      assert.match(await (await request()).text(), /Starting…/);
+      assert.equal(starts.length, 1);
+      upstreamReady = true;
+      upstreamStatus = 503;
+      assert.equal(await (await request()).text(), 'application response', 'application errors are not replaced');
+      upstreamStatus = 200;
+      const ready = await request();
+      assert.equal(ready.status, 200);
+      assert.equal(await ready.text(), 'application response');
+    });
+    await t.step('created containers and replica URLs start only that exact instance', async () => {
+      containers = [first, { ...first, Id: 'sleeping-2', State: 'created',
+        Labels: { ...labels, 'com.docker.compose.container-number': '2' } }];
+      now += 3000;
+      assert.equal((await request('sleeping_startup-test_2--p8080.app.localhost')).status, 503);
+      await Promise.all(background);
+      assert.equal(starts.length, 2);
+      assert.deepEqual(starts[1].body, { container: 'sleeping-2', path: '/stacks/startup-test/compose.yaml' });
+    });
+    await t.step('start failures remain visible and never fall back to a service-wide start', async () => {
+      containers = [{ ...first, Id: 'sleeping-3', State: 'stopped' }];
+      now += 3000;
+      startStatus = 500;
+      await request('sleeping.8080.localhost');
+      await Promise.all(background);
+      const response = await request('sleeping.8080.localhost');
+      const html = await response.text();
+      assert.equal(response.status, 503);
+      assert.match(html, /Could not start this app/);
+      assert.doesNotMatch(html, /http-equiv="refresh"/);
+      assert.equal(starts.length, 3);
+      startStatus = 200;
+      now += 11_000;
+      await request();
+      await Promise.all(background);
+      assert.equal(starts.length, 4, 'a later retry may start the same container again');
+    });
+    await t.step('paused, restarting, ambiguous and one-off containers are never started', async () => {
+      const before = starts.length;
+      for (const state of ['paused', 'restarting', 'dead', 'removing']) {
+        containers = [{ ...first, State: state }];
+        now += 3000;
+        assert.equal((await request()).status, 503);
+      }
+      containers = [first, { ...first, Id: 'sleeping-4', Labels: { ...labels, 'com.docker.compose.project': 'other' } }];
+      now += 3000;
+      assert.equal((await request()).status, 404);
+      containers = [{ ...first, Labels: { ...labels, 'com.docker.compose.oneoff': 'True' } }];
+      now += 3000;
+      assert.equal((await request()).status, 404);
+      assert.equal(starts.length, before);
+    });
+  } finally {
+    releaseStart?.();
+    await Promise.all(background);
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});

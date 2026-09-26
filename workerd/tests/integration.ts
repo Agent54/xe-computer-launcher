@@ -55,6 +55,9 @@ while (routingPort === managementPort) routingPort = freePort();
 let tlsPort = freePort();
 while (tlsPort === managementPort || tlsPort === routingPort) tlsPort = freePort();
 const containerId = 'a'.repeat(64);
+const sleepingId = 'b'.repeat(64);
+let sleepingState = 'created';
+let releaseContainerStart: (() => void) | undefined;
 let securePort = 0;
 
 interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean }
@@ -72,10 +75,14 @@ function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
   });
 }
 async function request(path = '/', options: Options = {}) {
-  const res = await response(path, options);
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of res) chunks.push(chunk);
-  return { status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) };
+  try {
+    const res = await response(path, options);
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of res) chunks.push(chunk);
+    return { status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) };
+  } catch (cause) {
+    throw new Error(`Request failed: ${options.method || 'GET'} ${options.host || 'management'}${path}`, { cause });
+  }
 }
 async function startUnix(path: string) {
   try { await Deno.remove(path); } catch (e) { if (!(e instanceof Deno.errors.NotFound)) throw e; }
@@ -89,17 +96,29 @@ async function startUnix(path: string) {
       return Response.json({ services: { web: { ports: [
         { name: 'web', target: appPort, published: '32000', protocol: 'tcp' },
         { name: 'secure', target: securePort, published: '32001', protocol: 'tcp', app_protocol: 'https' },
-      ] } } });
+      ] }, sleeping: { ports: [{ name: 'web', target: appPort, published: '32002', protocol: 'tcp' }] } } });
     } else if (requestPath === '/v1.24/failure') {
       return Response.json({ error: 'backend EOF' }, { status: 500 });
-    } else if (requestPath === '/containers/json') {
-      return new Response(JSON.stringify([{ Id: containerId, Labels: {
+    } else if (requestPath === '/v1.24/start/demo/container' && req.method === 'POST') {
+      assert.deepEqual(JSON.parse(body), { container: sleepingId });
+      await new Promise<void>(resolve => { releaseContainerStart = resolve; });
+      sleepingState = 'running';
+      return Response.json({ ok: true });
+    } else if (requestPath === `/containers/${sleepingId}/json`) {
+      return Response.json({ HostConfig: { PortBindings: { [`${appPort}/tcp`]: [{ HostPort: '32002' }] } } });
+    } else if (requestPath === '/containers/json?all=true') {
+      return new Response(JSON.stringify([{ Id: containerId, State: 'running', Labels: {
         'com.docker.compose.service': 'web', 'com.docker.compose.project': 'demo',
       }, Ports: [
         { Type: 'tcp', PrivatePort: appPort, PublicPort: 32000 },
         { Type: 'tcp', PrivatePort: securePort, PublicPort: 32001 },
       ],
-        NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } }]), { headers });
+        NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } },
+        { Id: sleepingId, State: sleepingState, Labels: {
+          'com.docker.compose.service': 'sleeping', 'com.docker.compose.project': 'demo',
+        }, Ports: sleepingState === 'running' ? [{ Type: 'tcp', PrivatePort: appPort, PublicPort: 32002 }] : [],
+        NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } },
+      ]), { headers });
     } else if (requestPath === '/v1.24/events') {
       const stream = new ReadableStream({ start(controller) {
         controller.enqueue(new TextEncoder().encode('data: first\n\n'));
@@ -140,10 +159,10 @@ const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req =>
 });
 const appPort = app.addr.port;
 
-async function tlsRequest(hostname: string): Promise<{ status: number; body: string }> {
+async function tlsRequest(hostname: string, publicPort = false): Promise<{ status: number; body: string }> {
   return await new Promise((resolve, reject) => {
     const request = httpsRequest({ hostname: '127.0.0.1', port: tlsPort, servername: hostname,
-      rejectUnauthorized: false, headers: { Host: hostname }, timeout: 5000 }, response => {
+      rejectUnauthorized: false, headers: { Host: publicPort ? `${hostname}:${tlsPort}` : hostname }, timeout: 5000 }, response => {
       const chunks: Uint8Array[] = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode || 0,
@@ -356,6 +375,24 @@ try {
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
+  const sleeping = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
+  assert.equal(sleeping.status, 503);
+  assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
+  assert.match(sleeping.body.toString(), /Starting…/);
+  assert.equal(sleeping.headers['cache-control'], 'no-store');
+  const sleepingTLS = await tlsRequest('sleeping_demo--p32002.app.localhost', true);
+  assert.equal(sleepingTLS.status, 503);
+  assert.match(sleepingTLS.body, /Starting…/);
+  assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 1);
+  assert(releaseContainerStart, 'single-container start must be dispatched before returning the loader');
+  releaseContainerStart();
+  releaseContainerStart = undefined;
+  await sleep(2100);
+  assert.equal((await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' })).body.toString(), 'upstream-ok');
+  assert.equal(seen.at(-1)!.path, '/deep/link?q=1');
+  assert.deepEqual(await tlsRequest('sleeping_demo--p32002.app.localhost', true), { status: 200, body: 'upstream-ok' });
+  console.log('PASS: immediate HTTP/HTTPS loader, one exact container start, and original URL recovery');
+
   await stopProcess(guest);
   assert.equal((await request('/', appOptions)).status, 503);
   assert.equal((await request()).status, 200);
@@ -394,6 +431,7 @@ try {
   } finally { tlsApp.close(); }
 } finally {
   releaseSSE?.();
+  releaseContainerStart?.();
   for (const process of processes) await stopProcess(process);
   for (const server of servers) await server.shutdown();
   await app.shutdown();

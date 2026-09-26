@@ -119,6 +119,18 @@ container unchanged. The generated private key stays out of the signed bundle.
 
 ## Lifecycle
 
+Opening an app backed by a created, stopped, or exited container returns a black
+loading page with its service name and “Starting…”. The host calls Compose's
+`POST /v1.24/start/{project}/container` endpoint with the exact container ID and
+config path. Other replicas and services stay stopped. Concurrent requests share
+the same start operation. The page retries its original URL every two seconds,
+including through the certificate-covered `.app.localhost` HTTPS aliases, and
+keeps showing the loader during connection failures while the app starts.
+Start failures show a retry link; API requests receive a retryable 503 instead
+of an HTML page. Compose applications that have no container yet must first be
+created in Compose. Direct TLS passthrough apps still own their certificates, so
+their container is started on access but their TLS client must retry the connection.
+
 The launcher starts and supervises the host Workerd and the guest router. The guest runs directly in the
 VM using bundled runtime files mounted read-only. Its logs are at
 `/run/xe-router/workerd.log`. During VM restarts, the host UI stays available and
