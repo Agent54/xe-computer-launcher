@@ -113,7 +113,7 @@ func showSetupProgress(
             closeSetupProgress()
         } else {
             positionSetupPanel(panel, placement: placement)
-            _titleLabel?.stringValue = title ?? "Setting up \(setupAppDisplayName)"
+            _titleLabel?.stringValue = title ?? "Configuring \(setupAppDisplayName)"
             _cancelButton?.isHidden = !allowsCancellation
             _setupActionButton?.isHidden = true
             _setupActionHandler = nil
@@ -171,7 +171,7 @@ func showSetupProgress(
     vfx.addSubview(iconView)
 
     // App setup title centered below icon
-    let titleLabel = NSTextField(labelWithString: title ?? "Setting up \(setupAppDisplayName)")
+    let titleLabel = NSTextField(labelWithString: title ?? "Configuring \(setupAppDisplayName)")
     titleLabel.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
     titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
     titleLabel.textColor = .white

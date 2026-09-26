@@ -236,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             // The migration dialog has just closed. Keep setup visibly in
             // progress while macOS registers and activates the selected helper.
             showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
-            updateSetupProgress(status: "Setting up ports 80/443. Approve Xe Launcher in System Settings if asked; setup will continue automatically.")
+            updateSetupProgress(status: "Configuring ports 80/443. Approve Xe Launcher in System Settings if asked; setup will continue automatically.")
             setSetupProgressIndeterminate(true)
         }
         // Updating a copy on a read-only disk image cannot succeed. The copy
