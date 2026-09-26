@@ -7,8 +7,17 @@ the launcher UI to Compose and running containers:
   shared app HTTP/HTTPS, and `management.js` serves the UI and forwards API requests
   to the Compose server on macOS. The separate workers prevent a forged Host
   header on the management socket from entering app routing.
-- **Guest:** `router.js` runs inside SmolVM and routes `.localhost` requests to
-  containers. The host connects to it through a Unix socket exposed by SmolVM.
+- **Discovery:** `app-discovery.js` resolves running, stopped, and uncreated apps
+  through Compose's existing project, config, and service APIs. Project/config
+  variants share a 100 ms server cache across hostnames and port selectors;
+  startup invalidates the affected variant immediately. Docker lookup has the
+  same 100 ms limit. Cache expiry is measured from fetch start, so slow requests
+  cannot extend the reuse window. Pending requests share a fetch; these caches
+  are held in Workerd memory and never stored in the browser.
+- **Guest:** `router.js` runs inside SmolVM. It validates the exact container ID
+  and published/target port pair selected by the host against Docker, resolves
+  the current container address, and forwards the request. The host connects to
+  it through a Unix socket exposed by SmolVM.
 
 The launcher starts the Compose UI server but does not open it or provide a
 session token. The IWA UI handles access to Compose.
@@ -45,7 +54,10 @@ Short syntax such as `"8080:3000"` supports default and numeric routes too.
 Names used in URLs must be a single hostname label (letters, digits or hyphens);
 all-numeric selectors always mean published port numbers. Only TCP ports
 published on the running container are routed. Names and YAML order refresh
-from the Compose API within two seconds.
+from the Compose API on the next request after the 100 ms cache expires. Numeric
+routes can still use Compose's container port bindings when parsed configuration
+is unavailable. Router-generated discovery and availability errors use
+`Cache-Control: no-store`, so the browser cannot cache a stale unavailable page.
 
 The Compose UI uses `compose-ui.localhost` on those same HTTP and HTTPS ports.
 It shares the application gateway and never needs a separate published port.
@@ -119,7 +131,7 @@ container unchanged. The generated private key stays out of the signed bundle.
 
 ## Lifecycle
 
-Opening an app backed by a created, stopped, or exited container returns a black
+Opening an uncreated app or one backed by a created, stopped, or exited container returns a black
 loading page with its service name and “Starting…”. The host calls Compose's
 `POST /v1.24/start/{project}/container` endpoint with the exact container ID and
 config path. Other replicas and services stay stopped. Concurrent requests share
@@ -127,8 +139,15 @@ the same start operation. The page retries its original URL every two seconds,
 including through the certificate-covered `.app.localhost` HTTPS aliases, and
 keeps showing the loader during connection failures while the app starts.
 Start failures show a retry link; API requests receive a retryable 503 instead
-of an HTML page. Compose applications that have no container yet must first be
-created in Compose. Direct TLS passthrough apps still own their certificates, so
+of an HTML page. Apps without containers are discovered through Compose's project
+and service catalogue. Their first container is created and started using the same
+single-container endpoint with `service` and `path`, without starting dependencies
+or other replicas. This requires the Compose server extension in
+[`compose-single-container-start.patch`](compose-single-container-start.patch),
+which is kept here so the companion server change is reviewable with the router.
+Apply it from the Compose checkout with `git apply /path/to/compose-single-container-start.patch`
+and build that server before using uncreated-app startup.
+Direct TLS passthrough apps still own their certificates, so
 their container is started on access but their TLS client must retry the connection.
 
 The launcher starts and supervises the host Workerd and the guest router. The guest runs directly in the
@@ -149,7 +168,8 @@ Run `deno task test:unit` for port selection tests with mocked backends; these
 do not start workerd, Docker, or a VM.
 
 The integration suite starts separate host and guest workers linked by a Unix
-socket, using disposable Docker/Compose backends:
+socket, using disposable Docker/Compose backends. It uses `curl` for TLS requests
+and `openssl` for temporary test certificates:
 
 ```sh
 deno task test:integration node_modules/workerd/bin/workerd /path/to/ui /path/to/compose

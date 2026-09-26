@@ -8,6 +8,38 @@ import router from '../router.js';
 import { surfaceRuntimeFailure } from '../runtime-status.js';
 import { clientHelloServerName } from '../tls-client-hello.js';
 import { resolveApplicationPort } from '../app-routing.js';
+import { resolveApplicationService } from '../app-discovery.js';
+
+interface TestContainer {
+  Id: string;
+  State?: string;
+  Labels: Record<string, string>;
+  Ports: { Type: string; PrivatePort: number; PublicPort?: number }[];
+}
+
+function composeProjects(containers: TestContainer[]) {
+  const projects = new Map<string, Set<string>>();
+  for (const container of containers) {
+    const project = container.Labels['com.docker.compose.project'];
+    if (!projects.has(project)) projects.set(project, new Set());
+    const files = container.Labels['com.docker.compose.project.config_files'];
+    if (files) projects.get(project)!.add(files);
+  }
+  return [...projects].map(([Name, files]) => ({ Name, ConfigFiles: [...files].join(',') }));
+}
+
+function composeContainers(containers: TestContainer[]) {
+  return containers.map(container => ({
+    ID: container.Id,
+    Name: `${container.Labels['com.docker.compose.project']}-${container.Labels['com.docker.compose.service']}-${container.Labels['com.docker.compose.container-number'] || 1}`,
+    Service: container.Labels['com.docker.compose.service'],
+    State: container.State || 'running',
+    Labels: container.Labels,
+    Publishers: container.Ports.map(port => ({
+      Protocol: port.Type, TargetPort: port.PrivatePort, PublishedPort: port.PublicPort || 0,
+    })),
+  }));
+}
 
 Deno.test('TLS ClientHello selects only its SNI hostname', () => {
   const hostname = new TextEncoder().encode('darc_darc.localhost');
@@ -247,7 +279,7 @@ Deno.test('application port selection', async t => {
   let now = originalNow();
   Date.now = () => now;
   const container = {
-    Id: 'web-1', Labels: {
+    Id: 'web-1', State: 'running', Labels: {
       'com.docker.compose.service': 'service', 'com.docker.compose.project': 'demo',
       'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml',
       'com.docker.compose.container-number': '1',
@@ -281,7 +313,13 @@ Deno.test('application port selection', async t => {
     } },
     COMPOSE: { fetch: (input: string) => {
       const url = new URL(input);
-      assert.equal(url.pathname, '/v1.24/config/demo');
+      if (url.pathname === '/v1.24/ls') return Promise.resolve(Response.json(composeProjects(containers)));
+      if (url.pathname.startsWith('/v1.24/ps/')) {
+        assert.equal(url.searchParams.get('all'), 'true');
+        return Promise.resolve(Response.json(composeContainers(containers.filter(container =>
+          container.Labels['com.docker.compose.project'] === url.pathname.split('/').at(-1)))));
+      }
+      assert.match(url.pathname, /^\/v1.24\/config\/(?:demo|other)$/);
       assert.equal(url.searchParams.get('format'), 'json');
       assert.equal(url.searchParams.get('path'), '/stacks/demo/compose.yaml');
       return Promise.resolve(Response.json({ services: { service: { ports } } }, { status: configStatus }));
@@ -388,11 +426,14 @@ Deno.test('application port selection', async t => {
       listenerPorts = { http: 80, https: 443 };
     });
     await t.step('caller cannot override selected ports and internal headers do not reach apps', async () => {
-      const response = await request('service.web.localhost', { 'x-xe-target-port': '7000', 'x-xe-container-id': 'forged' });
+      const response = await request('service.web.localhost', {
+        'x-xe-target-port': '7000', 'x-xe-container-id': 'forged', 'x-xe-published-port': '1234',
+      });
       const result = await response.json();
       assert.equal(result.url, 'http://172.18.0.2:3000/hello?q=1');
       assert.equal(result.headers['x-xe-target-port'], undefined);
       assert.equal(result.headers['x-xe-container-id'], undefined);
+      assert.equal(result.headers['x-xe-published-port'], undefined);
       assert.equal(result.headers['x-forwarded-host'], 'service.web.localhost');
       assert.equal((await request('localhost')).status, 403);
       assert.equal((await request('api.moby.localhost')).status, 403);
@@ -410,7 +451,8 @@ Deno.test('application port selection', async t => {
       assert.equal((await request('service.web.localhost')).status, 404);
     });
     await t.step('a port named localhost is distinct from the default route', async () => {
-      ports = [{ ...ports[0], target: 9000, name: 'first' }, { ...ports[1], target: 3000, name: 'localhost' }];
+      ports = [{ ...ports[0], target: 9000, published: '9090', name: 'first' },
+        { ...ports[1], target: 3000, published: '8080', name: 'localhost' }];
       now += 3000;
       assert.equal((await (await request('service.localhost.localhost')).json()).url, 'http://172.18.0.2:3000/hello?q=1');
       assert.equal((await (await request()).json()).url, 'http://172.18.0.2:9000/hello?q=1');
@@ -439,9 +481,11 @@ Deno.test('application port selection', async t => {
       assert.equal((await request('service.localhost')).status, 404);
     });
     await t.step('guest outage returns a retryable failure', async () => {
+      ports = [{ name: 'web', target: 3000, published: '8080', protocol: 'tcp' }];
+      now += 3000;
       guestDown = true;
-      assert.equal((await request()).status, 503);
-      assert.equal((await request('service.8080.localhost')).status, 503);
+      assert.equal((await request('service_demo_2.localhost')).status, 503);
+      assert.equal((await request('service_demo_2.8080.localhost')).status, 503);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -488,12 +532,17 @@ Deno.test('application access starts exactly the selected stopped container', as
     COMPOSE: { fetch: async (input: Request | string) => {
       const request = input instanceof Request ? input : new Request(input);
       const url = new URL(request.url);
+      if (url.pathname === '/v1.24/ls') return Response.json(composeProjects(containers));
+      if (url.pathname.startsWith('/v1.24/ps/')) {
+        return Response.json(composeContainers(containers.filter(container =>
+          container.Labels['com.docker.compose.project'] === url.pathname.split('/').at(-1))));
+      }
       if (request.method === 'POST') {
         starts.push({ path: url.pathname, body: await request.json() });
         if (releaseStart) await new Promise<void>(resolve => { releaseStart = resolve; });
         return Response.json({ ok: startStatus === 200 }, { status: startStatus });
       }
-      assert.equal(url.pathname, '/v1.24/config/startup-test');
+      assert.match(url.pathname, /^\/v1.24\/config\/(?:startup-test|other)$/);
       return Response.json({ services: { sleeping: { ports: [{ name: 'web', target: 3000, published: '8080' }] } } });
     } },
     RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('app-ports.json')
@@ -510,7 +559,9 @@ Deno.test('application access starts exactly the selected stopped container', as
   try {
     await t.step('invalid routes do not start any container', async () => {
       for (const host of ['missing.localhost', 'sleeping.missing.localhost', 'sleeping.3000.localhost', 'sleeping.5353.localhost']) {
-        assert.equal((await request(host)).status, 404, host);
+        const response = await request(host);
+        assert.equal(response.status, 404, host);
+        assert.equal(response.headers.get('cache-control'), 'no-store', host);
       }
       assert.equal(starts.length, 0);
     });
@@ -607,6 +658,262 @@ Deno.test('application access starts exactly the selected stopped container', as
   } finally {
     releaseStart?.();
     await Promise.all(background);
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+Deno.test('Agenda URL discovers an uncreated app and shares its single-container creation', async () => {
+  const originalNow = Date.now;
+  let now = originalNow() + 300_000;
+  Date.now = () => now;
+  const background: Promise<unknown>[] = [];
+  const ctx = { waitUntil(promise: Promise<unknown>) { background.push(promise); } };
+  const configFiles = '/stacks/calender/docker-compose.yaml';
+  const starts: { path: string; body: unknown }[] = [];
+  let state = 'uncreated';
+  let release: (() => void) | undefined;
+  const requests: string[] = [];
+  const env = {
+    ROUTER: { fetch: (input: Request | string) => {
+      const request = input instanceof Request ? input : new Request(input);
+      assert.notEqual(new URL(request.url).hostname, 'localhost', 'discovery must not query the guest');
+      assert.equal(request.headers.get('x-xe-container-id'), 'agenda-new-id');
+      assert.equal(request.headers.get('x-xe-target-port'), '5173');
+      return Promise.resolve(state === 'ready' ? new Response('agenda is ready') :
+        new Response('connection refused', { status: 503, headers: { 'x-xe-router-unavailable': 'true' } }));
+    } },
+    COMPOSE: { fetch: async (input: Request | string) => {
+      const request = input instanceof Request ? input : new Request(input);
+      const url = new URL(request.url);
+      requests.push(url.pathname);
+      if (url.pathname === '/v1.24/ls') return Response.json([
+        { Name: 'agenda', ConfigFiles: configFiles },
+        { Name: 'unrelated', ConfigFiles: '/stacks/other/compose.yaml' },
+      ]);
+      if (url.pathname === '/v1.24/ps/agenda') {
+        assert.equal(url.searchParams.get('path'), configFiles);
+        assert.equal(url.searchParams.get('all'), 'true');
+        return Response.json([{ ID: state === 'uncreated' ? '' : 'agenda-new-id', Name: 'agenda-agenda-1', Service: 'agenda',
+          State: state === 'uncreated' ? 'uncreated' : 'running',
+          Publishers: [{ TargetPort: 5173, PublishedPort: 5173, Protocol: 'tcp' }] }]);
+      }
+      if (url.pathname === '/v1.24/ps/unrelated') return Response.json([]);
+      if (url.pathname === '/v1.24/config/unrelated') return Response.json({ services: {} });
+      if (url.pathname === '/v1.24/config/agenda') return Response.json({
+        services: { agenda: { ports: [{ name: 'web', target: 5173, published: '5173' }] } },
+      });
+      assert.equal(url.pathname, '/v1.24/start/agenda/container');
+      assert.equal(request.method, 'POST');
+      starts.push({ path: url.pathname, body: await request.json() });
+      await new Promise<void>(resolve => { release = resolve; });
+      state = 'running';
+      return Response.json({ ok: true });
+    } },
+    RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('app-ports.json')
+      ? { http: 80, https: 443 } : { phase: 'healthy', message: 'ready' })) },
+  };
+  const request = (host = 'agenda_agenda--p5173.app.localhost') =>
+    appGateway.fetch(new Request(`https://${host}/calendar?day=today`), env, ctx);
+  try {
+    assert.equal((await request('agenda_agenda--p9999.app.localhost')).status, 404);
+    assert.equal(starts.length, 0);
+    const responses = await Promise.all([request(), request(), request('agenda_agenda--nweb.app.localhost')]);
+    for (const response of responses) {
+      assert.equal(response.status, 503);
+      const html = await response.text();
+      assert.match(html, /<h1>agenda<\/h1>/);
+      assert.match(html, /Starting…/);
+    }
+    assert.deepEqual(starts, [{ path: '/v1.24/start/agenda/container', body: { service: 'agenda', path: configFiles } }]);
+    assert.equal(requests.filter(path => path === '/v1.24/ls').length, 1);
+    assert.equal(requests.filter(path => path === '/v1.24/ps/agenda').length, 1);
+    assert.equal(requests.filter(path => path === '/v1.24/config/agenda').length, 1);
+    release!();
+    await Promise.all(background);
+    assert.match(await (await request()).text(), /Starting…/, 'new container ID must retain startup tracking');
+    assert.equal(requests.filter(path => path === '/v1.24/ps/agenda').length, 2, 'startup invalidates the project cache immediately');
+    assert.equal(requests.filter(path => path === '/v1.24/ps/unrelated').length, 1, 'other variants remain cached');
+    state = 'ready';
+    const ready = await request();
+    assert.equal(ready.status, 200);
+    assert.equal(await ready.text(), 'agenda is ready');
+    assert.equal(starts.length, 1);
+  } finally {
+    release?.();
+    await Promise.all(background);
+    Date.now = originalNow;
+  }
+});
+
+Deno.test('app discovery resolves all states and detects ambiguity across config variants', async () => {
+  const firstPath = '/stacks/first/compose.yaml';
+  const secondPath = '/stacks/second/compose.yaml';
+  const otherPath = '/stacks/other/compose.yaml';
+  const requests: string[] = [];
+  const env = { COMPOSE: { fetch: async (input: string) => {
+    const url = new URL(input);
+    requests.push(url.pathname + url.search);
+    if (url.pathname === '/v1.24/ls') return Response.json([
+      { Name: 'demo', ConfigFiles: `${firstPath},${secondPath}` },
+      { Name: 'other', ConfigFiles: otherPath },
+    ]);
+    const path = url.searchParams.get('path');
+    if (url.pathname.startsWith('/v1.24/config/')) return Response.json({ services: {
+      web: { ports: [{ name: 'web', target: 3000, published: '8080' }] },
+      web_demo: { ports: [{ target: 3000, published: '8080' }] },
+    } });
+    assert.equal(url.searchParams.get('all'), 'true');
+    if (path === firstPath) return Response.json([
+      { ID: 'first-1', Name: 'demo-web-1', Service: 'web', State: 'running',
+        Publishers: [{ TargetPort: 3000, PublishedPort: 8080, Protocol: 'tcp' }] },
+      { ID: 'first-2', Name: 'demo-web-2', Service: 'web', State: 'created',
+        Labels: { 'com.docker.compose.container-number': '2' }, Publishers: [] },
+      { ID: 'oneoff', Name: 'demo-task-run-1', Service: 'task', State: 'exited',
+        Labels: { 'com.docker.compose.oneoff': 'True' } },
+    ]);
+    if (path === secondPath) return Response.json([
+      { ID: '', Name: 'demo-web-1', Service: 'web', State: 'uncreated',
+        Publishers: [{ TargetPort: 3000, PublishedPort: 8080, Protocol: 'tcp' }] },
+    ]);
+    assert.equal(path, otherPath);
+    return Response.json([{ ID: '', Name: 'other-web_demo-1', Service: 'web_demo', State: 'uncreated' }]);
+  } } };
+  for (const name of ['web', 'web_demo']) {
+    const ambiguous = await resolveApplicationService(name, env);
+    assert(ambiguous instanceof Response);
+    assert.equal(ambiguous.status, 404);
+    assert.match(await ambiguous.text(), /Ambiguous service/);
+  }
+  const replica = await resolveApplicationService('web_demo_2', env);
+  assert(!(replica instanceof Response));
+  assert.equal(replica.id, 'first-2');
+  assert.equal(replica.state, 'created');
+  assert.equal(replica.configFiles, firstPath);
+  assert.deepEqual(replica.publishedPorts, [{ target: 3000, published: 8080 }]);
+  for (const name of ['task', 'missing']) {
+    const missing = await resolveApplicationService(name, env);
+    assert(missing instanceof Response);
+    assert.equal(missing.status, 404);
+    assert.equal(await missing.text(), 'Service not found');
+  }
+  assert.equal(requests.filter(path => path.startsWith('/v1.24/ls?')).length, 1);
+  assert.equal(requests.filter(path => path.startsWith('/v1.24/ps/')).length, 3);
+  assert.equal(requests.filter(path => path.startsWith('/v1.24/config/')).length, 3);
+});
+
+Deno.test('failed service discovery retries instead of caching a missing app', async () => {
+  let available = false;
+  let queries = 0;
+  const env = { COMPOSE: { fetch: async (input: string) => {
+    const url = new URL(input);
+    if (url.pathname === '/v1.24/ls') return Response.json([{ Name: 'recovery', ConfigFiles: '' }]);
+    if (url.pathname.startsWith('/v1.24/config/')) return Response.json({ services: { app: { ports: [] } } });
+    queries++;
+    return available ? Response.json([{ ID: 'recovered', Name: 'recovery-app-1', Service: 'app', State: 'running' }])
+      : new Response('backend unavailable', { status: 503 });
+  } } };
+  await assert.rejects(() => resolveApplicationService('app_recovery', env), /discovery unavailable/);
+  available = true;
+  const recovered = await resolveApplicationService('app_recovery', env);
+  assert(!(recovered instanceof Response));
+  assert.equal(recovered.id, 'recovered');
+  assert.equal(queries, 2);
+});
+
+Deno.test('Compose state reuse expires at 100 ms without being extended by slow fetches', async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  let state = 'running';
+  let slow = false;
+  let queries = 0;
+  const env = { COMPOSE: { fetch: async (input: string) => {
+    const url = new URL(input);
+    if (url.pathname === '/v1.24/ls') return Response.json([{ Name: 'freshness', ConfigFiles: '' }]);
+    if (url.pathname.startsWith('/v1.24/config/')) return Response.json({ services: {
+      app: { ports: [{ target: 3000, published: '8080' }] },
+    } });
+    queries++;
+    if (slow) now += 150;
+    return Response.json([{ ID: 'app-1', Name: 'freshness-app-1', Service: 'app', State: state,
+      Publishers: [{ TargetPort: 3000, PublishedPort: 8080, Protocol: 'tcp' }] }]);
+  } } };
+  const resolve = async () => {
+    const service = await resolveApplicationService('app_freshness', env);
+    assert(!(service instanceof Response));
+    return service;
+  };
+  try {
+    assert.equal((await resolve()).state, 'running');
+    state = 'exited';
+    now += 99;
+    assert.equal((await resolve()).state, 'running');
+    assert.equal(queries, 1, 'requests within the short reuse window share a snapshot');
+    now += 1;
+    assert.equal((await resolve()).state, 'exited');
+    assert.equal(queries, 2, 'state refreshes at the 100 ms boundary');
+    slow = true;
+    now += 100;
+    await resolve();
+    assert.equal(queries, 3);
+    state = 'running';
+    assert.equal((await resolve()).state, 'running');
+    assert.equal(queries, 4, 'a fetch taking longer than 100 ms is not reused after it completes');
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+Deno.test('guest validates exact live bindings and refreshes a newly created container ID', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = originalNow() + 600_000;
+  Date.now = () => now;
+  const first = { Id: 'c'.repeat(64), State: 'running', Labels: {
+    'com.docker.compose.project': 'validation', 'com.docker.compose.service': 'app',
+  }, Ports: [{ Type: 'tcp', PrivatePort: 3000, PublicPort: 8080 }],
+    NetworkSettings: { Networks: { default: { IPAddress: '172.18.0.4' } } } };
+  let containers = [first];
+  let reads = 0;
+  const forwarded: string[] = [];
+  const env = { DOCKER: { fetch: async () => { reads++; return Response.json(containers); } } };
+  const request = (id = first.Id, target = 3000, published = 8080, tls = false) => router.fetch(new Request(
+    tls ? 'http://localhost/__xe_tls_tunnel' : 'http://app_validation--p8080.app.localhost/deep?q=1', {
+      headers: { 'x-xe-container-id': id, 'x-xe-target-port': String(target),
+        'x-xe-published-port': String(published), ...(tls ? { Upgrade: 'websocket' } : {}) },
+    }), env);
+  globalThis.fetch = async input => {
+    assert(input instanceof Request);
+    assert.equal(input.headers.get('x-xe-container-id'), null);
+    assert.equal(input.headers.get('x-xe-target-port'), null);
+    assert.equal(input.headers.get('x-xe-published-port'), null);
+    forwarded.push(input.url);
+    return new Response('upstream');
+  };
+  try {
+    assert.equal((await router.fetch(new Request('http://app.localhost/'), env)).status, 403);
+    assert.equal((await request()).status, 200);
+    assert.equal(forwarded[0], 'http://172.18.0.4:3000/deep?q=1');
+    assert.equal((await request(first.Id, 7000)).status, 404);
+    assert.equal((await request(first.Id, 3000, 9090)).status, 404);
+    assert.equal((await request(first.Id, 3000, 9090, true)).status, 404);
+    containers = [{ ...first, Ports: [...first.Ports, { Type: 'tcp', PrivatePort: 9000, PublicPort: 8080 }] }];
+    now += 100;
+    assert.equal((await request()).status, 404, 'live Docker ambiguity rejects a previously valid route');
+    assert.equal((await request(first.Id, 3000, 8080, true)).status, 404, 'TLS also rejects ambiguous published ports');
+    const beforeCreation = reads;
+    const second = { ...first, Id: 'd'.repeat(64),
+      NetworkSettings: { Networks: { default: { IPAddress: '172.18.0.5' } } } };
+    containers = [second];
+    assert.equal((await request(second.Id)).status, 200);
+    assert.equal(reads, beforeCreation + 1, 'a new container ID refreshes Docker before the cache expires');
+    assert.equal(forwarded[1], 'http://172.18.0.5:3000/deep?q=1');
+    containers = [{ ...second, Ports: [{ Type: 'tcp', PrivatePort: 3000, PublicPort: 9090 }] }];
+    now += 100;
+    assert.equal((await request(second.Id)).status, 404, 'Docker bindings refresh after only 100 ms');
+    assert.equal(forwarded.length, 2);
+  } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalNow;
   }

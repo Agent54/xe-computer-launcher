@@ -63,6 +63,7 @@ export default {
           Upgrade: 'websocket',
           'x-xe-container-id': route.service.id,
           'x-xe-target-port': String(route.port.target),
+          'x-xe-published-port': String(route.published),
         },
       }));
       if (response.status !== 101 || !response.webSocket) return;

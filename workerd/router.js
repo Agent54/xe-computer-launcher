@@ -1,64 +1,44 @@
 import { bridgeSocketAndWebSocket } from './socket-bridge.js';
 
-// Runs inside the guest. Resolve Compose names to container IPs and private
-// ports, as in docker/legacy.js, without exposing each port on macOS.
+// Runs inside the guest. Validate the host's exact container/port selection and
+// resolve its live network address without exposing each port on macOS.
 let cached = null;
 let expires = 0;
 let loading = null;
+const cacheLifetime = 100;
 
 async function discover(env) {
   if (cached && Date.now() < expires) return cached;
   if (!loading) loading = (async () => {
+    const requestedAt = Date.now();
     const response = await env.DOCKER.fetch('http://docker/containers/json?all=true');
     if (!response.ok) throw new Error('Docker discovery unavailable');
     const containers = await response.json();
     if (!Array.isArray(containers)) throw new Error('Invalid Docker response');
     cached = containers;
-    expires = Date.now() + 2000;
+    expires = requestedAt + cacheLifetime;
     return containers;
   })().finally(() => { loading = null; });
   return loading;
 }
 
-function matchService(containers, name) {
-  const matches = containers.filter(c => {
-    const service = c.Labels?.['com.docker.compose.service'];
-    const project = c.Labels?.['com.docker.compose.project'];
-    const number = c.Labels?.['com.docker.compose.container-number'];
-    const suffix = Number(number) > 1 ? `_${number}` : '';
-    return c.Labels?.['com.docker.compose.oneoff']?.toLowerCase() !== 'true' && service &&
-      (name === `${service}${suffix}` || name === `${service}_${project}${suffix}`);
-  });
-  return matches.length === 1 ? matches[0] : new Response(
-    matches.length ? 'Ambiguous service; include its project name.' : 'Service not found', { status: 404 });
+async function findContainer(id, env) {
+  let containers = await discover(env);
+  // A successful create can provide a new ID before the Docker cache expires.
+  if (!containers.some(container => container.Id === id)) {
+    cached = null;
+    containers = await discover(env);
+  }
+  return containers.find(container => container.Id === id &&
+    container.Labels?.['com.docker.compose.service'] && container.Labels?.['com.docker.compose.project'] &&
+    container.Labels?.['com.docker.compose.oneoff']?.toLowerCase() !== 'true');
 }
 
-async function serviceDetails(container, env) {
-  let ports = container.Ports || [];
-  // Docker omits published ports from the list for created/exited containers.
-  // Their saved bindings still identify which routes are allowed to start them.
-  if (container.State && container.State !== 'running') {
-    const response = await env.DOCKER.fetch(`http://docker/containers/${encodeURIComponent(container.Id)}/json`);
-    if (!response.ok) throw new Error('Container configuration unavailable');
-    const detail = await response.json();
-    ports = Object.entries(detail.HostConfig?.PortBindings || {}).flatMap(([target, bindings]) => {
-      const [port, protocol] = target.split('/');
-      return (bindings || []).map(binding => ({
-        Type: protocol, PrivatePort: Number(port), PublicPort: Number(binding.HostPort),
-      }));
-    });
-  }
-  return {
-    id: container.Id,
-    state: container.State,
-    service: container.Labels['com.docker.compose.service'],
-    project: container.Labels['com.docker.compose.project'],
-    configFiles: container.Labels['com.docker.compose.project.config_files'],
-    publishedPorts: ports.filter(p => p.Type === 'tcp' &&
-      Number.isInteger(p.PrivatePort) && Number.isInteger(p.PublicPort) &&
-      p.PrivatePort > 0 && p.PrivatePort < 65536 && p.PublicPort > 0 && p.PublicPort < 65536)
-      .map(p => ({ target: p.PrivatePort, published: p.PublicPort })),
-  };
+function publishedTarget(container, port, published) {
+  const targets = new Set((container.Ports || [])
+    .filter(binding => binding.Type === 'tcp' && binding.PublicPort === published)
+    .map(binding => binding.PrivatePort));
+  return targets.size === 1 && targets.has(port);
 }
 
 export default {
@@ -71,14 +51,16 @@ export default {
         request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       const id = request.headers.get('x-xe-container-id');
       const port = Number(request.headers.get('x-xe-target-port'));
-      if (!/^[a-f0-9]{64}$/.test(id || '') || !Number.isInteger(port) || port < 1 || port > 65535) {
+      const published = Number(request.headers.get('x-xe-published-port'));
+      if (!/^[a-f0-9]{64}$/.test(id || '') || !Number.isInteger(port) || port < 1 || port > 65535 ||
+          !Number.isInteger(published) || published < 1 || published > 65535) {
         return new Response('Invalid TLS tunnel target', { status: 403 });
       }
       try {
-        const containers = await discover(env);
-        const container = containers.find(c => c.Id === id);
-        if (!container || !(container.Ports || []).some(p => p.Type === 'tcp' && p.PrivatePort === port &&
-            Number.isInteger(p.PublicPort))) return new Response('TLS target unavailable', { status: 404 });
+        const container = await findContainer(id, env);
+        if (!container || container.State !== 'running' || !publishedTarget(container, port, published)) {
+          return new Response('TLS target unavailable', { status: 404 });
+        }
         const address = Object.values(container.NetworkSettings?.Networks || {}).map(n => n.IPAddress).find(ip => ip);
         if (!address) return new Response('TLS target unavailable', { status: 503 });
         const { connect } = await import('cloudflare:sockets');
@@ -92,39 +74,22 @@ export default {
         return new Response('TLS target unavailable', { status: 503 });
       }
     }
-    // Only the host worker can use this lookup over the guest socket. The
-    // public gateway rejects localhost and never exposes this response itself.
-    const lookup = url.origin === 'http://localhost' && url.pathname === '/__xe_router_service' && request.method === 'GET';
-    if (!lookup && (url.protocol !== 'http:' || url.port !== '' ||
-        !/^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/.test(url.hostname))) {
-      return new Response('Invalid application hostname', { status: 403 });
+    if (url.protocol !== 'http:' || url.port !== '' ||
+        !/^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/.test(url.hostname)) {
+      return new Response('Invalid application hostname', { status: 403, headers: { 'Cache-Control': 'no-store' } });
     }
-    const appAlias = url.hostname.endsWith('.app.localhost');
-    const alias = appAlias ? url.hostname.slice(0, -'.app.localhost'.length) : '';
-    const selectedPort = /^(.*)--p([1-9]\d{0,4})$/.exec(alias);
-    const namedPort = /^(.*)--n([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)$/.exec(alias);
-    const [name, portPart] = appAlias
-      ? selectedPort ? [selectedPort[1], selectedPort[2]] :
-        namedPort ? [namedPort[1], namedPort[2]] : [alias, undefined]
-      : url.hostname.split('.');
+    const id = request.headers.get('x-xe-container-id');
+    const port = Number(request.headers.get('x-xe-target-port'));
+    const published = Number(request.headers.get('x-xe-published-port'));
+    if (!id || !Number.isInteger(port) || port < 1 || port > 65535 ||
+        !Number.isInteger(published) || published < 1 || published > 65535) {
+      return new Response('Invalid application target', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+    }
     try {
-      const containers = await discover(env);
-      const container = matchService(containers, lookup ? url.searchParams.get('name') : name);
-      if (container instanceof Response) return container;
-      if (lookup) return Response.json(await serviceDetails(container, env));
-      const numeric = /^\d+$/.test(portPart);
-      const published = (container.Ports || []).filter(p => p.Type === 'tcp' &&
-        Number.isInteger(p.PublicPort) && p.PublicPort > 0 && p.PublicPort < 65536);
-      const targets = [...new Set(published.filter(p => p.PublicPort === Number(portPart)).map(p => p.PrivatePort))];
-      if (numeric && targets.length !== 1) {
-        return new Response(targets.length ? 'Ambiguous published port' : 'Published port not available', { status: 404 });
-      }
-      const port = numeric ? targets[0] : Number(request.headers.get('x-xe-target-port'));
-      if (!numeric && request.headers.get('x-xe-container-id') !== container.Id) {
-        return new Response('Service changed; retry the request', { status: 503, headers: { 'Retry-After': '2' } });
-      }
-      if (!Number.isInteger(port) || port < 1 || port > 65535 || !published.some(p => p.PrivatePort === port)) {
-        return new Response('Published port not available', { status: 404 });
+      const container = await findContainer(id, env);
+      if (!container || container.State !== 'running') throw new Error('Container is not running');
+      if (!publishedTarget(container, port, published)) {
+        return new Response('Published port not available', { status: 404, headers: { 'Cache-Control': 'no-store' } });
       }
       const networks = container.NetworkSettings?.Networks || {};
       const address = Object.values(networks).map(n => n.IPAddress).find(ip => ip);
@@ -132,6 +97,7 @@ export default {
       const headers = new Headers(request.headers);
       headers.delete('x-xe-target-port');
       headers.delete('x-xe-container-id');
+      headers.delete('x-xe-published-port');
       headers.delete('forwarded');
       headers.delete('x-forwarded-for');
       const publicHost = headers.get('x-xe-public-host');

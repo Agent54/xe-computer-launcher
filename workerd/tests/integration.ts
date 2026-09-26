@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
-import { request as httpsRequest, createServer as createHttpsServer } from 'node:https';
+import { createServer as createHttpsServer } from 'node:https';
 import { createConnection } from 'node:net';
 import { once } from 'node:events';
 import { resolve, dirname, join, extname } from 'node:path';
@@ -56,7 +56,7 @@ let tlsPort = freePort();
 while (tlsPort === managementPort || tlsPort === routingPort) tlsPort = freePort();
 const containerId = 'a'.repeat(64);
 const sleepingId = 'b'.repeat(64);
-let sleepingState = 'created';
+let sleepingState = 'uncreated';
 let releaseContainerStart: (() => void) | undefined;
 let securePort = 0;
 
@@ -92,15 +92,29 @@ async function startUnix(path: string) {
     const requestPath = url.pathname + url.search;
     seen.push({ path: requestPath, method: req.method, headers: Object.fromEntries(req.headers), body });
     const headers = { 'Connection': 'close', 'Content-Type': 'application/json' };
-    if (requestPath === '/v1.24/config/demo?format=json') {
+    if (url.pathname === '/v1.24/config/demo' && url.searchParams.get('format') === 'json') {
       return Response.json({ services: { web: { ports: [
         { name: 'web', target: appPort, published: '32000', protocol: 'tcp' },
         { name: 'secure', target: securePort, published: '32001', protocol: 'tcp', app_protocol: 'https' },
       ] }, sleeping: { ports: [{ name: 'web', target: appPort, published: '32002', protocol: 'tcp' }] } } });
+    } else if (requestPath === '/v1.24/ls?all=true') {
+      return Response.json([{ Name: 'demo', ConfigFiles: '/stacks/demo/compose.yaml' }]);
+    } else if (url.pathname === '/v1.24/ps/demo') {
+      return Response.json([{
+        ID: containerId, Name: 'demo-web-1', Service: 'web', State: 'running',
+        Publishers: [
+          { TargetPort: appPort, PublishedPort: 32000, Protocol: 'tcp' },
+          { TargetPort: securePort, PublishedPort: 32001, Protocol: 'tcp' },
+        ],
+      }, {
+        ID: sleepingState === 'uncreated' ? '' : sleepingId,
+        Name: 'demo-sleeping-1', Service: 'sleeping', State: sleepingState,
+        Publishers: [{ TargetPort: appPort, PublishedPort: 32002, Protocol: 'tcp' }],
+      }]);
     } else if (requestPath === '/v1.24/failure') {
       return Response.json({ error: 'backend EOF' }, { status: 500 });
     } else if (requestPath === '/v1.24/start/demo/container' && req.method === 'POST') {
-      assert.deepEqual(JSON.parse(body), { container: sleepingId });
+      assert.deepEqual(JSON.parse(body), { service: 'sleeping', path: '/stacks/demo/compose.yaml' });
       await new Promise<void>(resolve => { releaseContainerStart = resolve; });
       sleepingState = 'running';
       return Response.json({ ok: true });
@@ -114,10 +128,11 @@ async function startUnix(path: string) {
         { Type: 'tcp', PrivatePort: securePort, PublicPort: 32001 },
       ],
         NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } },
-        { Id: sleepingId, State: sleepingState, Labels: {
+        ...(sleepingState === 'uncreated' ? [] : [{ Id: sleepingId, State: sleepingState, Labels: {
           'com.docker.compose.service': 'sleeping', 'com.docker.compose.project': 'demo',
+          'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml',
         }, Ports: sleepingState === 'running' ? [{ Type: 'tcp', PrivatePort: appPort, PublicPort: 32002 }] : [],
-        NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } },
+        NetworkSettings: { Networks: { test: { IPAddress: '127.0.0.1' } } } }]),
       ]), { headers });
     } else if (requestPath === '/v1.24/events') {
       const stream = new ReadableStream({ start(controller) {
@@ -160,19 +175,18 @@ const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req =>
 const appPort = app.addr.port;
 
 async function tlsRequest(hostname: string, publicPort = false): Promise<{ status: number; body: string }> {
-  return await new Promise((resolve, reject) => {
-    const request = httpsRequest({ hostname: '127.0.0.1', port: tlsPort, servername: hostname,
-      rejectUnauthorized: false, headers: { Host: publicPort ? `${hostname}:${tlsPort}` : hostname }, timeout: 5000 }, response => {
-      const chunks: Uint8Array[] = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('end', () => resolve({ status: response.statusCode || 0,
-        body: Buffer.concat(chunks).toString() }));
-      response.on('error', reject);
-    });
-    request.on('error', reject);
-    request.on('timeout', () => request.destroy(new Error('TLS request timed out')));
-    request.end();
-  });
+  // Use the URL hostname for TLS SNI as well as HTTP Host. Deno's node:https
+  // compatibility client can omit SNI when connecting to a loopback IP.
+  const result = await new Deno.Command('curl', { args: [
+    '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5',
+    '--resolve', `${hostname}:${tlsPort}:127.0.0.1`,
+    '--header', `Host: ${publicPort ? `${hostname}:${tlsPort}` : hostname}`,
+    '--write-out', '\n%{http_code}', `https://${hostname}:${tlsPort}/`,
+  ], stdout: 'piped', stderr: 'piped' }).output();
+  assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
+  const output = new TextDecoder().decode(result.stdout);
+  const separator = output.lastIndexOf('\n');
+  return { status: Number(output.slice(separator + 1)), body: output.slice(0, separator) };
 }
 
 async function verifyWebSocket() {
@@ -181,7 +195,7 @@ async function verifyWebSocket() {
   try {
     await once(socket, 'connect');
     socket.setTimeout(3000, () => socket.destroy(new Error('WebSocket echo timed out')));
-    socket.write('GET /ws HTTP/1.1\r\nHost: web.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');
+    socket.write(`GET /ws HTTP/1.1\r\nHost: web.localhost:${routingPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     let buffered = Buffer.alloc(0);
     let upgraded = false;
     for await (const chunk of socket) {
@@ -391,7 +405,7 @@ try {
   assert.equal((await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' })).body.toString(), 'upstream-ok');
   assert.equal(seen.at(-1)!.path, '/deep/link?q=1');
   assert.deepEqual(await tlsRequest('sleeping_demo--p32002.app.localhost', true), { status: 200, body: 'upstream-ok' });
-  console.log('PASS: immediate HTTP/HTTPS loader, one exact container start, and original URL recovery');
+  console.log('PASS: uncreated app discovery, immediate HTTP/HTTPS loader, single-container creation, and original URL recovery');
 
   await stopProcess(guest);
   assert.equal((await request('/', appOptions)).status, 503);
@@ -425,6 +439,7 @@ try {
   await stopProcess(realCompose);
   console.log('PASS: actual Compose fork serves its API without Docker');
 } catch (error) {
+  console.error('Recent backend requests:', seen.slice(-12).map(({ path, method }) => ({ path, method })));
   for (const process of processes) await stopProcess(process);
   for (const output of outputs) console.error(new TextDecoder().decode((await output).stderr));
   throw error;

@@ -1,16 +1,23 @@
+import { invalidateApplicationService } from './app-discovery.js';
+
 // Share an in-flight start between requests for any port of the same container.
 const starts = new Map();
 const startupWindow = 120_000;
-const startable = new Set(['created', 'exited', 'stopped']);
+const startable = new Set(['uncreated', 'created', 'exited', 'stopped']);
+
+function serviceKey(service) {
+  return JSON.stringify([service.project, service.configFiles || '', service.service, Number(service.number) || 1]);
+}
 
 export function isApplicationStopped(service) {
   return startable.has(service.state);
 }
 
 export function applicationStart(service) {
-  const entry = starts.get(service.id);
+  const key = service.id && starts.has(service.id) ? service.id : serviceKey(service);
+  const entry = starts.get(key);
   if (entry && !entry.pending && entry.expires <= Date.now()) {
-    starts.delete(service.id);
+    starts.delete(key);
     return undefined;
   }
   return entry;
@@ -23,15 +30,16 @@ export function startApplication(service, env) {
     if (!value.pending && value.expires <= Date.now()) starts.delete(id);
   }
   entry = { pending: true, error: false, expires: Infinity, promise: null };
-  starts.set(service.id, entry);
+  starts.set(service.id || serviceKey(service), entry);
   entry.promise = (async () => {
     try {
       const response = await env.COMPOSE.fetch(new Request(
         `http://compose/v1.24/start/${encodeURIComponent(service.project)}/container`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ container: service.id, ...(service.configFiles ? { path: service.configFiles } : {}) }),
-          signal: AbortSignal.timeout(60_000),
+          body: JSON.stringify({ ...(service.id ? { container: service.id } : { service: service.service }),
+            ...(service.configFiles ? { path: service.configFiles } : {}) }),
+          signal: AbortSignal.timeout(service.id ? 60_000 : 600_000),
         }));
       if (!response.ok) throw new Error('Container start failed');
       await response.arrayBuffer();
@@ -40,6 +48,7 @@ export function startApplication(service, env) {
     } finally {
       entry.pending = false;
       entry.expires = Date.now() + (entry.error ? 10_000 : startupWindow);
+      invalidateApplicationService(service, env);
     }
   })();
   return entry;
@@ -47,6 +56,7 @@ export function startApplication(service, env) {
 
 export function applicationReady(service) {
   starts.delete(service.id);
+  starts.delete(serviceKey(service));
 }
 
 function escapeHTML(value) {
