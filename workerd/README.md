@@ -138,15 +138,14 @@ config path. Other replicas and services stay stopped. Concurrent requests share
 the same start operation. The page retries its original URL every two seconds,
 including through the certificate-covered `.app.localhost` HTTPS aliases, and
 keeps showing the loader during connection failures while the app starts.
-Start failures show a retry link; API requests receive a retryable 503 instead
+Start failures show the returned Compose error and a retry link; the same error
+is logged by Workerd. API requests receive that error in a retryable JSON 503 instead
 of an HTML page. Apps without containers are discovered through Compose's project
 and service catalogue. Their first container is created and started using the same
 single-container endpoint with `service` and `path`, without starting dependencies
-or other replicas. This requires the Compose server extension in
-[`compose-single-container-start.patch`](compose-single-container-start.patch),
-which is kept here so the companion server change is reviewable with the router.
-Apply it from the Compose checkout with `git apply /path/to/compose-single-container-start.patch`
-and build that server before using uncreated-app startup.
+or other replicas. The bundled Compose server must support this service form of the
+endpoint, build missing service images before creation, and publish creation/start
+progress and errors through its existing build activity stream.
 Direct TLS passthrough apps still own their certificates, so
 their container is started on access but their TLS client must retry the connection.
 

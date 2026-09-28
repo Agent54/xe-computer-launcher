@@ -9,6 +9,7 @@ import { surfaceRuntimeFailure } from '../runtime-status.js';
 import { clientHelloServerName } from '../tls-client-hello.js';
 import { resolveApplicationPort } from '../app-routing.js';
 import { resolveApplicationService } from '../app-discovery.js';
+import { applicationReady, applicationStarting, startApplication } from '../app-startup.js';
 
 interface TestContainer {
   Id: string;
@@ -631,7 +632,7 @@ Deno.test('application access starts exactly the selected stopped container', as
       const response = await request('sleeping.8080.localhost');
       const html = await response.text();
       assert.equal(response.status, 503);
-      assert.match(html, /Could not start this app/);
+      assert.match(html, /Compose returned HTTP 500/);
       assert.doesNotMatch(html, /http-equiv="refresh"/);
       assert.equal(starts.length, 3);
       startStatus = 200;
@@ -660,6 +661,44 @@ Deno.test('application access starts exactly the selected stopped container', as
     await Promise.all(background);
     globalThis.fetch = originalFetch;
     Date.now = originalNow;
+  }
+});
+
+Deno.test('startup errors reach the loader and API safely', async () => {
+  const detail = 'No such image: <agenda-agenda> & "latest"';
+  const cases = [
+    { fetch: () => Response.json({ error: detail, message: 'other' }, { status: 404 }),
+      message: `Compose returned HTTP 404: ${detail}` },
+    { fetch: () => Response.json({ message: 'build failed' }, { status: 500 }),
+      message: 'Compose returned HTTP 500: build failed' },
+    { fetch: () => new Response('daemon unavailable', { status: 503, headers: { 'Content-Type': 'text/plain' } }),
+      message: 'Compose returned HTTP 503: daemon unavailable' },
+    { fetch: () => new Response('<html>proxy error</html>', { status: 502, headers: { 'Content-Type': 'text/html' } }),
+      message: 'Compose returned HTTP 502 while starting this app.' },
+    { fetch: () => { throw new TypeError('Compose connection refused'); }, message: 'Compose connection refused' },
+    { fetch: () => { throw new DOMException('signal timed out', 'TimeoutError'); }, message: 'Starting this app timed out.' },
+  ];
+  for (const [index, test] of cases.entries()) {
+    const service = { id: `failure-${index}`, service: 'agenda', project: 'startup-errors', state: 'uncreated' };
+    const start = startApplication(service, { COMPOSE: { fetch: async () => test.fetch() } });
+    try {
+      await start.promise;
+      assert.equal(start.pending, false);
+      assert.equal(start.error, test.message);
+      const response = applicationStarting(new Request('https://agenda.app.localhost/'), service, start.error);
+      assert.equal(response.status, 503);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      const html = await response.text();
+      assert.doesNotMatch(html, /http-equiv="refresh"/);
+      if (index === 0) {
+        assert.match(html, /No such image: &lt;agenda-agenda&gt; &amp; &quot;latest&quot;/);
+        assert.doesNotMatch(html, /<agenda-agenda>/);
+      } else assert(html.includes(test.message));
+      const api = applicationStarting(new Request('https://agenda.app.localhost/', {
+        headers: { Accept: 'application/json' },
+      }), service, start.error);
+      assert.deepEqual(await api.json(), { app: 'agenda', state: 'failed', message: test.message });
+    } finally { applicationReady(service); }
   }
 });
 

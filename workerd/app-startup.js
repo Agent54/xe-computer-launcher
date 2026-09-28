@@ -23,6 +23,19 @@ export function applicationStart(service) {
   return entry;
 }
 
+async function startError(response) {
+  const body = await response.text();
+  let detail;
+  try {
+    const result = JSON.parse(body);
+    detail = typeof result.error === 'string' ? result.error : result.message;
+  } catch {
+    if (response.headers.get('content-type')?.startsWith('text/plain')) detail = body;
+  }
+  detail = typeof detail === 'string' ? detail.trim().slice(0, 2000) : '';
+  return new Error(`Compose returned HTTP ${response.status}${detail ? `: ${detail}` : ' while starting this app.'}`);
+}
+
 export function startApplication(service, env) {
   let entry = applicationStart(service);
   if (entry) return entry;
@@ -41,10 +54,12 @@ export function startApplication(service, env) {
             ...(service.configFiles ? { path: service.configFiles } : {}) }),
           signal: AbortSignal.timeout(service.id ? 60_000 : 600_000),
         }));
-      if (!response.ok) throw new Error('Container start failed');
+      if (!response.ok) throw await startError(response);
       await response.arrayBuffer();
-    } catch {
-      entry.error = true;
+    } catch (error) {
+      entry.error = error?.name === 'TimeoutError' ? 'Starting this app timed out.'
+        : error?.message || 'Could not start this app.';
+      console.warn('Application start failed:', service.project, service.service, entry.error);
     } finally {
       entry.pending = false;
       entry.expires = Date.now() + (entry.error ? 10_000 : startupWindow);
@@ -72,7 +87,8 @@ export function applicationStarting(request, service, failed = false) {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
   };
-  const message = failed ? 'Could not start this app. Try again or check its logs in Compose.' : 'Starting…';
+  const message = failed ? typeof failed === 'string' ? failed
+    : 'Could not start this app. Try again or check its logs in Compose.' : 'Starting…';
   // API calls and upgrades receive a retryable response; never replay a POST.
   if (!['GET', 'HEAD'].includes(request.method) || request.headers.has('upgrade') ||
       (request.headers.has('accept') && !request.headers.get('accept').includes('text/html') &&
@@ -96,7 +112,7 @@ export function applicationStarting(request, service, failed = false) {
     main { width: min(100%, 400px); text-align: center; }
     .loader { width: 28px; height: 28px; margin: 0 auto 28px; border: 2px solid var(--track); border-top-color: var(--text); border-radius: 50%; animation: spin 1s linear infinite; }
     h1 { margin: 0; font-size: clamp(24px, 5vw, 32px); font-weight: 500; letter-spacing: -.03em; overflow-wrap: anywhere; }
-    p { margin: 12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    p { margin: 12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
     a { display: inline-block; margin-top: 24px; color: var(--text); text-underline-offset: 4px; }
     a:focus-visible { outline: 2px solid var(--text); outline-offset: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -107,7 +123,7 @@ export function applicationStarting(request, service, failed = false) {
   <main aria-busy="${!failed}" aria-live="polite">
     ${failed ? '' : '<div class="loader" aria-hidden="true"></div>'}
     <h1>${name}</h1>
-    <p role="status">${message}</p>
+    <p role="status">${escapeHTML(message)}</p>
     ${failed ? '<a href="">Try again</a>' : ''}
   </main>
 </body>
