@@ -7,22 +7,17 @@ struct SmolVMStartupResult: Sendable {
 
 enum SmolVMSetup {
     static let machineName = "xe-launcher"
-    static let minimumMemoryMiB: UInt32 = 4096
-    static let maximumMemoryMiB: UInt32 = 32768
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
     static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
 
-    static var memoryMiB: UInt32 {
-        let configured = ExternalState.shared.integerSetting(
-            "container_vm_memory_mib", default: Int(minimumMemoryMiB)
-        )
-        return UInt32(clamping: min(Int(maximumMemoryMiB), max(Int(minimumMemoryMiB), configured)))
-    }
+    static var resources: ContainerVMResources { ContainerVMResources(settings: ExternalState.shared.settings.rawData) }
+    static var memoryMiB: UInt32 { resources.memoryMiB }
 
     static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         try Task.checkCancellation()
         guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
+        let configuredResources = resources
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
@@ -33,7 +28,8 @@ enum SmolVMSetup {
             let spec = SmolVMMachineSpec(
                 name: machineName,
                 artifactURL: SmolVMPaths.composeArtifactURL,
-                memoryMiB: memoryMiB,
+                memoryMiB: configuredResources.memoryMiB,
+                cpus: configuredResources.cpus,
                 networkBackend: "virtio-net",
                 volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"],
                 exposedSockets: [
@@ -54,7 +50,9 @@ enum SmolVMSetup {
             // restart it with the runtime bundled in the current app.
             try await client.stopMachine(named: machineName)
             removeStaleSocketIfPresent()
-            try await client.updateMachine(named: machineName, memoryMiB: memoryMiB)
+            try await client.updateMachine(
+                named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus
+            )
         }
 
         try Task.checkCancellation()

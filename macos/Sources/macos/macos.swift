@@ -184,6 +184,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var advancedItemsSeparator: NSMenuItem?
     private var localAppPortsItem: NSMenuItem?
     private var composeStorageFolderItem: NSMenuItem?
+    private var containerMemoryItem: NSMenuItem?
+    private var containerCPUItem: NSMenuItem?
     private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -932,6 +934,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(storageFolderItem)
         composeStorageFolderItem = storageFolderItem
 
+        let memoryItem = NSMenuItem(title: "Container VM Memory…", action: #selector(changeContainerMemoryAction), keyEquivalent: "")
+        memoryItem.isHidden = true
+        menu.addItem(memoryItem)
+        containerMemoryItem = memoryItem
+        let cpuItem = NSMenuItem(title: "Container VM CPUs…", action: #selector(changeContainerCPUAction), keyEquivalent: "")
+        cpuItem.isHidden = true
+        menu.addItem(cpuItem)
+        containerCPUItem = cpuItem
+
         menu.addItem(.separator())
 
         runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
@@ -1294,6 +1305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         advancedItemsSeparator?.isHidden = !optionHeld
         localAppPortsItem?.isHidden = !optionHeld
         composeStorageFolderItem?.isHidden = !optionHeld
+        containerMemoryItem?.isHidden = !optionHeld
+        containerCPUItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
@@ -1325,6 +1338,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
         }
         localAppPortsItem?.title = "Local App Ports: \(configuredPorts.http)/\(configuredPorts.https)…"
+        let vmResources = ContainerVMResources(settings: state.settings.rawData)
+        containerMemoryItem?.title = "Container VM Memory: \(vmResources.memoryGiBLabel) GiB…"
+        containerCPUItem?.title = "Container VM CPUs: \(vmResources.cpus)…"
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
@@ -1445,10 +1461,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         showSettingsRestartAlert()
     }
 
+    @objc private func changeContainerMemoryAction() {
+        guard ContainerVMSettings.change(.memory) else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    @objc private func changeContainerCPUAction() {
+        guard ContainerVMSettings.change(.cpus) else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
     private func showSettingsRestartAlert() {
         let alert = NSAlert()
         alert.messageText = "Restart Xe Launcher to Apply Changes"
-        alert.informativeText = "Your new local app ports or Compose storage folder are saved. Running services will keep their current settings until you quit and reopen Xe Launcher."
+        alert.informativeText = "Your launcher settings are saved. Changes apply when you quit and reopen Xe Launcher. Restarting interrupts all containers in the shared VM."
         alert.addButton(withTitle: "Quit Now")
         alert.addButton(withTitle: "Later")
         NSApp.activate(ignoringOtherApps: true)

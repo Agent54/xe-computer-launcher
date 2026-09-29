@@ -298,6 +298,13 @@ final class ExternalState: @unchecked Sendable {
         saveSettings()
     }
 
+    func setIntegerSetting(_ key: String, _ value: Int) {
+        var dict = settings.rawData ?? [:]
+        dict[key] = value
+        settings = Settings(rawData: dict)
+        saveSettings()
+    }
+
     func setAppPorts(useStandardPorts: Bool) {
         var dict = settings.rawData ?? [:]
         dict["app_http_port"] = Int(useStandardPorts ? WorkerdPorts.standardHTTP : WorkerdPorts.defaultHTTP)

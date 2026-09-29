@@ -92,10 +92,15 @@ when the selected port is nonstandard.
 Mixed standard/custom pairs are rejected and reset to the default pair. Set
 both ports above 1023 to disable the helper.
 
-The container VM uses at least 4096 MiB of elastic memory. Advanced users can
-raise the limit by setting `container_vm_memory_mib` in
-`~/Library/Application Support/dev.xe.computer/settings.json` (up to 32768) and
-restarting Xe Launcher. The launcher monitors Docker after startup and performs
+Hold Option while opening the launcher menu to change **Container VM Memory**
+or **Container VM CPUs**. These limits are shared by Docker builds and all
+containers; changes take effect after quitting and reopening Xe Launcher, which
+restarts the VM. Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
+defaults to 2 and accepts 1 up to the Mac's logical CPU count. Memory is elastic:
+only touched memory is committed. The equivalent settings are
+`container_vm_memory_mib` (4096–32768 MiB) and `container_vm_cpus` in
+`~/Library/Application Support/dev.xe.computer/settings.json`.
+The launcher monitors Docker after startup and performs
 a bounded VM restart if the daemon becomes unavailable; the menu status and
 Compose API expose whether recovery was caused by an out-of-memory event.
 
