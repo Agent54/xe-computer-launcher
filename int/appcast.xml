@@ -5,26 +5,26 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <title>Xe Launcher</title>
         <item>
             <title>0.0.8</title>
-            <pubDate>Mon, 28 Sep 2026 11:29:00 -0700</pubDate>
+            <pubDate>Mon, 28 Sep 2026 19:50:43 -0700</pubDate>
             <link>https://github.com/Agent54/xe-computer-launcher</link>
-            <sparkle:version>106.1</sparkle:version>
-            <sparkle:shortVersionString>0.0.8-int.106.1</sparkle:shortVersionString>
+            <sparkle:version>107.1</sparkle:version>
+            <sparkle:shortVersionString>0.0.8-int.107.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>26.2</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.106.1
+            <description sparkle:format="markdown"><![CDATA[# Xe Launcher 0.0.8-int.107.1
 
 See the GitHub release for the complete notes:
-https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.106.1
+https://github.com/Agent54/xe-computer-launcher/releases/tag/0.0.8-int.107.1
 ]]></description>
-            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.106.1/Xe-Launcher.dmg" length="265812588" type="application/octet-stream" sparkle:edSignature="ZqVqXA9F4XgrElPgugt5sv0UvMYVRcFE6Dc7ojYhJrzTiagt6krBJnFvdTQJVsrxSiLyNpZ+qkfvEguaSTv0Bg=="></enclosure>
+            <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.107.1/Xe-Launcher.dmg" length="265813207" type="application/octet-stream" sparkle:edSignature="T410bk76WMjnGpO+yPL5MQQfe4oLkTbXmzIb9AeGEoucq1NKenegf3cuWgRxWhAz1DwOwPPwMYximC9NWx+dDA=="></enclosure>
             <sparkle:deltas>
-                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.106.1/Xe-Launcher106.1-105.1.delta" sparkle:deltaFrom="105.1" length="59174" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="BO2FQscAknmlYi2Nx1/5SAwAmHFeN8fIJXp4G5uTkOAHqiyMu/dEgx/AzUOVNJ82QjoN3I1gqEsxWbQsdRN7Aw=="></enclosure>
-                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.106.1/Xe-Launcher106.1-104.1.delta" sparkle:deltaFrom="104.1" length="859190" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="UrdRcq8ALi9S2iZImusUCiqlzupqWS2QQMcUQvsNdjpJ9BaX8Hl66mLv/nBdi0FHjaulhivJpBH6YySw0vwyAg=="></enclosure>
-                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.106.1/Xe-Launcher106.1-103.1.delta" sparkle:deltaFrom="103.1" length="940254" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="a7svjG9MZlA89VIvlAxTqwsDf9UfPSASYxCJFjOdFxYr8dP44Sd1GWNUWOsFdtJxHGrM6mgd2kdReM6ODRoxBg=="></enclosure>
+                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.107.1/Xe-Launcher107.1-106.1.delta" sparkle:deltaFrom="106.1" length="458410" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="lz1hpuFdTs5kS119wOjOQo4bxqkrC8Ho1eOVfguZ5VHsJ8qsiZw0pHtMotItaKVL1WEhZgey4CsT7DnBfqlqAQ=="></enclosure>
+                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.107.1/Xe-Launcher107.1-105.1.delta" sparkle:deltaFrom="105.1" length="458258" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2D29vqP7EVZuhX2xt7WLUl72DpQ9pxoPTOVseTMsQTt50ouLe3CwPTc97qVRejzjLgAOLgcCwpPfYytUdaQ9BQ=="></enclosure>
+                <enclosure url="https://github.com/Agent54/xe-computer-launcher/releases/download/0.0.8-int.107.1/Xe-Launcher107.1-104.1.delta" sparkle:deltaFrom="104.1" length="793230" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977808" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="RbexK1xfCgKcssSfvWYPmtrp/E7bv8wQMN/Om28+RgSZVpLSEzXO05kiT5Xr5X6BrSDXmKaGSmwTEQpjeVZ7Cw=="></enclosure>
             </sparkle:deltas>
         </item>
     </channel>
 </rss><!-- sparkle-signatures:
-edSignature: SMwHLE+GBA5IfvNsNRR9QCz3NDEYXxi5iXp66nYJjtHEJ2kXyBt4vaDySlhpuYmJxQiu+wICPm3AmMs3XwqSAw==
-length: 2855
+edSignature: /oFWrew0P2G4hrhOQlt29Kc1k4dNV+Kij0wM2jUkRCKeZBdXEQZ7SAx65R7GPnyIR7C9z8C/fYF72Jq9ZV9XDQ==
+length: 2856
 -->
