@@ -151,7 +151,7 @@ actor ContainerRuntimeSupervisor {
         },
         resetRouter: @escaping RouterReset = { GuestRouter.shared.reset() },
         reconcileRouter: @escaping RouterReconcile = { try await GuestRouter.shared.reconcile() },
-        readHostResources: @escaping ReadHostResources = { HostResourceSampler.shared.snapshot() },
+        readHostResources: @escaping ReadHostResources = { await HostResourceSampler.shared.snapshot() },
         readVMResources: @escaping ReadVMResources = { await VMResourceSampler.snapshot(machine: $0) },
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) },
         now: @escaping @Sendable () -> Date = Date.init,

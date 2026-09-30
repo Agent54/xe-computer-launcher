@@ -24,7 +24,7 @@ actor HostResourceSampler {
     private var cachedSnapshot: HostResourceSnapshot?
     private var lastSampledAt: ContinuousClock.Instant?
 
-    func snapshot() -> HostResourceSnapshot {
+    func snapshot() async -> HostResourceSnapshot {
         // Status can be published frequently; keep host sampling demand-driven and infrequent.
         let now = ContinuousClock.now
         if let cachedSnapshot, let lastSampledAt,
@@ -32,9 +32,15 @@ actor HostResourceSampler {
             return cachedSnapshot
         }
 
+        // CPU usage needs two readings. Take the initial pair now instead of
+        // caching an unavailable CPU percentage for the full refresh interval.
+        let baselineCPUTicks = previousCPUTicks ?? Self.cpuTicks()
+        if previousCPUTicks == nil, baselineCPUTicks != nil {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         let currentCPUTicks = Self.cpuTicks()
         let cpuPercent: Double?
-        if let previousCPUTicks, let currentCPUTicks {
+        if let previousCPUTicks = baselineCPUTicks, let currentCPUTicks {
             let busy = currentCPUTicks.busy >= previousCPUTicks.busy
                 ? currentCPUTicks.busy - previousCPUTicks.busy
                 : 0
@@ -58,27 +64,37 @@ actor HostResourceSampler {
             diskTotalBytes: disk?.total
         )
         cachedSnapshot = snapshot
-        lastSampledAt = now
+        lastSampledAt = ContinuousClock.now
         return snapshot
     }
 
     private static func cpuTicks() -> CPUTicks? {
-        var info = host_cpu_load_info_data_t()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride
+        // Per-processor counters stay current during the short startup sample;
+        // host_statistics can return rate-limited, cached aggregate counters.
+        var cpuCount: natural_t = 0
+        var info: processor_info_array_t?
+        var count: mach_msg_type_number_t = 0
+        let result = host_processor_info(
+            mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpuCount, &info, &count
         )
-        let result = withUnsafeMutablePointer(to: &info) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
-            }
+        guard result == KERN_SUCCESS, let info else { return nil }
+        defer {
+            _ = vm_deallocate(
+                mach_task_self_, vm_address_t(UInt(bitPattern: info)),
+                vm_size_t(count) * vm_size_t(MemoryLayout<integer_t>.stride)
+            )
         }
-        guard result == KERN_SUCCESS else { return nil }
+        guard cpuCount > 0, Int(count) >= Int(cpuCount) * Int(CPU_STATE_MAX) else { return nil }
 
-        let user = UInt64(info.cpu_ticks.0)
-        let system = UInt64(info.cpu_ticks.1)
-        let idle = UInt64(info.cpu_ticks.2)
-        let nice = UInt64(info.cpu_ticks.3)
-        let busy = user + system + nice
+        var busy: UInt64 = 0
+        var idle: UInt64 = 0
+        for cpu in 0..<Int(cpuCount) {
+            let offset = cpu * Int(CPU_STATE_MAX)
+            for state in [CPU_STATE_USER, CPU_STATE_SYSTEM, CPU_STATE_NICE] {
+                busy += UInt64(UInt32(bitPattern: info[offset + Int(state)]))
+            }
+            idle += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_IDLE)]))
+        }
         return CPUTicks(busy: busy, total: busy + idle)
     }
 
