@@ -55,6 +55,13 @@ struct SmolVMMachine: Decodable, Sendable {
     let labels: [String: String]?
     let memory: SmolVMMemoryStatus?
     let workload: SmolVMWorkloadStatus?
+    var pid: Int32? = nil
+    var memoryMiB: UInt64? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case name, state, labels, memory, workload, pid
+        case memoryMiB = "memory_mib"
+    }
 
     var isRunning: Bool {
         state.caseInsensitiveCompare("running") == .orderedSame
@@ -215,10 +222,11 @@ actor SmolVMClient {
         _ = try await invoke(arguments)
     }
 
-    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32) async throws {
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, stacksVolume: String) async throws {
         _ = try await invoke([
             "machine", "update", "--name", name,
             "--mem", String(memoryMiB), "--cpus", String(cpus),
+            "--volume", stacksVolume,
         ])
     }
 

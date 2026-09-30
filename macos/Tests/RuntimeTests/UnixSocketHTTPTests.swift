@@ -25,10 +25,22 @@ struct UnixSocketHTTPTests {
         #expect(await !UnixSocketHTTP.isReady(at: URL(fileURLWithPath: "/tmp/" + String(repeating: "x", count: 150))))
     }
 
+    @Test func balloonQueryReadsFragmentedReply() async throws {
+        let result = try await probeResponse(chunks: ["OK target=1", "024 actual=768\n"], balloon: true)
+        #expect(result.line == "OK target=1024 actual=768")
+        #expect(result.request == "BALLOON\n")
+    }
+
+    @Test func stalledBalloonQueryHonorsDeadline() async throws {
+        let result = try await probeResponse(chunks: [], stall: .milliseconds(500), timeout: .milliseconds(100), balloon: true)
+        #expect(result.line == nil)
+        #expect(result.elapsed < .milliseconds(400))
+    }
+
     /// A native Unix socket fixture; no Docker, VM, or subprocess required.
     private func probeResponse(
-        chunks: [String], stall: Duration = .zero, timeout: Duration = .seconds(1)
-    ) async throws -> (ready: Bool, elapsed: Duration) {
+        chunks: [String], stall: Duration = .zero, timeout: Duration = .seconds(1), balloon: Bool = false
+    ) async throws -> (ready: Bool, line: String?, request: String?, elapsed: Duration) {
         let path = "/tmp/xe-probe-\(UUID().uuidString.prefix(8)).sock"
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         try #require(listener >= 0)
@@ -50,27 +62,30 @@ struct UnixSocketHTTPTests {
 
         let peer = Task.detached {
             var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
-            guard poll(&pending, 1, 2000) > 0 else { return }
+            guard poll(&pending, 1, 2000) > 0 else { return nil as String? }
             let connection = accept(listener, nil, nil)
-            guard connection >= 0 else { return }
+            guard connection >= 0 else { return nil as String? }
             defer { close(connection) }
             var enabled: Int32 = 1
             _ = setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
             var incoming = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
-            guard poll(&incoming, 1, 1000) > 0 else { return }
+            guard poll(&incoming, 1, 1000) > 0 else { return nil as String? }
             var request = [UInt8](repeating: 0, count: 1024)
-            _ = recv(connection, &request, request.count, 0)
+            let count = recv(connection, &request, request.count, 0)
+            let received = count > 0 ? String(decoding: request.prefix(count), as: UTF8.self) : nil
             try? await Task.sleep(for: stall)
             for chunk in chunks {
                 let bytes = Array(chunk.utf8)
                 _ = bytes.withUnsafeBytes { send(connection, $0.baseAddress, bytes.count, 0) }
                 try? await Task.sleep(for: .milliseconds(20))
             }
+            return received
         }
         let started = ContinuousClock.now
-        let ready = await UnixSocketHTTP.isReady(at: URL(fileURLWithPath: path), timeout: timeout)
+        let line = balloon ? await UnixSocketHTTP.balloonStatus(at: URL(fileURLWithPath: path), timeout: timeout) : nil
+        let ready = balloon ? false : await UnixSocketHTTP.isReady(at: URL(fileURLWithPath: path), timeout: timeout)
         let elapsed = started.duration(to: .now)
-        await peer.value
-        return (ready, elapsed)
+        let request = await peer.value
+        return (ready, line, request, elapsed)
     }
 }

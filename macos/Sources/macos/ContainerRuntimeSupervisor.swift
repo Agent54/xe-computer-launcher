@@ -20,6 +20,7 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     let memoryAvailableBytes: UInt64?
     let oomKillCount: UInt64?
     let hostResources: HostResourceSnapshot?
+    var vmResources: VMResourceSnapshot? = nil
 
     var menuDescription: String { message }
 }
@@ -101,6 +102,7 @@ actor ContainerRuntimeSupervisor {
     typealias RouterReset = @Sendable () async -> Void
     typealias RouterReconcile = @Sendable () async throws -> Void
     typealias ReadHostResources = @Sendable () async -> HostResourceSnapshot?
+    typealias ReadVMResources = @Sendable (SmolVMMachine?) async -> VMResourceSnapshot?
     typealias Sleep = @Sendable (Duration) async throws -> Void
     typealias StatusChanged = @Sendable (ContainerRuntimeSnapshot) -> Void
     typealias Log = @Sendable (String) -> Void
@@ -124,6 +126,7 @@ actor ContainerRuntimeSupervisor {
     private let resetRouter: RouterReset
     private let reconcileRouter: RouterReconcile
     private let readHostResources: ReadHostResources
+    private let readVMResources: ReadVMResources
     private let sleep: Sleep
     private let now: @Sendable () -> Date
     private let onStatusChanged: StatusChanged
@@ -149,6 +152,7 @@ actor ContainerRuntimeSupervisor {
         resetRouter: @escaping RouterReset = { GuestRouter.shared.reset() },
         reconcileRouter: @escaping RouterReconcile = { try await GuestRouter.shared.reconcile() },
         readHostResources: @escaping ReadHostResources = { HostResourceSampler.shared.snapshot() },
+        readVMResources: @escaping ReadVMResources = { await VMResourceSampler.snapshot(machine: $0) },
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) },
         now: @escaping @Sendable () -> Date = Date.init,
         onStatusChanged: @escaping StatusChanged = { snapshot in
@@ -165,6 +169,7 @@ actor ContainerRuntimeSupervisor {
         self.resetRouter = resetRouter
         self.reconcileRouter = reconcileRouter
         self.readHostResources = readHostResources
+        self.readVMResources = readVMResources
         self.sleep = sleep
         self.now = now
         self.onStatusChanged = onStatusChanged
@@ -352,6 +357,8 @@ actor ContainerRuntimeSupervisor {
         memory: SmolVMMemoryStatus? = nil
     ) async {
         let hostResources = await readHostResources()
+        let machine = [.starting, .restarting, .stopped].contains(phase) ? nil : lastDiagnostics
+        let vmResources = await readVMResources(machine)
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,
@@ -361,7 +368,8 @@ actor ContainerRuntimeSupervisor {
             memoryTotalBytes: memory?.totalBytes,
             memoryAvailableBytes: memory?.availableBytes,
             oomKillCount: memory?.oomKillCount,
-            hostResources: hostResources
+            hostResources: hostResources,
+            vmResources: vmResources
         )
         do {
             try await statusStore.publish(snapshot)

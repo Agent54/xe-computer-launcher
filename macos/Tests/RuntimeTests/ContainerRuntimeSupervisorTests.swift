@@ -85,6 +85,17 @@ struct ContainerRuntimeSupervisorTests {
                     diskTotalBytes: 500 * 1024 * 1024 * 1024
                 )
             },
+            readVMResources: { machine in
+                guard machine != nil else { return nil }
+                return VMResourceSnapshot(
+                    memoryResidentBytes: 1024 * 1024,
+                    memoryLimitBytes: 8192 * 1024 * 1024,
+                    balloonTargetBytes: 0,
+                    balloonInflatedBytes: 0,
+                    diskAllocatedBytes: 1024 * 1024,
+                    diskLogicalBytes: 30 * 1024 * 1024 * 1024
+                )
+            },
             sleep: { _ in },
             onStatusChanged: { _ in },
             log: { _ in }
@@ -109,7 +120,13 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.oomKillCount == snapshot.oomKillCount)
         #expect(persisted.hostResources?.cpuPercent == 12.5)
         #expect(persisted.hostResources?.memoryTotalBytes == UInt64(16) * 1024 * 1024 * 1024)
+        #expect(persisted.vmResources == snapshot.vmResources)
+        #expect(persisted.vmResources?.balloonInflatedBytes == 0)
+        #expect(persisted.vmResources?.diskAllocatedBytes == 1024 * 1024)
         #expect(abs(persisted.updatedAt.timeIntervalSince(snapshot.updatedAt)) < 1)
+
+        try await supervisor.stop()
+        #expect((await supervisor.snapshot()).vmResources == nil)
     }
 
     @Test func transientProbeFailureDoesNotRestartTheVM() async throws {
@@ -183,6 +200,13 @@ struct ContainerRuntimeSupervisorTests {
         let oldMachine = try JSONDecoder().decode(SmolVMMachine.self, from: old)
         #expect(oldMachine.memory == nil)
         #expect(oldMachine.workload == nil)
+        #expect(oldMachine.pid == nil)
+        #expect(oldMachine.memoryMiB == nil)
+
+        let host = Data(#"{"name":"test","state":"running","pid":123,"memory_mib":8192}"#.utf8)
+        let hostMachine = try JSONDecoder().decode(SmolVMMachine.self, from: host)
+        #expect(hostMachine.pid == 123)
+        #expect(hostMachine.memoryMiB == 8192)
 
         let current = Data(#"{"name":"test","state":"running","labels":{},"memory":{"total_bytes":4096,"available_bytes":2048,"free_bytes":1024,"buffers_bytes":128,"cached_bytes":512,"oom_kill_count":2},"workload":{"state":"exited","last_exit_code":137,"last_exit_reason":"oom_killed","oom_killed":true}}"#.utf8)
         let machine = try JSONDecoder().decode(SmolVMMachine.self, from: current)

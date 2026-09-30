@@ -5,6 +5,15 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct ComposeServerTests {
+    private var helperURL: URL {
+        if let path = ProcessInfo.processInfo.environment["COMPOSE_TEST_HELPER"] {
+            return URL(fileURLWithPath: path)
+        }
+        return URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/compose-server/docker-compose")
+    }
+
     private func temporaryRoot() throws -> URL {
         // Keep Unix socket paths short even on macOS's long TMPDIR paths.
         let url = URL(fileURLWithPath: "/tmp/xe-compose-\(UUID().uuidString.prefix(8))")
@@ -15,7 +24,7 @@ struct ComposeServerTests {
     @Test func rejectsMissingHelper() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = ComposeServer(executableURL: root.appendingPathComponent("missing"), stacksURL: root, log: { _ in })
+        let server = ComposeServer(executableURL: root.appendingPathComponent("missing"), stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
         await #expect(throws: ComposeServerError.self) {
             try await server.start(dockerSocketURL: root.appendingPathComponent("docker.sock"))
         }
@@ -28,7 +37,7 @@ struct ComposeServerTests {
         let helper = root.appendingPathComponent("helper")
         try Data("#!/bin/sh\nexit 42\n".utf8).write(to: helper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
-        let server = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
         do {
             try await server.start(dockerSocketURL: root.appendingPathComponent("docker.sock"))
             Issue.record("An exited process must not be reported as ready")
@@ -44,7 +53,7 @@ struct ComposeServerTests {
         let helper = root.appendingPathComponent("helper")
         try Data("#!/bin/sh\nexec /bin/sleep 60\n".utf8).write(to: helper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
-        let server = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
         let task = Task { try await server.start(dockerSocketURL: root.appendingPathComponent("docker.sock")) }
         let deadline = ContinuousClock.now + .seconds(5)
         while !server.isRunning && ContinuousClock.now < deadline {
@@ -65,20 +74,21 @@ struct ComposeServerTests {
     }
 
     @Test func bundledForkLifecycle() async throws {
-        let helper = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(".build/compose-server/docker-compose")
+        let helper = helperURL
         try #require(FileManager.default.isExecutableFile(atPath: helper.path), "Run make compose-server before swift test")
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
+        let stacks = root.appendingPathComponent("stacks", isDirectory: true)
+        let server = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
         let dockerSocket = root.appendingPathComponent("docker.sock")
         let socket = try await server.start(dockerSocketURL: dockerSocket)
         do {
+            #expect(socket.deletingLastPathComponent().path == root.path)
+            #expect(!FileManager.default.fileExists(atPath: stacks.appendingPathComponent("compose.sock").path))
             #expect(await UnixSocketHTTP.isReady(at: socket))
             #expect(try await server.start(dockerSocketURL: dockerSocket) == socket)
             // A second launcher must not unlink the first launcher's live socket.
-            let second = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
+            let second = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
             await #expect(throws: ComposeServerError.self) { try await second.start(dockerSocketURL: dockerSocket) }
             #expect(!second.isRunning)
             #expect(await UnixSocketHTTP.isReady(at: socket))
@@ -103,12 +113,10 @@ struct ComposeServerTests {
     ))
     func forwardsRequestsToSmol() async throws {
         let path = try #require(ProcessInfo.processInfo.environment["COMPOSE_TEST_DOCKER_SOCKET"])
-        let helper = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(".build/compose-server/docker-compose")
+        let helper = helperURL
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = ComposeServer(executableURL: helper, stacksURL: root, log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
         let socket = try await server.start(dockerSocketURL: URL(fileURLWithPath: path))
         // /ls requires the Docker backend; /_ping alone does not.
         #expect(await UnixSocketHTTP.isReady(at: socket, path: "/ls?all=true", timeout: .seconds(10)))

@@ -9,6 +9,13 @@ enum SmolVMSetup {
     static let machineName = "xe-launcher"
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
     static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
+    static let guestStacksDirectory = "/stacks"
+
+    static var stacksURL: URL {
+        let configured = ExternalState.shared.stringSetting("compose_storage_path")
+        return (configured.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? ComposeServerPaths.stacksURL)
+            .resolvingSymlinksInPath()
+    }
 
     static var resources: ContainerVMResources { ContainerVMResources(settings: ExternalState.shared.settings.rawData) }
     static var memoryMiB: UInt32 { resources.memoryMiB }
@@ -18,6 +25,7 @@ enum SmolVMSetup {
         guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
         let configuredResources = resources
+        let stacksVolume = "\(stacksURL.path):\(guestStacksDirectory):rw"
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
@@ -31,7 +39,7 @@ enum SmolVMSetup {
                 memoryMiB: configuredResources.memoryMiB,
                 cpus: configuredResources.cpus,
                 networkBackend: "virtio-net",
-                volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro"],
+                volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro", stacksVolume],
                 exposedSockets: [
                     "/var/run/docker.sock:\(dockerSocketURL.path)",
                     "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
@@ -51,7 +59,8 @@ enum SmolVMSetup {
             try await client.stopMachine(named: machineName)
             removeStaleSocketIfPresent()
             try await client.updateMachine(
-                named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus
+                named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
+                stacksVolume: stacksVolume
             )
         }
 

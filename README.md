@@ -35,6 +35,14 @@ On first launch, choose a folder for your Compose projects. The IWA UI provides
 access to Compose. Its server runs on your Mac and stays available during VM
 restarts; container operations resume when the VM is ready.
 
+The selected folder is shared with SmolVM at `/stacks`. Compose resolves
+relative binds and `${STACKS_PATH}` on the Mac, then translates their sources
+to `/stacks/...` before creating containers. File-backed configs and secrets
+use the same mapping. Builds and Compose file discovery run on the Mac.
+Host bind sources outside the selected folder are rejected; guest Docker
+socket/storage paths and timezone files keep their guest paths. The Compose
+API socket lives in launcher app data, outside the shared stacks folder.
+
 On first launch, the folder dialog offers standard web ports 80/443 when both
 are available. Without that selection, the shared listeners use the previous
 HTTP port 5196 and HTTPS port 5194. The Compose UI and app links use the same

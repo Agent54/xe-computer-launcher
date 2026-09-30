@@ -23,7 +23,7 @@ enum LauncherSetup {
             if WorkerdPorts.needsPortChoice(state.settings.rawData) && !choosePortsForExistingStorage() {
                 return nil
             }
-            return url
+            return url.resolvingSymlinksInPath()
         }
 
         while true {
@@ -89,7 +89,7 @@ enum LauncherSetup {
                 }
                 state.setStringSetting(settingKey, url.path)
                 if !portsAlreadyConfigured { state.setAppPorts(useStandardPorts: wantsStandardPorts) }
-                return url
+                return url.resolvingSymlinksInPath()
             } catch {
                 let failure = NSAlert(error: error)
                 failure.runModal()
@@ -238,7 +238,7 @@ enum LauncherSetup {
     }
 
     private static func prepare(_ url: URL) throws {
-        let socketURL = url.appendingPathComponent("compose.sock")
+        let socketURL = ComposeServerPaths.socketURL
         guard socketURL.path.utf8.count < 104 else {
             throw ComposeServerError.socketPathTooLong(socketURL.path)
         }

@@ -7,25 +7,37 @@ enum UnixSocketHTTP {
     static func isReady(at socketURL: URL, path: String = "/_ping", timeout: Duration = .seconds(1)) async -> Bool {
         guard path.hasPrefix("/"), !path.contains("\r"), !path.contains("\n") else { return false }
         return await Task.detached {
-            probe(socketURL: socketURL, path: path, deadline: .now + timeout)
+            let request = "GET \(path) HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            guard let line = exchange(socketURL: socketURL, request: request, deadline: .now + timeout) else { return false }
+            let fields = line.split(separator: " ")
+            guard fields.count >= 2, ["HTTP/1.0", "HTTP/1.1"].contains(fields[0]),
+                  let status = Int(fields[1]) else { return false }
+            return (200..<300).contains(status)
         }.value
     }
 
-    private static func probe(socketURL: URL, path: String, deadline: ContinuousClock.Instant) -> Bool {
+    /// Read-only balloon query. Omitting an argument preserves the VM's target.
+    static func balloonStatus(at socketURL: URL, timeout: Duration = .milliseconds(250)) async -> String? {
+        await Task.detached {
+            exchange(socketURL: socketURL, request: "BALLOON\n", deadline: .now + timeout)
+        }.value
+    }
+
+    private static func exchange(socketURL: URL, request: String, deadline: ContinuousClock.Instant) -> String? {
         var address = sockaddr_un()
         let bytes = Array(socketURL.path.utf8) + [0]
-        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return nil }
         address.sun_family = sa_family_t(AF_UNIX)
         address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
 
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { return false }
+        guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var enabled: Int32 = 1
         guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled))) == 0,
               fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0,
-              fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0 else { return false }
+              fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0 else { return nil }
 
         let connected = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -34,41 +46,37 @@ enum UnixSocketHTTP {
         }
         if connected != 0 {
             guard errno == EINPROGRESS || errno == EAGAIN,
-                  wait(descriptor, for: POLLOUT, until: deadline) else { return false }
+                  wait(descriptor, for: POLLOUT, until: deadline) else { return nil }
             var error: Int32 = 0
             var size = socklen_t(MemoryLayout.size(ofValue: error))
-            guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &size) == 0, error == 0 else { return false }
+            guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &size) == 0, error == 0 else { return nil }
         }
 
-        let request = Array("GET \(path) HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".utf8)
+        let request = Array(request.utf8)
         var sent = 0
         while sent < request.count {
-            guard wait(descriptor, for: POLLOUT, until: deadline) else { return false }
+            guard wait(descriptor, for: POLLOUT, until: deadline) else { return nil }
             let count = request.withUnsafeBytes {
                 send(descriptor, $0.baseAddress!.advanced(by: sent), request.count - sent, 0)
             }
             if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
-            guard count > 0 else { return false }
+            guard count > 0 else { return nil }
             sent += count
         }
 
         var response = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 1024)
         while response.count < 4096 {
-            guard wait(descriptor, for: POLLIN, until: deadline) else { return false }
+            guard wait(descriptor, for: POLLIN, until: deadline) else { return nil }
             let count = recv(descriptor, &buffer, buffer.count, 0)
             if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
-            guard count > 0 else { return false }
+            guard count > 0 else { return nil }
             response.append(contentsOf: buffer.prefix(count))
-            let text = String(decoding: response, as: UTF8.self)
-            if let end = text.range(of: "\r\n") {
-                let fields = text[..<end.lowerBound].split(separator: " ")
-                guard fields.count >= 2, ["HTTP/1.0", "HTTP/1.1"].contains(fields[0]),
-                      let status = Int(fields[1]) else { return false }
-                return (200..<300).contains(status)
+            if let end = response.firstIndex(of: 10) {
+                return String(decoding: response[..<end], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        return false
+        return nil
     }
 
     private static func wait(_ descriptor: Int32, for events: Int32, until deadline: ContinuousClock.Instant) -> Bool {

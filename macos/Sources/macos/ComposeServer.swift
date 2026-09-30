@@ -2,6 +2,9 @@ import Foundation
 import Darwin
 
 enum ComposeServerPaths {
+    static var socketURL: URL {
+        ExternalState.appDataURL.appendingPathComponent("compose.sock")
+    }
     static var executableURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/docker-compose")
     }
@@ -35,22 +38,24 @@ enum ComposeServerError: LocalizedError {
 final class ComposeServer {
     private let executableURL: URL
     private let stacksURL: URL
+    let socketURL: URL
     private let log: @MainActor @Sendable (String) -> Void
     private var process: Process?
     private var stopping = false
 
-    var socketURL: URL { stacksURL.appendingPathComponent("compose.sock") }
     var isRunning: Bool { process?.isRunning == true }
 
     init(
         executableURL: URL = ComposeServerPaths.executableURL,
         stacksURL: URL = ComposeServerPaths.stacksURL,
+        socketURL: URL = ComposeServerPaths.socketURL,
         log: @escaping @MainActor @Sendable (String) -> Void = {
             ExternalState.shared.appendLog("compose", $0)
         }
     ) {
         self.executableURL = executableURL
-        self.stacksURL = stacksURL
+        self.stacksURL = stacksURL.resolvingSymlinksInPath()
+        self.socketURL = socketURL
         self.log = log
     }
 
@@ -77,7 +82,10 @@ final class ComposeServer {
 
         let child = Process()
         child.executableURL = executableURL
-        child.arguments = ["serve", stacksURL.path]
+        child.arguments = [
+            "serve", "--socket", socketURL.path,
+            "--guest-stacks-path", SmolVMSetup.guestStacksDirectory, stacksURL.path,
+        ]
         child.currentDirectoryURL = stacksURL
         var environment = ProcessInfo.processInfo.environment
         // DOCKER_CONTEXT takes precedence over DOCKER_HOST. Never inherit a

@@ -12,5 +12,6 @@ if [[ "$mode" == "--release" && "$signature" == *"Signature=adhoc"* ]]; then
     echo "Release Compose server is ad-hoc signed" >&2
     exit 1
 fi
-"$helper" serve --help | grep -q 'Serve a Compose HTTP API'
+help_output="$("$helper" serve --help)"
+[[ "$help_output" == *"Serve a Compose HTTP API"* ]]
 echo "Embedded Compose server verified"

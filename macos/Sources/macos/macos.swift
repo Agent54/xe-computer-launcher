@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var workerdServer = WorkerdServer()
     private let runtimeSupervisor = ContainerRuntimeSupervisor()
     private var hostServicesTask: Task<Void, Never>?
-    private var composeSocketURL = ComposeServerPaths.stacksURL.appendingPathComponent("compose.sock")
+    private var composeSocketURL = ComposeServerPaths.socketURL
     private var isWaitingForRuntimeShutdown = false
     private var terminationTimeoutTask: Task<Void, Never>?
     private var didReplyToTermination = false
@@ -542,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 }
                 try Task.checkCancellation()
                 if composeServer == nil { composeServer = ComposeServer(stacksURL: stacksURL) }
-                composeSocketURL = stacksURL.appendingPathComponent("compose.sock")
+                composeSocketURL = ComposeServerPaths.socketURL
                 // The host supervisor starts Compose without waiting for Docker.
                 let result = try await runtimeSupervisor.start()
                 ExternalState.shared.appendLog(
@@ -597,7 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func startHostServices() {
         if let path = ExternalState.shared.stringSetting("compose_storage_path"), !path.isEmpty {
-            composeSocketURL = URL(fileURLWithPath: path).appendingPathComponent("compose.sock")
+            composeSocketURL = ComposeServerPaths.socketURL
             composeServer = ComposeServer(stacksURL: URL(fileURLWithPath: path))
         }
         hostServicesTask = Task {
