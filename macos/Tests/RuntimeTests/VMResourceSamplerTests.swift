@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import Testing
 @testable import macos
 
@@ -68,5 +69,36 @@ struct VMResourceSamplerTests {
         #expect(sample.memoryLimitBytes == UInt64(8192) * 1024 * 1024)
         #expect(sample.balloonInflatedBytes == nil)
         #expect(sample.diskAllocatedBytes == nil)
+    }
+
+    @Test func diskAllocationIsSampledAtMostOncePerMinute() async {
+        let reads = Mutex(0)
+        let sampler = VMImageDiskSampler { _ in
+            reads.withLock {
+                $0 += 1
+                return (UInt64($0), 1024)
+            }
+        }
+        let root = URL(fileURLWithPath: "/unused-vm-images")
+        let start = ContinuousClock.now
+        #expect(await sampler.sample(in: root, at: start)?.allocated == 1)
+        #expect(await sampler.sample(in: root, at: start + .seconds(59))?.allocated == 1)
+        #expect(await sampler.sample(in: root, at: start + .seconds(60))?.allocated == 2)
+        #expect(reads.withLock { $0 } == 2)
+    }
+
+    @Test func unavailableDiskAllocationDoesNotCauseRepeatedRequests() async {
+        let reads = Mutex(0)
+        let sampler = VMImageDiskSampler { _ in
+            reads.withLock { $0 += 1 }
+            return nil
+        }
+        let root = URL(fileURLWithPath: "/unused-vm-images")
+        let start = ContinuousClock.now
+        #expect(await sampler.sample(in: root, at: start) == nil)
+        #expect(await sampler.sample(in: root, at: start + .seconds(59)) == nil)
+        #expect(reads.withLock { $0 } == 1)
+        #expect(await sampler.sample(in: root, at: start + .seconds(60)) == nil)
+        #expect(reads.withLock { $0 } == 2)
     }
 }

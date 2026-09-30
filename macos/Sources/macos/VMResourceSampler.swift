@@ -12,6 +12,8 @@ struct VMResourceSnapshot: Codable, Equatable, Sendable {
 }
 
 enum VMResourceSampler {
+    private static let diskSampler = VMImageDiskSampler()
+
     static func snapshot(machine: SmolVMMachine?, dataURL: URL = SmolVMPaths.dataURL) async -> VMResourceSnapshot {
         let directory = machineDirectory(named: SmolVMSetup.machineName, dataURL: dataURL)
         let running = machine?.isRunning == true
@@ -19,7 +21,7 @@ enum VMResourceSampler {
             ? await UnixSocketHTTP.balloonStatus(at: directory.appendingPathComponent("control.sock"))
                 .flatMap(parseBalloonStatus)
             : nil
-        let disk = diskUsage(in: directory)
+        let disk = await diskSampler.sample(in: directory)
         return VMResourceSnapshot(
             memoryResidentBytes: running ? machine?.pid.flatMap(residentMemoryBytes) : nil,
             memoryLimitBytes: machine?.memoryMiB.flatMap { bytes(fromMiB: $0) },
@@ -77,5 +79,31 @@ enum VMResourceSampler {
     private static func bytes(fromMiB value: UInt64) -> UInt64? {
         let (bytes, overflow) = value.multipliedReportingOverflow(by: 1024 * 1024)
         return overflow ? nil : bytes
+    }
+}
+
+actor VMImageDiskSampler {
+    typealias Allocation = (allocated: UInt64, logical: UInt64)
+
+    private let read: @Sendable (URL) -> Allocation?
+    private var sampledDirectory: URL?
+    private var lastSampledAt: ContinuousClock.Instant?
+    private var cachedAllocation: Allocation?
+
+    init(read: @escaping @Sendable (URL) -> Allocation? = VMResourceSampler.diskUsage(in:)) {
+        self.read = read
+    }
+
+    func sample(in directory: URL, at now: ContinuousClock.Instant = .now) -> Allocation? {
+        if sampledDirectory == directory, let lastSampledAt,
+           now - lastSampledAt < .seconds(60) {
+            return cachedAllocation
+        }
+        // Read only the two image files' allocation metadata, never their contents
+        // or container filesystems. Cache unavailable readings for the same interval.
+        cachedAllocation = read(directory)
+        sampledDirectory = directory
+        lastSampledAt = now
+        return cachedAllocation
     }
 }
