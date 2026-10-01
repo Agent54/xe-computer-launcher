@@ -268,10 +268,115 @@ Deno.test('runtime failures are enriched only while the supervisor reports an ou
   const applicationFailure = Response.json({ error: 'build_failed' }, { status: 500 });
   const healthyFailure = await surfaceRuntimeFailure(applicationFailure, env);
   assert.equal((await healthyFailure.json()).error, 'build_failed');
+  const navigation = new Request('https://service.app.localhost/', { headers: { Accept: 'text/html' } });
+  const upstreamFailure = new Response('application error', { status: 503 });
+  assert.equal(await surfaceRuntimeFailure(upstreamFailure, env, navigation), upstreamFailure);
   phase = 'restarting';
   const runtimeFailure = await surfaceRuntimeFailure(Response.json({ error: 'backend EOF' }, { status: 500 }), env);
   assert.equal(runtimeFailure.status, 503);
   assert.equal((await runtimeFailure.json()).error, 'container_runtime_oom');
+  const browserFailure = await surfaceRuntimeFailure(new Response('backend EOF', { status: 500 }), env, navigation);
+  assert.match(browserFailure.headers.get('content-type')!, /text\/html/);
+  assert.match(await browserFailure.text(), /Container VM ran out of memory; restarting…/);
+});
+
+Deno.test('browser app requests show the runtime loader until Compose and the VM recover', async t => {
+  let runtime = {
+    phase: 'starting', message: 'Starting container runtime…', reason: null as string | null,
+    hostResources: { cpuCount: 12, memoryTotalBytes: 34359738368 },
+    vmResources: { diskLogicalBytes: 32212254720 },
+  };
+  let statusAvailable = true;
+  let composeAvailable = false;
+  let upstreamStatus = 503;
+  const env = {
+    RUNTIME_STATUS: { fetch: (input: string) => {
+      if (input.endsWith('app-ports.json')) return Promise.resolve(Response.json({ http: 80, https: 443 }));
+      if (!statusAvailable) throw new Error('Runtime status unavailable');
+      return Promise.resolve(Response.json(runtime));
+    } },
+    COMPOSE: { fetch: (input: string) => {
+      if (!composeAvailable) throw new Error('Compose connection refused');
+      const url = new URL(input);
+      return Promise.resolve(Response.json(url.pathname === '/v1.24/ls'
+        ? [{ Name: 'demo' }] : url.pathname.startsWith('/v1.24/ps/')
+        ? [{ ID: 'web-1', Name: 'demo-web-1', Service: 'web', State: 'running',
+          Publishers: [{ TargetPort: 3000, PublishedPort: 8080, Protocol: 'tcp' }] }]
+        : { services: { web: { ports: [{ target: 3000, published: '8080' }] } } }));
+    } },
+    ROUTER: { fetch: () => Promise.resolve(new Response('application response', { status: upstreamStatus })) },
+  };
+  const request = (options: RequestInit = {}, scheme = 'https') =>
+    appGateway.fetch(new Request(`${scheme}://web--p8080.app.localhost/deep/link?q=1`, options), env);
+  await t.step('HTTP and HTTPS navigations get a no-store loader with an automatic retry', async () => {
+    for (const scheme of ['http', 'https']) {
+      const response = await request({ headers: { Accept: 'text/html', 'Sec-Fetch-Mode': 'navigate' } }, scheme);
+      assert.equal(response.status, 503);
+      assert.match(response.headers.get('content-type')!, /text\/html/);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(response.headers.get('retry-after'), '2');
+      assert.match(response.headers.get('content-security-policy')!, /default-src 'none'/);
+      const html = await response.text();
+      assert.match(html, /<h1>Container runtime<\/h1>/);
+      assert.match(html, /Starting container runtime…/);
+      assert.match(html, /--background: #000000/);
+      assert.match(html, /http-equiv="refresh" content="2"/);
+    }
+    for (const accept of ['text/html', 'application/json']) {
+      const head = await request({ method: 'HEAD', headers: { Accept: accept } });
+      assert.equal(head.status, 503);
+      assert.equal(await head.text(), '');
+    }
+  });
+  await t.step('API calls and upgrades keep the runtime JSON payload', async () => {
+    const cases: RequestInit[] = [
+      { headers: { Accept: 'application/json' } },
+      { method: 'POST', headers: { Accept: 'text/html' }, body: 'must not replay' },
+      { headers: { Upgrade: 'websocket' } },
+    ];
+    for (const options of cases) {
+      const response = await request(options);
+      assert.equal(response.status, 503);
+      assert.match(response.headers.get('content-type')!, /application\/json/);
+      assert.deepEqual(await response.json(), {
+        ok: false, error: 'container_runtime_unavailable', message: runtime.message, runtime,
+      });
+    }
+    const api = await management.fetch(new Request('https://compose-ui.localhost/v1.24/ls', {
+      headers: { Accept: 'text/html' },
+    }), env);
+    assert.equal((await api.json()).error, 'container_runtime_unavailable');
+  });
+  await t.step('recovery phases retry and terminal failures display escaped details', async () => {
+    for (const phase of ['degraded', 'diagnosing', 'restarting', 'failed', 'stopped']) {
+      runtime = { ...runtime, phase, message: 'VM <failed> & "retry"', reason: 'oom' };
+      const html = await (await request()).text();
+      assert.match(html, /VM &lt;failed&gt; &amp; &quot;retry&quot;/);
+      assert.doesNotMatch(html, /VM <failed>/);
+      if (['failed', 'stopped'].includes(phase)) {
+        assert.doesNotMatch(html, /http-equiv="refresh"/);
+        assert.match(html, /Try again/);
+      } else assert.match(html, /http-equiv="refresh" content="2"/);
+      assert.equal((await (await request({ headers: { Accept: 'application/json' } })).json()).error, 'container_runtime_oom');
+    }
+  });
+  await t.step('missing status and Compose startup after VM readiness still show the loader', async () => {
+    statusAvailable = false;
+    assert.match(await (await request()).text(), /Xe Launcher will retry automatically/);
+    statusAvailable = true;
+    runtime = { ...runtime, phase: 'healthy', message: 'Container runtime ready', reason: null };
+    assert.match(await (await request()).text(), /Container services are unavailable/);
+  });
+  await t.step('router failures during runtime startup also show HTML and recovery reaches the app', async () => {
+    composeAvailable = true;
+    runtime = { ...runtime, phase: 'starting', message: 'Starting container runtime…' };
+    assert.match(await (await request()).text(), /Starting container runtime…/);
+    runtime = { ...runtime, phase: 'healthy', message: 'Container runtime ready' };
+    upstreamStatus = 200;
+    const ready = await request();
+    assert.equal(ready.status, 200);
+    assert.equal(await ready.text(), 'application response');
+  });
 });
 
 Deno.test('application port selection', async t => {
@@ -680,7 +785,7 @@ Deno.test('startup errors reach the loader and API safely', async () => {
   ];
   for (const [index, test] of cases.entries()) {
     const service = { id: `failure-${index}`, service: 'agenda', project: 'startup-errors', state: 'uncreated' };
-    const start = startApplication(service, { COMPOSE: { fetch: async () => test.fetch() } });
+    const start = await startApplication(service, { COMPOSE: { fetch: async () => test.fetch() } });
     try {
       await start.promise;
       assert.equal(start.pending, false);
@@ -702,6 +807,57 @@ Deno.test('startup errors reach the loader and API safely', async () => {
   }
 });
 
+Deno.test('uncreated apps wait for runtime readiness, while existing containers can start', async () => {
+  const service = { id: '', service: 'agenda', project: 'readiness-test', state: 'uncreated' };
+  let phase = 'starting';
+  let routerReady = false;
+  let starts = 0;
+  let release: (() => void) | undefined;
+  const env = {
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ phase, message: 'Starting container runtime…' })) },
+    ROUTER: { fetch: (request: Request) => {
+      assert.equal(new URL(request.url).pathname, '/__xe_router_health');
+      return Promise.resolve(new Response(null, { status: routerReady ? 200 : 503 }));
+    } },
+    COMPOSE: { fetch: () => {
+      starts++;
+      return new Promise<Response>(resolve => { release = () => resolve(Response.json({ ok: true })); });
+    } },
+  };
+  try {
+    for (phase of ['starting', 'restarting', 'degraded', 'diagnosing']) {
+      const deferred = await startApplication(service, env);
+      await deferred.promise;
+      const response = applicationStarting(new Request('https://agenda.app.localhost/'), service, deferred.error, deferred.message);
+      const html = await response.text();
+      assert.match(html, /<h1>agenda<\/h1>/);
+      assert.match(html, /Starting container runtime…/);
+      assert.match(html, /http-equiv="refresh" content="2"/);
+      assert.equal(starts, 0);
+    }
+
+    const existing = await startApplication({ ...service, id: 'readiness-existing', state: 'exited' }, env);
+    assert.equal(starts, 1, 'an existing container does not need a build readiness gate');
+    release!();
+    await existing.promise;
+
+    phase = 'healthy';
+    const waitingForRouter = await startApplication(service, env);
+    assert.equal(waitingForRouter.message, 'Starting application router…');
+    assert.equal(starts, 1, 'the guest router must also be ready before building');
+    routerReady = true;
+    const [first, second] = await Promise.all([startApplication(service, env), startApplication(service, env)]);
+    assert.equal(first, second, 'concurrent ports share the same start after checking readiness');
+    assert.equal(starts, 2);
+    release!();
+    await first.promise;
+  } finally {
+    release?.();
+    applicationReady(service);
+    applicationReady({ ...service, id: 'readiness-existing' });
+  }
+});
+
 Deno.test('Agenda URL discovers an uncreated app and shares its single-container creation', async () => {
   const originalNow = Date.now;
   let now = originalNow() + 300_000;
@@ -716,7 +872,10 @@ Deno.test('Agenda URL discovers an uncreated app and shares its single-container
   const env = {
     ROUTER: { fetch: (input: Request | string) => {
       const request = input instanceof Request ? input : new Request(input);
-      assert.notEqual(new URL(request.url).hostname, 'localhost', 'discovery must not query the guest');
+      if (new URL(request.url).hostname === 'localhost') {
+        assert.equal(new URL(request.url).pathname, '/__xe_router_health', 'only the lightweight health probe may query the guest');
+        return Promise.resolve(new Response('ready'));
+      }
       assert.equal(request.headers.get('x-xe-container-id'), 'agenda-new-id');
       assert.equal(request.headers.get('x-xe-target-port'), '5173');
       return Promise.resolve(state === 'ready' ? new Response('agenda is ready') :

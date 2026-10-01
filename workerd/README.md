@@ -59,6 +59,12 @@ routes can still use Compose's container port bindings when parsed configuration
 is unavailable. Router-generated discovery and availability errors use
 `Cache-Control: no-store`, so the browser cannot cache a stale unavailable page.
 
+While the VM or Compose is starting or recovering, browser app requests show
+the same black loading screen as container startup and retry the original URL
+every two seconds. API requests that accept JSON, writes, and WebSocket upgrades
+receive retryable JSON with the runtime status. Failed or stopped runtimes show
+their status with a manual retry link.
+
 The Compose UI uses `compose-ui.localhost` on those same HTTP and HTTPS ports.
 It shares the application gateway and never needs a separate published port.
 The signed Xe Computer app can fetch its selected ports and the limited Compose
@@ -146,6 +152,10 @@ single-container endpoint with `service` and `path`, without starting dependenci
 or other replicas. The bundled Compose server must support this service form of the
 endpoint, build missing service images before creation, and publish creation/start
 progress and errors through its existing build activity stream.
+Uncreated apps wait until the launcher reports a healthy runtime and the guest
+router answers its lightweight health probe before requesting creation or a build.
+While waiting, the loader keeps the app name and explains which part is starting.
+Existing containers can still start individually without waiting for this build gate.
 Direct TLS passthrough apps still own their certificates, so
 their container is started on access but their TLS client must retry the connection.
 

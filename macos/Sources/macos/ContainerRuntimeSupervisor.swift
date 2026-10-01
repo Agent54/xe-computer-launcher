@@ -207,11 +207,11 @@ actor ContainerRuntimeSupervisor {
 
     func reconcile() async {
         guard state != .idle, state != .starting, state != .recovering,
-              state != .failed, state != .stopped else { return }
+              state != .stopped else { return }
 
         if await probeDocker() {
             consecutiveFailures = 0
-            if state == .degraded {
+            if state == .degraded || state == .failed {
                 state = .healthy
                 await publish(
                     phase: .healthy,
@@ -223,6 +223,10 @@ actor ContainerRuntimeSupervisor {
             await refreshDiagnosticsIfNeeded()
             return
         }
+
+        // A timed-out startup or exhausted recovery can still finish later.
+        // Observe it without scheduling another restart.
+        guard state != .failed else { return }
 
         consecutiveFailures += 1
         state = .degraded
@@ -274,6 +278,23 @@ actor ContainerRuntimeSupervisor {
         let wasOOM = workloadOOM || oomCountAdvanced
         if let diagnosed { lastDiagnostics = diagnosed }
 
+        // Docker's short health probe can time out during a heavy build.
+        // Only restart after diagnostics confirm the VM or daemon exited.
+        let daemonExited = ["exited", "stopped", "failed"].contains(diagnosed?.workload?.state.lowercased() ?? "")
+        guard let diagnosed, !diagnosed.isRunning || daemonExited else {
+            state = .degraded
+            consecutiveFailures = 0
+            await publish(
+                phase: .degraded,
+                message: wasOOM
+                    ? "Container VM ran out of memory; waiting for Docker to respond…"
+                    : "Docker is not responding; waiting without interrupting running containers…",
+                reason: wasOOM ? "oom" : "docker_unavailable",
+                memory: diagnosed?.memory
+            )
+            return
+        }
+
         let cutoff = now().addingTimeInterval(-configuration.recoveryWindow)
         recoveryDates.removeAll { $0 < cutoff }
         guard recoveryDates.count < configuration.maximumRecoveries else {
@@ -283,7 +304,7 @@ actor ContainerRuntimeSupervisor {
                 phase: .failed,
                 message: message,
                 reason: "recovery_exhausted",
-                memory: diagnosed?.memory
+                memory: diagnosed.memory
             )
             log(message)
             return
@@ -299,7 +320,7 @@ actor ContainerRuntimeSupervisor {
             message: message,
             reason: wasOOM ? "oom" : "docker_unavailable",
             recoveryAttempt: attempt,
-            memory: diagnosed?.memory
+            memory: diagnosed.memory
         )
         log(message)
 
@@ -309,7 +330,7 @@ actor ContainerRuntimeSupervisor {
             message: message,
             reason: wasOOM ? "oom" : "docker_unavailable",
             recoveryAttempt: attempt,
-            memory: diagnosed?.memory
+            memory: diagnosed.memory
         )
 
         do {

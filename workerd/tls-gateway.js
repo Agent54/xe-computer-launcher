@@ -55,7 +55,8 @@ export default {
       // Native HTTPS apps own their certificate. Start the exact container and
       // let the client retry its TLS connection once the application is ready.
       if (isApplicationStopped(route.service)) {
-        await startApplication(route.service, env).promise;
+        const start = await startApplication(route.service, env);
+        await start.promise;
         return;
       }
       const response = await env.ROUTER.fetch(new Request('http://localhost/__xe_tls_tunnel', {

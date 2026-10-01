@@ -31,7 +31,7 @@ private actor RuntimeFixture {
 
 @Suite(.serialized)
 struct ContainerRuntimeSupervisorTests {
-    private func machine(oomKillCount: UInt64, workloadOOM: Bool = false) -> SmolVMMachine {
+    private func machine(oomKillCount: UInt64, workloadOOM: Bool = false, workloadExited: Bool = false) -> SmolVMMachine {
         SmolVMMachine(
             name: "test",
             state: "running",
@@ -45,7 +45,7 @@ struct ContainerRuntimeSupervisorTests {
                 oomKillCount: oomKillCount
             ),
             workload: SmolVMWorkloadStatus(
-                state: workloadOOM ? "exited" : "running",
+                state: workloadOOM || workloadExited ? "exited" : "running",
                 lastExitCode: workloadOOM ? 137 : nil,
                 lastExitReason: workloadOOM ? "oom_killed" : nil,
                 oomKilled: workloadOOM
@@ -163,7 +163,7 @@ struct ContainerRuntimeSupervisorTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = RuntimeFixture(
             probes: [false, false],
-            diagnostics: [machine(oomKillCount: 0)]
+            diagnostics: [machine(oomKillCount: 0, workloadExited: true)]
         )
         let supervisor = ContainerRuntimeSupervisor(
             configuration: .init(
@@ -193,6 +193,67 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.phase == .failed)
         #expect(snapshot.reason == "recovery_exhausted")
         #expect(await fixture.starts == 2)
+    }
+
+    @Test func busyDockerDoesNotRestartRunningContainersEvenAfterAnOOM() async throws {
+        let root = URL(fileURLWithPath: "/tmp/xe-runtime-status-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(
+            probes: [false, false, false, false, true],
+            diagnostics: [machine(oomKillCount: 0), machine(oomKillCount: 1)]
+        )
+        let supervisor = ContainerRuntimeSupervisor(
+            configuration: .init(failureThreshold: 1, diagnosticInterval: 60),
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { await fixture.start() },
+            stopMachine: { await fixture.stop() },
+            probeDocker: { await fixture.probe() },
+            readDiagnostics: { await fixture.diagnostic() },
+            resetRouter: { await fixture.resetRouter() },
+            reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
+            onStatusChanged: { _ in },
+            log: { _ in }
+        )
+
+        _ = try await supervisor.start()
+        await supervisor.reconcile()
+        #expect((await supervisor.snapshot()).phase == .degraded)
+        #expect((await supervisor.snapshot()).reason == "oom")
+        for _ in 0..<4 { await supervisor.reconcile() }
+        #expect((await supervisor.snapshot()).phase == .healthy)
+        #expect(await fixture.starts == 1)
+        #expect(await fixture.stops == 0)
+        #expect(await fixture.routerResets == 0)
+    }
+
+    @Test func lateDockerReadinessClearsStartupFailureWithoutAnotherStart() async throws {
+        let root = URL(fileURLWithPath: "/tmp/xe-runtime-status-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(probes: [false, true], diagnostics: [machine(oomKillCount: 0)])
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { throw SmolVMSetupError.dockerSocketUnavailable("test.sock") },
+            probeDocker: { await fixture.probe() },
+            readDiagnostics: { await fixture.diagnostic() },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
+            onStatusChanged: { _ in },
+            log: { _ in }
+        )
+
+        do {
+            _ = try await supervisor.start()
+            Issue.record("Startup should have timed out")
+        } catch {}
+        #expect((await supervisor.snapshot()).phase == .failed)
+        await supervisor.reconcile()
+        #expect((await supervisor.snapshot()).phase == .failed)
+        await supervisor.reconcile()
+        #expect((await supervisor.snapshot()).phase == .healthy)
+        #expect(await fixture.starts == 0)
+        #expect(await fixture.routerResets == 0)
     }
 
     @Test func machineStatusDecodesOldAndDiagnosticJSON() throws {

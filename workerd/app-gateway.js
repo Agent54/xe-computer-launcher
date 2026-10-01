@@ -1,5 +1,6 @@
 import { readAppPorts } from './app-ports.js';
 import { routeApplication } from './app-routing.js';
+import { isApplicationStartupResponse } from './app-startup.js';
 import { runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 import { isDarcAPIRequest, addDarcCors, darcPreflight } from './darc-api.js';
 
@@ -48,9 +49,10 @@ export default {
     }
     try {
       const response = await routeApplication(request, env, ctx);
-      return response.status >= 500 ? await surfaceRuntimeFailure(response, env) : response;
+      return response.status >= 500 && !isApplicationStartupResponse(response)
+        ? await surfaceRuntimeFailure(response, env, request) : response;
     } catch {
-      return await runtimeUnavailable(env);
+      return await runtimeUnavailable(env, { request });
     }
   },
 };

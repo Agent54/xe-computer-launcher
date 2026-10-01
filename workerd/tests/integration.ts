@@ -389,6 +389,18 @@ try {
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'starting', message: 'Starting container runtime…', reason: null,
+  }));
+  const waiting = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
+  assert.match(waiting.body.toString(), /<h1>sleeping<\/h1>/);
+  assert.match(waiting.body.toString(), /Starting container runtime…/);
+  assert.match((await tlsRequest('sleeping_demo--p32002.app.localhost', true)).body, /Starting container runtime…/);
+  assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 0);
+  assert.equal((await request()).status, 200, 'Compose UI stays available during runtime startup');
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'healthy', message: 'Container runtime ready', reason: null,
+  }));
   const sleeping = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.equal(sleeping.status, 503);
   assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
@@ -399,6 +411,7 @@ try {
   assert.match(sleepingTLS.body, /Starting…/);
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 1);
   assert(releaseContainerStart, 'single-container start must be dispatched before returning the loader');
+  assert.equal((await request()).status, 200, 'Compose UI stays available while a container build/start is pending');
   releaseContainerStart();
   releaseContainerStart = undefined;
   await sleep(2100);
@@ -419,13 +432,35 @@ try {
   await stopUnix(docker, dockerPath);
   await sleep(2100);
   assert.equal((await request('/v1.24/ls')).status, 503);
-  assert.equal((await request('/', appOptions)).status, 503);
+  for (const phase of ['starting', 'restarting']) {
+    const message = phase === 'starting' ? 'Starting container runtime…' : 'Container VM ran out of memory; restarting…';
+    await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+      phase, message, reason: phase === 'restarting' ? 'oom' : null,
+    }));
+    const loader = await request('/deep/link?q=1', { ...appOptions, headers: { Accept: 'text/html' } });
+    assert.equal(loader.status, 503);
+    assert.match(String(loader.headers['content-type']), /text\/html/);
+    assert.equal(loader.headers['cache-control'], 'no-store');
+    assert.equal(loader.headers['retry-after'], '2');
+    assert(loader.body.toString().includes(message));
+    assert.match(loader.body.toString(), /http-equiv="refresh" content="2"/);
+    const tlsLoader = await tlsRequest('web--p32000.app.localhost', true);
+    assert.equal(tlsLoader.status, 503);
+    assert(tlsLoader.body.includes(message));
+    const apiFailure = await request('/deep/link?q=1', { ...appOptions, headers: { Accept: 'application/json' } });
+    assert.equal(JSON.parse(apiFailure.body.toString()).error,
+      phase === 'restarting' ? 'container_runtime_oom' : 'container_runtime_unavailable');
+  }
   assert.equal((await request()).status, 200);
+  await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
+    phase: 'healthy', message: 'Container runtime ready', reason: null,
+  }));
   compose = await startUnix(composePath);
   docker = await startUnix(dockerPath);
   assert.equal((await request('/v1.24/ls')).status, 200);
-  assert.equal((await request('/', appOptions)).status, 200);
-  console.log('PASS: backend socket replacement and recovery without restarting workerd');
+  assert.equal((await request('/deep/link?q=1', appOptions)).body.toString(), 'upstream-ok');
+  assert.deepEqual(await tlsRequest('web--p32000.app.localhost', true), { status: 200, body: 'upstream-ok' });
+  console.log('PASS: runtime HTTP/HTTPS loader, API JSON, and backend recovery without restarting workerd');
 
   await stopUnix(compose, composePath);
   const realCompose = startProcess(composeBinary, ['serve', root], { DOCKER_HOST: `unix:${root}/absent.sock`, DOCKER_CONTEXT: '' });

@@ -1,7 +1,10 @@
 import { invalidateApplicationService } from './app-discovery.js';
+import { startupResponse } from './startup-response.js';
+import { readRuntimeStatus } from './runtime-status.js';
 
 // Share an in-flight start between requests for any port of the same container.
 const starts = new Map();
+const startupResponses = new WeakSet();
 const startupWindow = 120_000;
 const startable = new Set(['uncreated', 'created', 'exited', 'stopped']);
 
@@ -36,8 +39,35 @@ async function startError(response) {
   return new Error(`Compose returned HTTP ${response.status}${detail ? `: ${detail}` : ' while starting this app.'}`);
 }
 
-export function startApplication(service, env) {
+export async function startApplication(service, env) {
   let entry = applicationStart(service);
+  if (entry) return entry;
+  // Creating a container may build an image. Restored tabs must not start
+  // that work while the launcher is still bringing up the container runtime.
+  if (!service.id) {
+    const runtime = await readRuntimeStatus(env);
+    if (runtime.phase !== 'healthy') return {
+      pending: false, promise: Promise.resolve(),
+      error: ['failed', 'stopped'].includes(runtime.phase) ? runtime.message : false,
+      message: runtime.message,
+    };
+    // Docker may be ready before the guest router has claimed its socket.
+    // Its health endpoint is independent of Docker and does no discovery.
+    let routerReady = false;
+    try {
+      const response = await env.ROUTER.fetch(new Request('http://localhost/__xe_router_health', {
+        signal: AbortSignal.timeout(1000),
+      }));
+      routerReady = response.ok;
+      await response.body?.cancel();
+    } catch {}
+    if (!routerReady) return {
+      pending: false, promise: Promise.resolve(), error: false,
+      message: 'Starting application router…',
+    };
+  }
+  // Another port may have started this service while status was being read.
+  entry = applicationStart(service);
   if (entry) return entry;
   for (const [id, value] of starts) {
     if (!value.pending && value.expires <= Date.now()) starts.delete(id);
@@ -74,58 +104,17 @@ export function applicationReady(service) {
   starts.delete(serviceKey(service));
 }
 
-function escapeHTML(value) {
-  return String(value).replace(/[&<>"']/g, char => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char]);
+export function isApplicationStartupResponse(response) {
+  return startupResponses.has(response);
 }
 
-export function applicationStarting(request, service, failed = false) {
-  const headers = {
-    'Cache-Control': 'no-store',
-    'Retry-After': '2',
-    'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer',
-  };
+export function applicationStarting(request, service, failed = false, startingMessage = 'Starting…') {
   const message = failed ? typeof failed === 'string' ? failed
-    : 'Could not start this app. Try again or check its logs in Compose.' : 'Starting…';
-  // API calls and upgrades receive a retryable response; never replay a POST.
-  if (!['GET', 'HEAD'].includes(request.method) || request.headers.has('upgrade') ||
-      (request.headers.has('accept') && !request.headers.get('accept').includes('text/html') &&
-       !request.headers.get('accept').includes('*/*'))) {
-    return Response.json({ app: service.service, state: failed ? 'failed' : 'starting', message }, { status: 503, headers });
-  }
-  headers['Content-Type'] = 'text/html; charset=utf-8';
-  headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
-  const name = escapeHTML(service.service);
-  return new Response(request.method === 'HEAD' ? null : `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  ${failed ? '' : '<meta http-equiv="refresh" content="2">'}
-  <title>${name} · ${failed ? 'Unable to start' : 'Starting'}</title>
-  <style>
-    :root { color-scheme: dark; --background: #000000; --text: #f5f5f5; --muted: #a3a3a3; --track: #262626; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: 32px; background: var(--background); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { width: min(100%, 400px); text-align: center; }
-    .loader { width: 28px; height: 28px; margin: 0 auto 28px; border: 2px solid var(--track); border-top-color: var(--text); border-radius: 50%; animation: spin 1s linear infinite; }
-    h1 { margin: 0; font-size: clamp(24px, 5vw, 32px); font-weight: 500; letter-spacing: -.03em; overflow-wrap: anywhere; }
-    p { margin: 12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-    a { display: inline-block; margin-top: 24px; color: var(--text); text-underline-offset: 4px; }
-    a:focus-visible { outline: 2px solid var(--text); outline-offset: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .loader { animation: none; } }
-  </style>
-</head>
-<body>
-  <main aria-busy="${!failed}" aria-live="polite">
-    ${failed ? '' : '<div class="loader" aria-hidden="true"></div>'}
-    <h1>${name}</h1>
-    <p role="status">${escapeHTML(message)}</p>
-    ${failed ? '<a href="">Try again</a>' : ''}
-  </main>
-</body>
-</html>`, { status: 503, headers });
+    : 'Could not start this app. Try again or check its logs in Compose.' : startingMessage;
+  const response = startupResponse(request, {
+    name: service.service, message, failed: Boolean(failed),
+    payload: { app: service.service, state: failed ? 'failed' : 'starting', message },
+  });
+  startupResponses.add(response);
+  return response;
 }

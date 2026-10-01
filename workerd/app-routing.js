@@ -146,9 +146,9 @@ export async function routeApplication(request, env, ctx) {
     return routeError(`Unsupported Compose application protocol: ${applicationProtocol(selectedPort)}`);
   }
   if (isApplicationStopped(service)) {
-    const start = startApplication(service, env);
+    const start = await startApplication(service, env);
     ctx.waitUntil(start.promise);
-    return applicationStarting(request, service, start.error);
+    return applicationStarting(request, service, start.error, start.message);
   }
   if (service.state === 'restarting') return applicationStarting(request, service);
   if (service.state && service.state !== 'running') {

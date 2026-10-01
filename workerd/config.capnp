@@ -7,6 +7,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "gateway.js", esModule = embed "gateway.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
+        (name = "startup-response.js", esModule = embed "startup-response.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
         (name = "darc-api.js", esModule = embed "darc-api.js"),
       ],
@@ -23,6 +24,7 @@ const config :Workerd.Config = (
         (name = "app-gateway.js", esModule = embed "app-gateway.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),
         (name = "app-startup.js", esModule = embed "app-startup.js"),
+        (name = "startup-response.js", esModule = embed "startup-response.js"),
         (name = "app-discovery.js", esModule = embed "app-discovery.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
@@ -40,6 +42,7 @@ const config :Workerd.Config = (
       compatibilityDate = "2026-04-05",
       modules = [
         (name = "management.js", esModule = embed "management.js"),
+        (name = "startup-response.js", esModule = embed "startup-response.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
       ],
@@ -55,6 +58,8 @@ const config :Workerd.Config = (
       compatibilityFlags = ["experimental"],
       modules = [
         (name = "tls-gateway.js", esModule = embed "tls-gateway.js"),
+        (name = "runtime-status.js", esModule = embed "runtime-status.js"),
+        (name = "startup-response.js", esModule = embed "startup-response.js"),
         (name = "tls-client-hello.js", esModule = embed "tls-client-hello.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),
         (name = "app-startup.js", esModule = embed "app-startup.js"),
