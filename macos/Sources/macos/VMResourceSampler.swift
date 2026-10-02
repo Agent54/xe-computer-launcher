@@ -9,10 +9,22 @@ struct VMResourceSnapshot: Codable, Equatable, Sendable {
     let balloonInflatedBytes: UInt64?
     let diskAllocatedBytes: UInt64?
     let diskLogicalBytes: UInt64?
+    let diskTotalBytes: UInt64?
+    let diskAvailableBytes: UInt64?
+    let diskTotalInodes: UInt64?
+    let diskFreeInodes: UInt64?
+}
+
+struct VMGuestDiskSnapshot: Equatable, Sendable {
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+    let totalInodes: UInt64?
+    let freeInodes: UInt64?
 }
 
 enum VMResourceSampler {
     private static let diskSampler = VMImageDiskSampler()
+    private static let guestDiskSampler = VMGuestDiskSampler()
 
     static func snapshot(machine: SmolVMMachine?, dataURL: URL = SmolVMPaths.dataURL) async -> VMResourceSnapshot {
         let directory = machineDirectory(named: SmolVMSetup.machineName, dataURL: dataURL)
@@ -22,13 +34,18 @@ enum VMResourceSampler {
                 .flatMap(parseBalloonStatus)
             : nil
         let disk = await diskSampler.sample(in: directory)
+        let guestDisk = await guestDiskSampler.sample(machine: machine)
         return VMResourceSnapshot(
             memoryResidentBytes: running ? machine?.pid.flatMap(residentMemoryBytes) : nil,
             memoryLimitBytes: machine?.memoryMiB.flatMap { bytes(fromMiB: $0) },
             balloonTargetBytes: balloon?.target,
             balloonInflatedBytes: balloon?.inflated,
             diskAllocatedBytes: disk?.allocated,
-            diskLogicalBytes: disk?.logical
+            diskLogicalBytes: disk?.logical,
+            diskTotalBytes: guestDisk?.totalBytes,
+            diskAvailableBytes: guestDisk?.availableBytes,
+            diskTotalInodes: guestDisk?.totalInodes,
+            diskFreeInodes: guestDisk?.freeInodes
         )
     }
 
@@ -76,9 +93,75 @@ enum VMResourceSampler {
         return (allocated, logical)
     }
 
+    static func parseGuestDiskStatus(_ response: String) -> VMGuestDiskSnapshot? {
+        // stat -f returns filesystem counters; it never traverses Docker's files.
+        let fields = response.split(whereSeparator: \.isWhitespace)
+        guard fields.count == 5,
+              let blockSize = UInt64(fields[0]), blockSize > 0,
+              let totalBlocks = UInt64(fields[1]), totalBlocks > 0,
+              let availableBlocks = UInt64(fields[2]), availableBlocks <= totalBlocks,
+              let totalInodes = UInt64(fields[3]),
+              let freeInodes = UInt64(fields[4]), freeInodes <= totalInodes else { return nil }
+        let (totalBytes, totalOverflow) = blockSize.multipliedReportingOverflow(by: totalBlocks)
+        let (availableBytes, availableOverflow) = blockSize.multipliedReportingOverflow(by: availableBlocks)
+        guard !totalOverflow, !availableOverflow else { return nil }
+        return VMGuestDiskSnapshot(
+            totalBytes: totalBytes,
+            availableBytes: availableBytes,
+            totalInodes: totalInodes > 0 ? totalInodes : nil,
+            freeInodes: totalInodes > 0 ? freeInodes : nil
+        )
+    }
+
     private static func bytes(fromMiB value: UInt64) -> UInt64? {
         let (bytes, overflow) = value.multipliedReportingOverflow(by: 1024 * 1024)
         return overflow ? nil : bytes
+    }
+}
+
+actor VMGuestDiskSampler {
+    private let read: @Sendable (String) async -> VMGuestDiskSnapshot?
+    private var sampledName: String?
+    private var sampledPID: Int32?
+    private var lastSampledAt: ContinuousClock.Instant?
+    private var cachedDisk: VMGuestDiskSnapshot?
+
+    init(read: @escaping @Sendable (String) async -> VMGuestDiskSnapshot? = { name in
+        guard let result = try? await SmolVMClient.shared.execute(
+            in: name,
+            command: ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
+            timeout: "2s"
+        ) else { return nil }
+        return VMResourceSampler.parseGuestDiskStatus(result.standardOutput)
+    }) {
+        self.read = read
+    }
+
+    func sample(machine: SmolVMMachine?, at now: ContinuousClock.Instant = .now) async -> VMGuestDiskSnapshot? {
+        guard let machine, machine.isRunning else {
+            sampledName = nil
+            sampledPID = nil
+            lastSampledAt = nil
+            cachedDisk = nil
+            return nil
+        }
+        if sampledName == machine.name, sampledPID == machine.pid, let lastSampledAt,
+           now - lastSampledAt < .seconds(60) {
+            return cachedDisk
+        }
+        if sampledName != machine.name || sampledPID != machine.pid {
+            cachedDisk = nil
+        }
+        sampledName = machine.name
+        sampledPID = machine.pid
+        // Stamp before awaiting so concurrent callers cannot launch another read.
+        // Failures are cached too; restarting the VM invalidates the old sample.
+        lastSampledAt = now
+        let disk = await read(machine.name)
+        guard sampledName == machine.name, sampledPID == machine.pid,
+              lastSampledAt == now else { return nil }
+        cachedDisk = disk
+        return disk
     }
 }
 

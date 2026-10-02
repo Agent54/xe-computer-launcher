@@ -93,7 +93,11 @@ struct ContainerRuntimeSupervisorTests {
                     balloonTargetBytes: 0,
                     balloonInflatedBytes: 0,
                     diskAllocatedBytes: 1024 * 1024,
-                    diskLogicalBytes: 30 * 1024 * 1024 * 1024
+                    diskLogicalBytes: 30 * 1024 * 1024 * 1024,
+                    diskTotalBytes: 20 * 1024 * 1024 * 1024,
+                    diskAvailableBytes: 0,
+                    diskTotalInodes: 1_310_720,
+                    diskFreeInodes: 631_409
                 )
             },
             sleep: { _ in },
@@ -123,6 +127,9 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.vmResources == snapshot.vmResources)
         #expect(persisted.vmResources?.balloonInflatedBytes == 0)
         #expect(persisted.vmResources?.diskAllocatedBytes == 1024 * 1024)
+        #expect(persisted.vmResources?.diskTotalBytes == UInt64(20) * 1024 * 1024 * 1024)
+        #expect(persisted.vmResources?.diskAvailableBytes == 0)
+        #expect(persisted.vmResources?.diskFreeInodes == 631_409)
         #expect(abs(persisted.updatedAt.timeIntervalSince(snapshot.updatedAt)) < 1)
 
         try await supervisor.stop()

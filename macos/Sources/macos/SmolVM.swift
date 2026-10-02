@@ -250,8 +250,13 @@ actor SmolVMClient {
         _ = try await invoke(["machine", "stop", "--name", name])
     }
 
-    func execute(in name: String, command: [String], detached: Bool = false) async throws -> SmolVMCommandResult {
-        try await invoke(["machine", "exec", "--name", name] + (detached ? ["--detach"] : []) + ["--"] + command)
+    func execute(in name: String, command: [String], detached: Bool = false, timeout: String? = nil) async throws -> SmolVMCommandResult {
+        try await invoke(
+            ["machine", "exec", "--name", name]
+                + (detached ? ["--detach"] : [])
+                + (timeout.map { ["--timeout", $0] } ?? [])
+                + ["--"] + command
+        )
     }
 
     @discardableResult
