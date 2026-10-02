@@ -316,6 +316,15 @@ end run
 APPLESCRIPT
 }
 
+accept_startup_disclaimer() {
+    log "accepting the experimental-software startup disclaimer"
+    if [[ "${1:-false}" == true ]]; then
+        press_process_button "bin" "Continue" "Xe Computer Is Experimental Software" 60
+    else
+        press_ui_button "$BUNDLE_ID" "Continue" "Xe Computer Is Experimental Software" 60
+    fi
+}
+
 # Accessibility requests are presented by macOS in a dedicated system process.
 # A previous interrupted run can leave another request for the same app queued
 # in front of the current one. Press every matching native prompt so none remain
@@ -696,6 +705,8 @@ else
     fi
 fi
 
+accept_startup_disclaimer "$DEV_MODE"
+
 log "approving the real installer alert"
 if [[ "$DEV_MODE" == true ]]; then
     press_process_button "bin" "Install in Applications" "Install Xe Launcher?" 60
@@ -744,6 +755,8 @@ else
         log "no Gatekeeper confirmation appeared for the installed copy"
     fi
 fi
+
+accept_startup_disclaimer
 
 log "selecting standard app ports 80/443"
 if ! press_ui_button "$BUNDLE_ID" "Use ports 80/443 for local apps (requires administrator approval)" "Choose user data storage" 60 AXCheckBox; then
@@ -1033,6 +1046,7 @@ fi
 registration_marker="$APP_DATA/workerd/port-helper-registration.sha256"
 printf '%064d\n' 0 > "$registration_marker"
 open -a "$INSTALLED_APP"
+accept_startup_disclaimer
 relaunch_ready=false
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do

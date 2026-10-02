@@ -3,7 +3,9 @@
 `cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
-installer test also accepts the first-run user data storage prompt using the
+installer test accepts the experimental-software disclaimer when launching from
+the DMG, when the installed copy starts, and when testing its later relaunch.
+It also accepts the first-run user data storage prompt using the
 default `stacks` folder and selects local HTTP/HTTPS ports 80/443. It approves
 Xe Launcher's macOS user-Keychain prompt for its generated local HTTPS
 certificate and verifies SSL trust before waiting for Compose UI. The
