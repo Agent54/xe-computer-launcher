@@ -24,7 +24,11 @@ services.
 1. Download the [latest Xe Computer release](https://github.com/Agent54/xe-computer-launcher/releases/latest).
 2. Open the `Xe-Launcher.dmg` file.
 3. Drag the `Xe Launcher` icon to the Applications folder.
-4. Open Xe Launcher. It appears in the menu bar and starts Xe Computer.
+4. Open Xe Launcher. Every launch first shows an experimental software warning.
+   Only use Xe Computer with fresh folders that contain no important data, and
+   do not use it on websites with real accounts. Choose Continue to start the
+   launcher in the menu bar and start Xe Computer, or Cancel to quit before setup
+   or services start.
 
 > [!NOTE]
 > If the package cannot open, launch Terminal and type `xattr -d com.apple.quarantine "Xe-Launcher.dmg"` to bypass Gatekeeper.

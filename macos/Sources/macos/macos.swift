@@ -99,6 +99,20 @@ struct MacOSApp {
             return
         }
 
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        // Ask on every launch, before accessing launcher state or creating the
+        // delegate, whose stored properties initialize runtime components.
+        let disclaimer = NSAlert()
+        disclaimer.alertStyle = .warning
+        disclaimer.messageText = "Xe Computer Is Experimental Software"
+        disclaimer.informativeText = "Only use Xe Computer with fresh folders that contain no important data. Do not use it on websites with real accounts.\n\nContinue to start Xe Launcher, or cancel to quit."
+        disclaimer.addButton(withTitle: "Continue")
+        disclaimer.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        app.activate(ignoringOtherApps: true)
+        guard disclaimer.runModal() == .alertFirstButtonReturn else { return }
+
         // Sandbox disabled during development
         // if !Sandbox.apply() {
         //     print("[FATAL] Sandbox failed to apply - refusing to run unsandboxed")
@@ -109,9 +123,6 @@ struct MacOSApp {
         let appDataPath = ExternalState.appDataFolder
         FileManager.default.changeCurrentDirectoryPath(appDataPath)
         print("[Init] CWD set to \(appDataPath)")
-
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
 
         let delegate = AppDelegate()
         app.delegate = delegate
