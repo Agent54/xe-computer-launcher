@@ -5,6 +5,8 @@ interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The
 installer test accepts the experimental-software disclaimer when launching from
 the DMG, when the installed copy starts, and when testing its later relaunch.
+The disclaimer opens after AppKit finishes launching, while launcher state and
+runtime components remain uninitialized until it is accepted.
 It also accepts the first-run user data storage prompt using the
 default `stacks` folder and selects local HTTP/HTTPS ports 80/443. It approves
 Xe Launcher's macOS user-Keychain prompt for its generated local HTTPS

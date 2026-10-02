@@ -169,17 +169,16 @@ on run argv
 
     tell application "System Events"
         repeat with attemptNumber from 1 to (timeoutSeconds * 4)
-            -- LSUIElement/menu-bar apps report visible=false even while an
-            -- NSAlert is onscreen. Inspect all GUI processes and use the
-            -- bundle/context filters below to select the intended dialog.
-            set candidateProcesses to application processes
+            -- LSUIElement apps can have visible=false with an alert onscreen.
+            -- Filter by bundle ID in System Events rather than querying every
+            -- GUI process individually on each poll.
+            if wantedBundleID is "" then
+                set candidateProcesses to application processes
+            else
+                set candidateProcesses to every application process whose bundle identifier is wantedBundleID
+            end if
             repeat with uiProcess in candidateProcesses
-                set bundleMatches to false
-                try
-                    set bundleMatches to (wantedBundleID is "" or bundle identifier of uiProcess is wantedBundleID)
-                end try
-
-                if bundleMatches then
+                tell uiProcess
                     repeat with uiWindow in windows of uiProcess
                         set uiElements to {}
                         try
@@ -241,7 +240,7 @@ on run argv
                             return matchedProcessName
                         end if
                     end repeat
-                end if
+                end tell
             end repeat
 
             delay 0.25

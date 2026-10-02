@@ -102,8 +102,31 @@ struct MacOSApp {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
+        let delegate = LauncherStartupDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
+    }
+}
+
+@MainActor
+private final class LauncherStartupDelegate: NSObject, NSApplicationDelegate {
+    private var launcherDelegate: AppDelegate?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Return from AppKit's launch notification before showing a modal alert.
+        // System Events must be able to inspect the dialog on a launched app.
+        DispatchQueue.main.async { [self] in
+            startLauncher(after: notification)
+        }
+    }
+
+    private func startLauncher(after notification: Notification) {
+        let app = NSApplication.shared
+
         // Ask on every launch, before accessing launcher state or creating the
-        // delegate, whose stored properties initialize runtime components.
+        // runtime delegate, whose stored properties initialize components.
         let disclaimer = NSAlert()
         disclaimer.alertStyle = .warning
         disclaimer.messageText = "Xe Computer Is Experimental Software"
@@ -111,7 +134,10 @@ struct MacOSApp {
         disclaimer.addButton(withTitle: "Continue")
         disclaimer.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         app.activate(ignoringOtherApps: true)
-        guard disclaimer.runModal() == .alertFirstButtonReturn else { return }
+        guard disclaimer.runModal() == .alertFirstButtonReturn else {
+            app.terminate(nil)
+            return
+        }
 
         // Sandbox disabled during development
         // if !Sandbox.apply() {
@@ -125,8 +151,9 @@ struct MacOSApp {
         print("[Init] CWD set to \(appDataPath)")
 
         let delegate = AppDelegate()
+        launcherDelegate = delegate
         app.delegate = delegate
-        app.run()
+        delegate.applicationDidFinishLaunching(notification)
     }
 }
 
