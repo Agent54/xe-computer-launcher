@@ -33,8 +33,13 @@ struct ContainerRuntimeMaintenanceTests {
         await first.value
         #expect(commands.withLock { $0 } == [
             ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"],
+            ["docker", "builder", "prune", "--all", "--force", "--keep-storage", "5GB"],
         ])
-        #expect(logs.withLock { $0.last } == "Unused image cleanup completed: Total reclaimed space: 10MB")
+        #expect(logs.withLock { $0.last } == "Build cache cleanup completed: Total reclaimed space: 10MB")
+        let completed = await maintenance.snapshot()
+        #expect(!completed.running)
+        #expect(completed.completedAt == clock.withLock { $0 })
+        #expect(completed.results.map(\.reclaimedBytes) == [10_000_000, 10_000_000])
         #expect(await maintenance.reconcile() == nil)
 
         let restarted = ContainerRuntimeMaintenance(
@@ -45,7 +50,7 @@ struct ContainerRuntimeMaintenanceTests {
         clock.withLock { $0.addTimeInterval(1) }
         let second = try #require(await restarted.reconcile())
         await second.value
-        #expect(commands.withLock { $0.count } == 2)
+        #expect(commands.withLock { $0.count } == 4)
         #expect(await restarted.reconcile() == nil)
     }
 
@@ -68,12 +73,36 @@ struct ContainerRuntimeMaintenanceTests {
         let first = try #require(await maintenance.reconcile())
         await first.value
         #expect(await maintenance.reconcile() == nil)
-        #expect(attempts.withLock { $0 } == 1)
-        #expect(logs.withLock { $0.last?.hasPrefix("Unused image cleanup failed:") } == true)
+        #expect(attempts.withLock { $0 } == 2)
+        #expect(logs.withLock { $0.last?.hasPrefix("Build cache cleanup failed:") } == true)
         clock.withLock { $0.addTimeInterval(4 * 60 * 60) }
         let retry = try #require(await maintenance.reconcile())
         await retry.value
-        #expect(attempts.withLock { $0 } == 2)
+        #expect(attempts.withLock { $0 } == 4)
+    }
+
+    @Test func manualCleanupBypassesScheduleAndPersistsResults() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        // Records from the earlier image-only scheduler remain readable.
+        try Data(#"{"lastImagePruneAttemptAt":"2027-01-15T08:00:00Z"}"#.utf8).write(to: stateURL)
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let commands = Mutex<[[String]]>([])
+        let execute: ContainerRuntimeMaintenance.Execute = { command in
+            commands.withLock { $0.append(command) }
+            return SmolVMCommandResult(standardOutput: "Total reclaimed space: 1.25GB\n", standardError: "", exitCode: 0)
+        }
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: execute, now: { clock }, log: { _ in })
+        #expect(await maintenance.reconcile() == nil)
+        let running = try #require(await maintenance.reconcile(force: true))
+        await running.value
+        #expect(commands.withLock { $0.count } == 2)
+        let restored = ContainerRuntimeMaintenance(stateURL: stateURL, execute: execute, now: { clock }, log: { _ in })
+        let snapshot = await restored.snapshot()
+        #expect(snapshot.completedAt == clock)
+        #expect(snapshot.results.map(\.reclaimedBytes) == [1_250_000_000, 1_250_000_000])
+        #expect(snapshot.nextRunAt == clock.addingTimeInterval(4 * 60 * 60))
+        #expect(await restored.reconcile() == nil)
     }
 
     @Test func cleanupDoesNotOverlapAndPausesBeforeVMShutdown() async throws {
@@ -99,8 +128,11 @@ struct ContainerRuntimeMaintenanceTests {
         let running = try #require(await maintenance.reconcile())
         for await _ in started.stream { break }
         #expect(await maintenance.reconcile() == nil)
+        // A manual click joins the active run rather than starting another command.
+        let joined = try #require(await maintenance.reconcile(force: true))
         await maintenance.pause()
         await running.value
+        await joined.value
         #expect(cancelled.withLock { $0 })
         #expect(logs.withLock { $0.isEmpty })
         #expect(await maintenance.reconcile() == nil)

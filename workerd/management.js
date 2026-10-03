@@ -1,6 +1,6 @@
 import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 import { readAppPorts } from './app-ports.js';
-import { diskUsageResponse } from './disk-usage.js';
+import { diskUsageResponse, invalidateDiskUsage } from './disk-usage.js';
 
 const mimeTypes = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
@@ -8,6 +8,7 @@ const mimeTypes = {
   svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon',
   woff: 'font/woff', woff2: 'font/woff2', txt: 'text/plain; charset=utf-8',
 };
+const maintenanceCompletions = new WeakMap();
 
 export default {
   async fetch(request, env) {
@@ -26,6 +27,30 @@ export default {
       return ports
         ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
         : new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/v1.24/disk-usage/cleanup') {
+      if (!['GET', 'POST'].includes(request.method)) {
+        return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
+      }
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return new Response('Forbidden', { status: 403 });
+      }
+      try {
+        const response = await env.MAINTENANCE.fetch(`http://maintenance/${request.method === 'POST' ? 'cleanup' : 'status'}`, {
+          method: request.method,
+        });
+        const cleanup = await response.json();
+        if (response.ok) {
+          if (request.method === 'POST' || (cleanup.completedAt && maintenanceCompletions.get(env.DOCKER) !== cleanup.completedAt)) {
+            invalidateDiskUsage(env.DOCKER);
+          }
+          if (cleanup.completedAt) maintenanceCompletions.set(env.DOCKER, cleanup.completedAt);
+        }
+        return Response.json(cleanup, { status: response.status, headers: { 'Cache-Control': 'no-store' } });
+      } catch {
+        return Response.json({ message: 'Cleanup requires an updated Xe Launcher.' }, { status: 503 });
+      }
     }
     if (url.pathname === '/v1.24/disk-usage' || url.pathname === '/v1.24/disk-usage/scan') {
       const scan = url.pathname.endsWith('/scan');

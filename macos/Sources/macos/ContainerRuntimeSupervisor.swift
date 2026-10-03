@@ -259,6 +259,16 @@ actor ContainerRuntimeSupervisor {
         await statusStore.snapshot()
     }
 
+    func maintenanceSnapshot() async -> ContainerRuntimeMaintenance.Snapshot? {
+        await maintenance?.snapshot()
+    }
+
+    func runMaintenance() async -> ContainerRuntimeMaintenance.Snapshot? {
+        guard state == .healthy, let maintenance else { return nil }
+        guard await maintenance.reconcile(force: true) != nil else { return nil }
+        return await maintenance.snapshot()
+    }
+
     private func refreshDiagnosticsIfNeeded() async {
         guard now().timeIntervalSince(lastDiagnosticsAt) >= configuration.diagnosticInterval else { return }
         if let diagnostics = try? await readDiagnostics() {

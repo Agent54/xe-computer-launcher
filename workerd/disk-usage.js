@@ -45,6 +45,12 @@ export function summarizeDiskUsage(data, sampledAt) {
     return rows.some(row => row.bytes === undefined) ? undefined : sum(rows.map(row => row.bytes));
   };
   return {
+    invalidate() {
+      inventory = undefined;
+      report = undefined;
+      scanRetryAt = 0;
+      scanError = undefined;
+    },
     sampledAt,
     categories: [
       category('images', 'Images', bytes(data.LayersSize), 'Reclaimable estimate counts unused unique layers only; shared layers may free additional space.'),
@@ -147,6 +153,10 @@ export function createDiskUsageService(docker, { now = Date.now, scanTimeoutMs =
       }
     },
   };
+}
+
+export function invalidateDiskUsage(docker) {
+  services.get(docker)?.invalidate();
 }
 
 export async function diskUsageResponse(docker, scan) {

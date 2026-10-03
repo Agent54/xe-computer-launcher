@@ -181,6 +181,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             )
         )
     }()
+    private lazy var maintenanceServer = makeMaintenanceServer()
+
+    private func makeMaintenanceServer() -> ContainerMaintenanceServer {
+        let runtimeSupervisor = self.runtimeSupervisor
+        return ContainerMaintenanceServer { @Sendable run in
+            let snapshot = run
+                ? await runtimeSupervisor.runMaintenance()
+                : await runtimeSupervisor.maintenanceSnapshot()
+            guard let snapshot else {
+                return ContainerMaintenanceServer.Reply(
+                    status: 503, body: Data("{\"message\":\"Cleanup is unavailable while the VM is not ready.\"}".utf8)
+                )
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            do { return ContainerMaintenanceServer.Reply(status: run ? 202 : 200, body: try encoder.encode(snapshot)) }
+            catch {
+                return ContainerMaintenanceServer.Reply(status: 500, body: Data("{\"message\":\"Could not read cleanup status.\"}".utf8))
+            }
+        }
+    }
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.socketURL
     private var isWaitingForRuntimeShutdown = false
@@ -670,6 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 }
                 do {
                     try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
+                    try maintenanceServer.start()
                 } catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
                 renderMenuLabels()
@@ -835,6 +857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runtimeStartupTask?.cancel()
         browserStartupTask?.cancel()
         hostServicesTask?.cancel()
+        maintenanceServer.stop()
         workerdServer.requestStop()
         composeServer?.requestStop()
 

@@ -239,6 +239,7 @@ final class WorkerdServer {
             "--directory-path", "status=\(runtimeStatusURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",
             "--external-addr", "docker=unix:\(SmolVMSetup.dockerSocketURL.path)",
+            "--external-addr", "maintenance=unix:\(ContainerMaintenanceServer.socketURL.path)",
             "--external-addr", "router=unix:\(routerSocketURL.path)",
             "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
         if privilegedSockets != nil {

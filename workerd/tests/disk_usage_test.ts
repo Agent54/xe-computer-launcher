@@ -93,3 +93,22 @@ Deno.test('disk routes require the right method and reject cross-site scan trigg
   assert.equal((await management.fetch(new Request(url, { method: 'POST' }), env)).status, 200);
   assert.equal(reads, 1);
 });
+
+Deno.test('cleanup proxies only fixed host operations and rejects cross-site requests', async () => {
+  const operations: string[] = [];
+  const env = {
+    DOCKER: {},
+    MAINTENANCE: { fetch: (input: string, init: RequestInit) => {
+      operations.push(`${init.method} ${new URL(input).pathname}`);
+      return Promise.resolve(Response.json({ running: init.method === 'POST', results: [] }, { status: init.method === 'POST' ? 202 : 200 }));
+    } },
+  };
+  const url = 'http://compose-ui.localhost/v1.24/disk-usage/cleanup';
+  assert.equal((await management.fetch(new Request(url, { method: 'DELETE' }), env)).status, 405);
+  assert.equal((await management.fetch(new Request(url, { method: 'POST', headers: { Origin: 'https://evil.test' } }), env)).status, 403);
+  assert.equal((await management.fetch(new Request(url, { method: 'POST', headers: { 'Sec-Fetch-Site': 'cross-site' } }), env)).status, 403);
+  assert.equal(operations.length, 0);
+  assert.equal((await management.fetch(new Request(url), env)).status, 200);
+  assert.equal((await management.fetch(new Request(url, { method: 'POST', body: '{"command":"anything"}' }), env)).status, 202);
+  assert.deepEqual(operations, ['GET /status', 'POST /cleanup']);
+});

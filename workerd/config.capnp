@@ -51,6 +51,7 @@ const config :Workerd.Config = (
       bindings = [
         (name = "ASSETS", service = "assets"),
         (name = "DOCKER", service = "docker"),
+        (name = "MAINTENANCE", service = "maintenance"),
         (name = "COMPOSE", service = "compose"),
         (name = "RUNTIME_STATUS", service = "status"),
       ],
@@ -82,6 +83,7 @@ const config :Workerd.Config = (
     (name = "status", disk = (writable = false)),
     (name = "compose", external = (http = ())),
     (name = "docker", external = (http = ())),
+    (name = "maintenance", external = (http = ())),
     (name = "ui-tls", external = (tcp = ())),
     (name = "deny", network = (allow = [])),
   ],

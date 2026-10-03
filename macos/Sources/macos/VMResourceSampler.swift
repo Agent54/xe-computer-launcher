@@ -25,6 +25,11 @@ enum VMResourceSampler {
     private static let diskSampler = VMImageDiskSampler()
     private static let guestDiskSampler = VMGuestDiskSampler()
 
+    static func invalidateDiskSamples() async {
+        await diskSampler.invalidate()
+        await guestDiskSampler.invalidate()
+    }
+
     static func snapshot(machine: SmolVMMachine?, dataURL: URL = SmolVMPaths.dataURL) async -> VMResourceSnapshot {
         let directory = machineDirectory(named: SmolVMSetup.machineName, dataURL: dataURL)
         let running = machine?.isRunning == true
@@ -109,6 +114,8 @@ actor VMGuestDiskSampler {
     private var lastSampledAt: ContinuousClock.Instant?
     private var cachedDisk: VMGuestDiskSnapshot?
 
+    func invalidate() { lastSampledAt = nil }
+
     init(read: @escaping @Sendable (String) async -> VMGuestDiskSnapshot? = { name in
         guard let result = try? await SmolVMClient.shared.execute(
             in: name,
@@ -155,6 +162,8 @@ actor VMImageDiskSampler {
     private var sampledDirectory: URL?
     private var lastSampledAt: ContinuousClock.Instant?
     private var cachedAllocation: Allocation?
+
+    func invalidate() { lastSampledAt = nil }
 
     init(read: @escaping @Sendable (URL) -> Allocation? = VMResourceSampler.diskUsage(in:)) {
         self.read = read
