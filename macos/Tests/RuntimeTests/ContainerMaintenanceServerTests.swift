@@ -7,9 +7,8 @@ import Testing
 @MainActor
 struct ContainerMaintenanceServerTests {
     private var socketURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(".build/mt-\(UUID().uuidString.prefix(8)).sock")
+        // Unix socket paths must stay short regardless of the CI checkout path or TMPDIR.
+        URL(fileURLWithPath: "/tmp/xe-maint-\(UUID().uuidString.prefix(8)).sock")
     }
 
     private func request(_ method: String, _ path: String, socket: URL) async throws -> String {
