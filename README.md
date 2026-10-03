@@ -104,14 +104,33 @@ when the selected port is nonstandard.
 Mixed standard/custom pairs are rejected and reset to the default pair. Set
 both ports above 1023 to disable the helper.
 
-Hold Option while opening the launcher menu to change **Container VM Memory**
-or **Container VM CPUs**. These limits are shared by Docker builds and all
+Hold Option while opening the launcher menu to change **Container VM Memory**,
+**Container VM CPUs**, or **Container VM Disk Size**. These limits are shared by Docker builds and all
 containers; changes take effect after quitting and reopening Xe Launcher, which
 restarts the VM. Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
 defaults to 2 and accepts 1 up to the Mac's logical CPU count. Memory is elastic:
 only touched memory is committed. The equivalent settings are
 `container_vm_memory_mib` (4096–32768 MiB) and `container_vm_cpus` in
 `~/Library/Application Support/dev.xe.computer/settings.json`.
+The Docker data disk defaults to 20 GiB and can grow up to 4096 GiB; it cannot
+shrink. Its setting is `container_vm_disk_gib`. Existing larger disks are
+preserved even if this setting is lowered manually. Growth applies on restart
+and does not preallocate the entire capacity on the Mac.
+
+Click **VM DISK FREE** in the Compose UI to open disk usage. The page shows
+guest free space, free inodes, host image allocation, and a Docker inventory
+from metadata, cached for one minute. **Analyze disk usage** explicitly runs
+Docker's filesystem scan, with a 60-second deadline, one shared request, and a
+five-minute result cache. No analysis runs on a timer. Reports show images,
+writable container layers, volumes, and build cache, largest objects first,
+with conservative reclaimable estimates. Shared layers are not additive;
+logs, filesystem overhead, and host bind mounts are outside Docker's report.
+Unused volumes are review candidates and may hold important persistent data.
+The page suggests targeted cleanup and log rotation; it does not delete data.
+
+Build with `COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte`
+to include this page until a new Compose UI release is published and pinned.
+
 The launcher monitors Docker after startup and performs
 a bounded VM restart if the daemon becomes unavailable; the menu status and
 Compose API expose whether recovery was caused by an out-of-memory event.

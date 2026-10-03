@@ -7,12 +7,36 @@ struct ContainerVMSettingsTests {
         let defaults = ContainerVMResources(settings: nil, hostCPUCount: 12)
         #expect(defaults.memoryMiB == 4096)
         #expect(defaults.cpus == 2)
+        #expect(defaults.diskGiB == 20)
         let configured = ContainerVMResources(settings: [
             "container_vm_memory_mib": "8192", "container_vm_cpus": 6
         ], hostCPUCount: 12)
         #expect(configured.memoryMiB == 8192)
         #expect(configured.memoryGiBLabel == "8")
         #expect(configured.cpus == 6)
+    }
+
+    @Test func diskCapacityGrowsWithoutShrinkingExistingMachines() throws {
+        let resources = ContainerVMResources(settings: ["container_vm_disk_gib": 64])
+        #expect(resources.diskGiB == 64)
+        #expect(resources.diskGiB(preserving: nil) == 64)
+        #expect(resources.diskGiB(preserving: 128) == 128)
+        #expect(resources.diskGiB(preserving: 20) == 64)
+        #expect(ContainerVMResources.diskGiB(from: " 64 ", minimum: 32) == 64)
+        for invalid in ["19", "31", "4097", "32.5", "-1", "nan", ""] {
+            #expect(ContainerVMResources.diskGiB(from: invalid, minimum: 32) == nil)
+        }
+        #expect(ContainerVMResources.diskGiB(from: "4096") == 4096)
+        #expect(ContainerVMResources(settings: ["container_vm_disk_gib": true]).diskGiB == 20)
+        #expect(ContainerVMResources(settings: ["container_vm_disk_gib": Int.max]).diskGiB == 4096)
+        let machine = try JSONDecoder().decode(SmolVMMachine.self, from: Data(
+            #"{"name":"xe-launcher","state":"stopped","storage_gb":128}"#.utf8
+        ))
+        #expect(machine.storageGiB == 128)
+        let legacy = try JSONDecoder().decode(SmolVMMachine.self, from: Data(
+            #"{"name":"xe-launcher","state":"stopped"}"#.utf8
+        ))
+        #expect(legacy.storageGiB == nil)
     }
 
     @Test func persistedLimitsAreBoundedAndMalformedValuesUseDefaults() {

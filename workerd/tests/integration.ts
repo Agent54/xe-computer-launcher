@@ -120,7 +120,13 @@ async function startUnix(path: string) {
       return Response.json({ ok: true });
     } else if (requestPath === `/containers/${sleepingId}/json`) {
       return Response.json({ HostConfig: { PortBindings: { [`${appPort}/tcp`]: [{ HostPort: '32002' }] } } });
-    } else if (requestPath === '/containers/json?all=true') {
+    } else if (requestPath === '/images/json?all=true') {
+      return Response.json([{ Id: 'image', Size: 4096 }]);
+    } else if (requestPath === '/volumes') {
+      return Response.json({ Volumes: [{ Name: 'old-db', Driver: 'local' }] });
+    } else if (requestPath === '/system/df') {
+      return Response.json({ LayersSize: 4096, Images: [{ Id: 'image', Size: 4096, SharedSize: 0, Containers: 0 }] });
+    } else if (requestPath === '/containers/json?all=true' || requestPath === '/containers/json?all=true&size=false') {
       return new Response(JSON.stringify([{ Id: containerId, State: 'running', Labels: {
         'com.docker.compose.service': 'web', 'com.docker.compose.project': 'demo',
       }, Ports: [
@@ -266,6 +272,7 @@ try {
     '--directory-path', `assets=${assets}`,
     '--directory-path', `status=${statusPath}`,
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`,
+    '--external-addr', `docker=unix:${dockerPath}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
   const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
@@ -335,6 +342,17 @@ try {
 
   let compose = await startUnix(composePath);
   let docker = await startUnix(dockerPath);
+  const inventory = await request('/v1.24/disk-usage');
+  assert.equal(inventory.status, 200);
+  assert.equal(JSON.parse(inventory.body.toString()).inventory.volumes[0].references, 0);
+  assert(!seen.some(row => row.path === '/system/df'), 'opening disk usage never starts a scan');
+  assert.equal((await request('/v1.24/disk-usage/scan')).status, 405);
+  const scanned = await request('/v1.24/disk-usage/scan', { method: 'POST' });
+  assert.equal(scanned.status, 200);
+  assert.equal(JSON.parse(scanned.body.toString()).report.categories[0].totalBytes, 4096);
+  assert.equal((await request('/v1.24/disk-usage/scan', { method: 'POST' })).status, 200);
+  assert.equal(seen.filter(row => row.path === '/system/df').length, 1);
+  console.log('PASS: metadata-only inventory, opt-in disk analysis and shared scan cache');
   const payload = '{"test":true}';
   const checkoutPayload = '{"url":"https://github.com/Agent54/darc-code","path":"development"}';
   const checkout = await request('/v1.24/repos/checkout', { method: 'POST', body: checkoutPayload, headers: {

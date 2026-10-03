@@ -38,6 +38,7 @@ enum SmolVMSetup {
                 artifactURL: SmolVMPaths.composeArtifactURL,
                 memoryMiB: configuredResources.memoryMiB,
                 cpus: configuredResources.cpus,
+                storageGiB: UInt64(configuredResources.diskGiB),
                 networkBackend: "virtio-net",
                 volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro", stacksVolume],
                 exposedSockets: [
@@ -58,8 +59,10 @@ enum SmolVMSetup {
             // restart it with the runtime bundled in the current app.
             try await client.stopMachine(named: machineName)
             removeStaleSocketIfPresent()
+            let stopped = try await client.machineStatus(named: machineName)
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
+                storageGiB: configuredResources.diskGiB(preserving: stopped.storageGiB),
                 stacksVolume: stacksVolume
             )
         }

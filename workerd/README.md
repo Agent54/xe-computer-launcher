@@ -170,8 +170,17 @@ VMs to opt into routing; the launcher never deletes their data automatically.
 
 ## Development and verification
 
-For the host development worker set `COMPOSE_UI_ASSETS`, `COMPOSE_SOCKET`, and
+For the host development worker set `COMPOSE_UI_ASSETS`, `COMPOSE_SOCKET`, `DOCKER_SOCKET`, and
 `ROUTER_SOCKET`, then run `deno task dev`.
+
+The host management worker also has a private connection to the exposed guest
+Docker socket for disk usage. `GET /v1.24/disk-usage` reads only image, container,
+and volume metadata, caches inventory for 60 seconds, and returns any cached
+analysis. `POST /v1.24/disk-usage/scan` performs a read-only `/system/df` query.
+Concurrent scans share one request; successful reports last five minutes;
+failed scans throttle retries for one minute. Each scan has a 60-second deadline
+and cancels the upstream request on timeout. These fixed routes accept no
+arbitrary Docker endpoint and never invoke pruning or shell commands.
 
 Run `deno task test:unit` for port selection tests with mocked backends; these
 do not start workerd, Docker, or a VM.

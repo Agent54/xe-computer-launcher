@@ -1,5 +1,6 @@
 import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 import { readAppPorts } from './app-ports.js';
+import { diskUsageResponse } from './disk-usage.js';
 
 const mimeTypes = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
@@ -25,6 +26,19 @@ export default {
       return ports
         ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
         : new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/v1.24/disk-usage' || url.pathname === '/v1.24/disk-usage/scan') {
+      const scan = url.pathname.endsWith('/scan');
+      const method = scan ? 'POST' : 'GET';
+      if (request.method !== method) return new Response('Method not allowed', { status: 405, headers: { Allow: method } });
+      // A scan does disk work. Never allow another website to trigger it.
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const runtime = await readRuntimeStatus(env);
+      if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      return await diskUsageResponse(env.DOCKER, scan);
     }
     if (/^\/v1\.24\//.test(url.pathname)) {
       const headers = new Headers(request.headers);

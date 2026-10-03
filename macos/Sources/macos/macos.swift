@@ -224,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var composeStorageFolderItem: NSMenuItem?
     private var containerMemoryItem: NSMenuItem?
     private var containerCPUItem: NSMenuItem?
+    private var containerDiskItem: NSMenuItem?
     private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -980,6 +981,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         cpuItem.isHidden = true
         menu.addItem(cpuItem)
         containerCPUItem = cpuItem
+        let diskItem = NSMenuItem(title: "Container VM Disk Size…", action: #selector(changeContainerDiskAction), keyEquivalent: "")
+        diskItem.isHidden = true
+        menu.addItem(diskItem)
+        containerDiskItem = diskItem
 
         menu.addItem(.separator())
 
@@ -1345,6 +1350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         composeStorageFolderItem?.isHidden = !optionHeld
         containerMemoryItem?.isHidden = !optionHeld
         containerCPUItem?.isHidden = !optionHeld
+        containerDiskItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
@@ -1379,6 +1385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let vmResources = ContainerVMResources(settings: state.settings.rawData)
         containerMemoryItem?.title = "Container VM Memory: \(vmResources.memoryGiBLabel) GiB…"
         containerCPUItem?.title = "Container VM CPUs: \(vmResources.cpus)…"
+        containerDiskItem?.title = "Container VM Disk Size: \(vmResources.diskGiB(preserving: ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB)) GiB…"
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
@@ -1511,6 +1518,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         settingsRestartRequired = true
         renderMenuLabels()
         showSettingsRestartAlert()
+    }
+
+    @objc private func changeContainerDiskAction() {
+        Task { @MainActor in
+            do {
+                let machines = try await SmolVMClient.shared.listMachines()
+                let diskGiB = machines.contains { $0.name == SmolVMSetup.machineName }
+                    ? try await SmolVMClient.shared.machineStatus(named: SmolVMSetup.machineName).storageGiB
+                    : nil
+                guard ContainerVMSettings.change(.disk, currentDiskGiB: diskGiB) else { return }
+                settingsRestartRequired = true
+                renderMenuLabels()
+                showSettingsRestartAlert()
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Read VM Disk Size"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
     }
 
     private func showSettingsRestartAlert() {

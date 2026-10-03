@@ -57,10 +57,12 @@ struct SmolVMMachine: Decodable, Sendable {
     let workload: SmolVMWorkloadStatus?
     var pid: Int32? = nil
     var memoryMiB: UInt64? = nil
+    var storageGiB: UInt64? = nil
 
     enum CodingKeys: String, CodingKey {
         case name, state, labels, memory, workload, pid
         case memoryMiB = "memory_mib"
+        case storageGiB = "storage_gb"
     }
 
     var isRunning: Bool {
@@ -105,6 +107,7 @@ struct SmolVMMachineSpec: Sendable {
     let artifactURL: URL
     var memoryMiB: UInt32? = nil
     var cpus: UInt32? = nil
+    var storageGiB: UInt64? = nil
     var networkBackend: String? = nil
     var volumes: [String] = []
     var ports: [String] = []
@@ -201,6 +204,9 @@ actor SmolVMClient {
         if let cpus = spec.cpus {
             arguments += ["--cpus", String(cpus)]
         }
+        if let storageGiB = spec.storageGiB {
+            arguments += ["--storage", String(storageGiB)]
+        }
         if let networkBackend = spec.networkBackend {
             arguments += ["--net-backend", networkBackend]
         }
@@ -222,10 +228,11 @@ actor SmolVMClient {
         _ = try await invoke(arguments)
     }
 
-    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, stacksVolume: String) async throws {
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, stacksVolume: String) async throws {
         _ = try await invoke([
             "machine", "update", "--name", name,
             "--mem", String(memoryMiB), "--cpus", String(cpus),
+            "--storage", String(storageGiB),
             "--volume", stacksVolume,
         ])
     }

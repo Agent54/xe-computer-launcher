@@ -42,6 +42,7 @@ const config :Workerd.Config = (
       compatibilityDate = "2026-04-05",
       modules = [
         (name = "management.js", esModule = embed "management.js"),
+        (name = "disk-usage.js", esModule = embed "disk-usage.js"),
         (name = "startup-response.js", esModule = embed "startup-response.js"),
         (name = "runtime-status.js", esModule = embed "runtime-status.js"),
         (name = "app-ports.js", esModule = embed "app-ports.js"),
@@ -49,6 +50,7 @@ const config :Workerd.Config = (
       globalOutbound = "deny",
       bindings = [
         (name = "ASSETS", service = "assets"),
+        (name = "DOCKER", service = "docker"),
         (name = "COMPOSE", service = "compose"),
         (name = "RUNTIME_STATUS", service = "status"),
       ],
@@ -79,6 +81,7 @@ const config :Workerd.Config = (
     (name = "assets", disk = (writable = false)),
     (name = "status", disk = (writable = false)),
     (name = "compose", external = (http = ())),
+    (name = "docker", external = (http = ())),
     (name = "ui-tls", external = (tcp = ())),
     (name = "deny", network = (allow = [])),
   ],

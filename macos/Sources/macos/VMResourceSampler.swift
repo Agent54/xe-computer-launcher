@@ -13,6 +13,7 @@ struct VMResourceSnapshot: Codable, Equatable, Sendable {
     let diskAvailableBytes: UInt64?
     let diskTotalInodes: UInt64?
     let diskFreeInodes: UInt64?
+    var diskCapacityGiB: UInt64? = nil
 }
 
 struct VMGuestDiskSnapshot: Equatable, Sendable {
@@ -45,7 +46,8 @@ enum VMResourceSampler {
             diskTotalBytes: guestDisk?.totalBytes,
             diskAvailableBytes: guestDisk?.availableBytes,
             diskTotalInodes: guestDisk?.totalInodes,
-            diskFreeInodes: guestDisk?.freeInodes
+            diskFreeInodes: guestDisk?.freeInodes,
+            diskCapacityGiB: machine?.storageGiB
         )
     }
 

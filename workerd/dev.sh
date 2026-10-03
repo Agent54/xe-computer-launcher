@@ -4,6 +4,7 @@ worker_dir="$(cd "$(dirname "$0")" && pwd)"
 : "${COMPOSE_UI_ASSETS:?Set COMPOSE_UI_ASSETS to the extracted pinned UI archive}"
 : "${COMPOSE_SOCKET:?Set COMPOSE_SOCKET to the host Compose Unix socket}"
 : "${ROUTER_SOCKET:?Set ROUTER_SOCKET to the exposed guest workerd Unix socket}"
+: "${DOCKER_SOCKET:?Set DOCKER_SOCKET to the exposed guest Docker Unix socket}"
 worker_binary="${WORKERD_BIN:-$worker_dir/node_modules/.bin/workerd}"
 http_port="${HTTP_PORT:-5196}"
 https_port="${HTTPS_PORT:-5194}"
@@ -36,6 +37,7 @@ printf 'Compose UI: http://compose-ui.localhost%s/\n' "$public_http_port"
     --socket-addr "tls=127.0.0.1:$https_port" \
     --socket-addr "ui-https=unix:$runtime_dir/ui-https.sock" \
     --external-addr "ui-tls=unix:$runtime_dir/ui-https.sock" \
-    --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" &
+    --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" \
+    --external-addr "docker=unix:$DOCKER_SOCKET" &
 child=$!
 wait "$child"
