@@ -31,6 +31,16 @@ enum SmolVMSetup {
         let existing = machines.first { $0.name == machineName }
         try await GuestRouter.shared.prepare()
 
+        if existing != nil {
+            // Restart a surviving VM with the runtime and mounts owned by this app.
+            try await client.stopMachine(named: machineName)
+            removeStaleSocketIfPresent()
+        }
+        try Task.checkCancellation()
+        let dockerConfigurationVolume = try DockerDaemonConfiguration.prepare(
+            in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true)
+        )
+
         if existing == nil {
             removeStaleSocketIfPresent()
             let spec = SmolVMMachineSpec(
@@ -40,7 +50,10 @@ enum SmolVMSetup {
                 cpus: configuredResources.cpus,
                 storageGiB: UInt64(configuredResources.diskGiB),
                 networkBackend: "virtio-net",
-                volumes: ["\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro", stacksVolume],
+                volumes: [
+                    "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro",
+                    stacksVolume, dockerConfigurationVolume,
+                ],
                 exposedSockets: [
                     "/var/run/docker.sock:\(dockerSocketURL.path)",
                     "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
@@ -54,28 +67,28 @@ enum SmolVMSetup {
             )
             try await client.createMachine(spec)
         } else {
-            // The launcher owns this machine. A running instance here survived an
-            // earlier launcher crash or predates lifecycle-managed shutdown, so
-            // restart it with the runtime bundled in the current app.
-            try await client.stopMachine(named: machineName)
-            removeStaleSocketIfPresent()
             let stopped = try await client.machineStatus(named: machineName)
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: configuredResources.diskGiB(preserving: stopped.storageGiB),
-                stacksVolume: stacksVolume
+                volumes: [stacksVolume, dockerConfigurationVolume]
             )
         }
 
         try Task.checkCancellation()
         try await client.startMachine(named: machineName)
+        try await waitForDocker()
 
+        return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
+    }
+
+    private static func waitForDocker() async throws {
         let deadline = ContinuousClock.now + .seconds(90)
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if await UnixSocketHTTP.isReady(at: dockerSocketURL) {
                 try Task.checkCancellation()
-                return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
+                return
             }
             try await Task.sleep(for: .milliseconds(250))
         }

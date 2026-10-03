@@ -228,13 +228,16 @@ actor SmolVMClient {
         _ = try await invoke(arguments)
     }
 
-    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, stacksVolume: String) async throws {
-        _ = try await invoke([
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String]) async throws {
+        var arguments = [
             "machine", "update", "--name", name,
             "--mem", String(memoryMiB), "--cpus", String(cpus),
             "--storage", String(storageGiB),
-            "--volume", stacksVolume,
-        ])
+        ]
+        for volume in volumes {
+            arguments += ["--volume", volume]
+        }
+        _ = try await invoke(arguments)
     }
 
     func machineStatus(named name: String) async throws -> SmolVMMachine {

@@ -166,7 +166,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
     private var workerdServer = WorkerdServer()
-    private let runtimeSupervisor = ContainerRuntimeSupervisor()
+    private let runtimeSupervisor: ContainerRuntimeSupervisor = {
+        // Cleanup must not occupy the VM lifecycle client's command queue.
+        let maintenanceClient = SmolVMClient()
+        return ContainerRuntimeSupervisor(
+            maintenance: ContainerRuntimeMaintenance(
+                stateURL: SmolVMPaths.dataURL.appendingPathComponent("maintenance.json"),
+                execute: { command in
+                    try await maintenanceClient.execute(
+                        in: SmolVMSetup.machineName, command: command, timeout: "120s"
+                    )
+                },
+                log: { ExternalState.shared.appendLog("maintenance", $0) }
+            )
+        )
+    }()
     private var hostServicesTask: Task<Void, Never>?
     private var composeSocketURL = ComposeServerPaths.socketURL
     private var isWaitingForRuntimeShutdown = false

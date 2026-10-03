@@ -126,7 +126,30 @@ writable container layers, volumes, and build cache, largest objects first,
 with conservative reclaimable estimates. Shared layers are not additive;
 logs, filesystem overhead, and host bind mounts are outside Docker's report.
 Unused volumes are review candidates and may hold important persistent data.
-The page suggests targeted cleanup and log rotation; it does not delete data.
+The page does not delete data.
+
+Docker defaults to the `local` logging driver with three rotating 10 MB files
+per container. Before starting Docker, the launcher prepares the host-owned
+`smol/docker-config/daemon.json` and mounts its directory read-only at
+`/etc/docker`. New and existing VMs receive the same mount before boot; no guest
+installation script or extra configuration restart is needed. Other settings
+in the host configuration are preserved. Existing containers adopt the defaults
+when recreated; explicit Compose logging settings take precedence. BuildKit automatically collects unused
+build cache with a 5 GB maximum and a 1 GB reserve, using Docker's standard GC
+policies. Collection is periodic; cache in use by active builds can exceed the
+target.
+
+Runtime maintenance is centralized in `ContainerRuntimeMaintenance.swift`:
+logging limits, the build-cache budget, and image cleanup. While Docker is
+healthy, the launcher runs `docker image prune --all --force --filter until=32h`
+every four hours, removing both dangling and tagged unused images older than
+32 hours. The cutoff uses image creation time. Images referenced by running or stopped
+containers are preserved, as are containers and volumes. The first healthy
+startup runs cleanup; subsequent attempts are
+recorded in `smol/maintenance.json`, so restarting the app does not reset the
+interval. Missed runs resume when Docker is healthy, without waking a stopped
+VM. Shutdown and VM recovery cancel an active cleanup. Results are logged under
+`maintenance`.
 
 Build with `COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte`
 to include this page until a new Compose UI release is published and pinned.

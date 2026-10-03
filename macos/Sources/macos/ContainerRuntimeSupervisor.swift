@@ -131,6 +131,7 @@ actor ContainerRuntimeSupervisor {
     private let now: @Sendable () -> Date
     private let onStatusChanged: StatusChanged
     private let log: Log
+    private let maintenance: ContainerRuntimeMaintenance?
 
     private var state = State.idle
     private var consecutiveFailures = 0
@@ -141,6 +142,7 @@ actor ContainerRuntimeSupervisor {
     init(
         configuration: Configuration = Configuration(),
         statusStore: ContainerRuntimeStatusStore = ContainerRuntimeStatusStore(),
+        maintenance: ContainerRuntimeMaintenance? = nil,
         startMachine: @escaping StartMachine = { try await SmolVMSetup.start() },
         stopMachine: @escaping StopMachine = { try await SmolVMSetup.stop() },
         probeDocker: @escaping ProbeDocker = {
@@ -174,6 +176,7 @@ actor ContainerRuntimeSupervisor {
         self.now = now
         self.onStatusChanged = onStatusChanged
         self.log = log
+        self.maintenance = maintenance
     }
 
     @discardableResult
@@ -210,6 +213,7 @@ actor ContainerRuntimeSupervisor {
               state != .stopped else { return }
 
         if await probeDocker() {
+            guard state != .stopped, state != .recovering, state != .starting else { return }
             consecutiveFailures = 0
             if state == .degraded || state == .failed {
                 state = .healthy
@@ -221,12 +225,16 @@ actor ContainerRuntimeSupervisor {
                 log("Container runtime recovered without a restart")
             }
             await refreshDiagnosticsIfNeeded()
+            if state == .healthy { await maintenance?.reconcile() }
             return
         }
 
+        await maintenance?.pause()
+
         // A timed-out startup or exhausted recovery can still finish later.
         // Observe it without scheduling another restart.
-        guard state != .failed else { return }
+        guard state != .failed, state != .stopped, state != .recovering,
+              state != .starting else { return }
 
         consecutiveFailures += 1
         state = .degraded
@@ -242,6 +250,7 @@ actor ContainerRuntimeSupervisor {
 
     func stop() async throws {
         state = .stopped
+        await maintenance?.pause()
         try await stopMachine()
         await publish(phase: .stopped, message: "Container runtime stopped")
     }
@@ -265,6 +274,7 @@ actor ContainerRuntimeSupervisor {
 
     private func recover() async {
         state = .recovering
+        await maintenance?.pause()
         let diagnosed = try? await readDiagnostics()
         let previousOOMCount = lastDiagnostics?.memory?.oomKillCount
         let currentOOMCount = diagnosed?.memory?.oomKillCount
