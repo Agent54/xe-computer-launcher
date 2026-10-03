@@ -90,8 +90,6 @@ struct ContainerRuntimeSupervisorTests {
                 return VMResourceSnapshot(
                     memoryResidentBytes: 1024 * 1024,
                     memoryLimitBytes: 8192 * 1024 * 1024,
-                    balloonTargetBytes: 0,
-                    balloonInflatedBytes: 0,
                     diskAllocatedBytes: 1024 * 1024,
                     diskLogicalBytes: 30 * 1024 * 1024 * 1024,
                     diskTotalBytes: 20 * 1024 * 1024 * 1024,
@@ -125,7 +123,8 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.hostResources?.cpuPercent == 12.5)
         #expect(persisted.hostResources?.memoryTotalBytes == UInt64(16) * 1024 * 1024 * 1024)
         #expect(persisted.vmResources == snapshot.vmResources)
-        #expect(persisted.vmResources?.balloonInflatedBytes == 0)
+        #expect(persisted.vmResources?.memoryResidentBytes == 1024 * 1024)
+        #expect(persisted.vmResources?.memoryLimitBytes == UInt64(8192) * 1024 * 1024)
         #expect(persisted.vmResources?.diskAllocatedBytes == 1024 * 1024)
         #expect(persisted.vmResources?.diskTotalBytes == UInt64(20) * 1024 * 1024 * 1024)
         #expect(persisted.vmResources?.diskAvailableBytes == 0)

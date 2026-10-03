@@ -10,18 +10,6 @@ struct VMResourceSamplerTests {
         #expect(VMResourceSampler.machineDirectory(named: "xe-launcher", dataURL: root).lastPathComponent == "a45ecb7e9f9267f3")
     }
 
-    @Test func balloonUsesReportedInflationAndPreservesZero() throws {
-        let sample = try #require(VMResourceSampler.parseBalloonStatus("OK target=1024 actual=768\n"))
-        #expect(sample.target == 1024 * 1024 * 1024)
-        #expect(sample.inflated == 768 * 1024 * 1024)
-        #expect(VMResourceSampler.parseBalloonStatus("OK target=0 actual=0")?.inflated == 0)
-    }
-
-    @Test(arguments: ["ERR ENODEV no balloon device", "OK target=1", "OK target=-1 actual=0", "OK target=18446744073709551615 actual=0"])
-    func unavailableAndInvalidBalloonSamplesStayUnavailable(response: String) {
-        #expect(VMResourceSampler.parseBalloonStatus(response) == nil)
-    }
-
     @Test func sparseImagesUseAllocatedBlocksAndExcludeOtherFiles() throws {
         let root = URL(fileURLWithPath: "/tmp/xe-vm-resources-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -62,12 +50,11 @@ struct VMResourceSamplerTests {
         #expect(VMResourceSampler.residentMemoryBytes(pid: -1) == nil)
     }
 
-    @Test func stoppedMachineDoesNotSampleLiveMemoryOrBalloon() async {
+    @Test func stoppedMachineDoesNotSampleLiveMemory() async {
         let machine = SmolVMMachine(name: "xe-launcher", state: "stopped", labels: nil, memory: nil, workload: nil, pid: getpid(), memoryMiB: 8192)
         let sample = await VMResourceSampler.snapshot(machine: machine, dataURL: URL(fileURLWithPath: "/tmp/missing-smol-\(UUID().uuidString)"))
         #expect(sample.memoryResidentBytes == nil)
         #expect(sample.memoryLimitBytes == UInt64(8192) * 1024 * 1024)
-        #expect(sample.balloonInflatedBytes == nil)
         #expect(sample.diskAllocatedBytes == nil)
         #expect(sample.diskAvailableBytes == nil)
         #expect(sample.diskFreeInodes == nil)

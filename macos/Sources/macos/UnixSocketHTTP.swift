@@ -16,13 +16,6 @@ enum UnixSocketHTTP {
         }.value
     }
 
-    /// Read-only balloon query. Omitting an argument preserves the VM's target.
-    static func balloonStatus(at socketURL: URL, timeout: Duration = .milliseconds(250)) async -> String? {
-        await Task.detached {
-            exchange(socketURL: socketURL, request: "BALLOON\n", deadline: .now + timeout)
-        }.value
-    }
-
     private static func exchange(socketURL: URL, request: String, deadline: ContinuousClock.Instant) -> String? {
         var address = sockaddr_un()
         let bytes = Array(socketURL.path.utf8) + [0]

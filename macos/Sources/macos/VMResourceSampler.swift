@@ -5,8 +5,6 @@ import Foundation
 struct VMResourceSnapshot: Codable, Equatable, Sendable {
     let memoryResidentBytes: UInt64?
     let memoryLimitBytes: UInt64?
-    let balloonTargetBytes: UInt64?
-    let balloonInflatedBytes: UInt64?
     let diskAllocatedBytes: UInt64?
     let diskLogicalBytes: UInt64?
     let diskTotalBytes: UInt64?
@@ -30,17 +28,11 @@ enum VMResourceSampler {
     static func snapshot(machine: SmolVMMachine?, dataURL: URL = SmolVMPaths.dataURL) async -> VMResourceSnapshot {
         let directory = machineDirectory(named: SmolVMSetup.machineName, dataURL: dataURL)
         let running = machine?.isRunning == true
-        let balloon = running
-            ? await UnixSocketHTTP.balloonStatus(at: directory.appendingPathComponent("control.sock"))
-                .flatMap(parseBalloonStatus)
-            : nil
         let disk = await diskSampler.sample(in: directory)
         let guestDisk = await guestDiskSampler.sample(machine: machine)
         return VMResourceSnapshot(
             memoryResidentBytes: running ? machine?.pid.flatMap(residentMemoryBytes) : nil,
             memoryLimitBytes: machine?.memoryMiB.flatMap { bytes(fromMiB: $0) },
-            balloonTargetBytes: balloon?.target,
-            balloonInflatedBytes: balloon?.inflated,
             diskAllocatedBytes: disk?.allocated,
             diskLogicalBytes: disk?.logical,
             diskTotalBytes: guestDisk?.totalBytes,
@@ -64,17 +56,6 @@ enum VMResourceSampler {
         guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size else { return nil }
         // RSS includes VMM overhead; compressed/swapped pages are not resident.
         return info.pti_resident_size
-    }
-
-    static func parseBalloonStatus(_ response: String) -> (target: UInt64, inflated: UInt64)? {
-        let fields = response.split(whereSeparator: \.isWhitespace)
-        guard fields.count == 3, fields[0] == "OK",
-              fields[1].hasPrefix("target="), fields[2].hasPrefix("actual="),
-              let targetMiB = UInt64(fields[1].dropFirst("target=".count)),
-              let inflatedMiB = UInt64(fields[2].dropFirst("actual=".count)),
-              let target = bytes(fromMiB: targetMiB),
-              let inflated = bytes(fromMiB: inflatedMiB) else { return nil }
-        return (target, inflated)
     }
 
     static func diskUsage(in directory: URL) -> (allocated: UInt64, logical: UInt64)? {
