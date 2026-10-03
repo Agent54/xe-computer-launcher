@@ -152,12 +152,14 @@ struct WorkerdServerTests {
             try await server.start(composeSocketURL: absent, routerSocketURL: absent)
             #expect(server.isRunning)
             let publicPID = try #require(server.processIdentifier)
-            #expect(kill(publicPID, SIGTERM) == 0)
+            // Simulate a crash. SIGTERM starts workerd's graceful connection
+            // drain, whose duration is not part of this restart check.
+            try #require(kill(publicPID, SIGKILL) == 0)
             let deadline = ContinuousClock.now + .seconds(8)
             while server.isRunning && ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
-            #expect(!server.isRunning)
+            try #require(!server.isRunning)
             try await server.start(composeSocketURL: absent, routerSocketURL: absent)
             #expect(server.isRunning)
             let restarted = Process()

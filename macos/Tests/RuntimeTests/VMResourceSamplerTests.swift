@@ -23,6 +23,8 @@ struct VMResourceSamplerTests {
             let bytes = [UInt8](repeating: 1, count: 4096)
             let written = bytes.withUnsafeBytes { write(descriptor, $0.baseAddress, bytes.count) }
             try #require(written == bytes.count)
+            // Settle APFS's delayed allocation before comparing block counts.
+            try #require(fsync(descriptor) == 0)
         }
         let before = try #require(VMResourceSampler.diskUsage(in: root))
         #expect(before.logical == 2 * 1024 * 1024 * 1024)
