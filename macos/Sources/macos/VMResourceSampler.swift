@@ -22,6 +22,7 @@ struct VMGuestDiskSnapshot: Equatable, Sendable {
 }
 
 enum VMResourceSampler {
+    static let guestDiskStatusCommand = ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"]
     private static let diskSampler = VMImageDiskSampler()
     private static let guestDiskSampler = VMGuestDiskSampler()
 
@@ -119,7 +120,7 @@ actor VMGuestDiskSampler {
     init(read: @escaping @Sendable (String) async -> VMGuestDiskSnapshot? = { name in
         guard let result = try? await SmolVMClient.shared.execute(
             in: name,
-            command: ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
+            command: VMResourceSampler.guestDiskStatusCommand,
             timeout: "2s"
         ) else { return nil }
         return VMResourceSampler.parseGuestDiskStatus(result.standardOutput)

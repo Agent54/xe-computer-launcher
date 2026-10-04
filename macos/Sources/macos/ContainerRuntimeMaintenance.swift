@@ -18,22 +18,39 @@ actor ContainerRuntimeMaintenance {
         let imageMinimumAgeHours = 32
         let intervalHours = 4
         let buildCacheLimit = ContainerRuntimeMaintenance.buildCacheMaximum
+        let buildCacheMinimumFreeDiskPercent = ContainerRuntimeMaintenance.buildCacheMinimumFreeDiskPercent
     }
 
     static let loggingDriver = "local"
     static let loggingOptions = ["max-size": "10m", "max-file": "3"]
     static let buildCacheMaximum = "5GB"
-    static let buildCacheReserve = "1GB"
+    // A retained cache floor must not override the free-disk target.
+    static let buildCacheReserve = "0B"
+    static let buildCacheMinimumFreeDiskPercent = 5
     static let cleanupInterval: TimeInterval = 4 * 60 * 60
-    static let cleanupSteps: [(name: String, command: [String])] = [
-        ("Unused image cleanup", [
-            "docker", "image", "prune", "--all", "--force", "--filter", "until=32h",
-        ]),
-        ("Build cache cleanup", [
+
+    private enum CleanupStep: CaseIterable {
+        case images, buildCache
+
+        var name: String {
+            switch self {
+            case .images: "Unused image cleanup"
+            case .buildCache: "Build cache cleanup"
+            }
+        }
+    }
+
+    static func buildCachePruneCommand(diskTotalBytes: UInt64) -> [String] {
+        let percent = UInt64(buildCacheMinimumFreeDiskPercent)
+        // Round up without multiplying the full capacity, which could overflow.
+        let minimumFreeBytes = diskTotalBytes / 100 * percent
+            + (diskTotalBytes % 100 * percent + 99) / 100
+        return [
             "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
             "--max-used-space", buildCacheMaximum, "--reserved-space", buildCacheReserve,
-        ]),
-    ]
+            "--min-free-space", String(minimumFreeBytes),
+        ]
+    }
 
     typealias Execute = @Sendable ([String]) async throws -> SmolVMCommandResult
     typealias Log = @Sendable (String) -> Void
@@ -145,10 +162,25 @@ actor ContainerRuntimeMaintenance {
     private func runCleanup() async {
         defer { cleanupTask = nil }
         guard !Task.isCancelled else { return }
-        for step in Self.cleanupSteps {
+        for step in CleanupStep.allCases {
             do {
                 try Task.checkCancellation()
-                let result = try await execute(step.command)
+                let command: [String]
+                switch step {
+                case .images:
+                    command = ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"]
+                case .buildCache:
+                    let status = try await execute(VMResourceSampler.guestDiskStatusCommand)
+                    try Task.checkCancellation()
+                    guard status.exitCode == 0,
+                          let disk = VMResourceSampler.parseGuestDiskStatus(status.standardOutput) else {
+                        throw NSError(domain: "RuntimeMaintenance", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: "Could not read Docker filesystem capacity for cache cleanup.",
+                        ])
+                    }
+                    command = Self.buildCachePruneCommand(diskTotalBytes: disk.totalBytes)
+                }
+                let result = try await execute(command)
                 try Task.checkCancellation()
                 guard result.exitCode == 0 else {
                     throw NSError(domain: "RuntimeMaintenance", code: Int(result.exitCode), userInfo: [

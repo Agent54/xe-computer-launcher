@@ -174,7 +174,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 stateURL: SmolVMPaths.dataURL.appendingPathComponent("maintenance.json"),
                 execute: { command in
                     try await maintenanceClient.execute(
-                        in: SmolVMSetup.machineName, command: command, timeout: "120s"
+                        in: SmolVMSetup.machineName, command: command,
+                        timeout: command == VMResourceSampler.guestDiskStatusCommand ? "2s" : "120s"
                     )
                 },
                 log: { ExternalState.shared.appendLog("maintenance", $0) }

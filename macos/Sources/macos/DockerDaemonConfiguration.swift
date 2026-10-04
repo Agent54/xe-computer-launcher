@@ -38,8 +38,8 @@ enum DockerDaemonConfiguration {
         var gc = builder["gc"] as? [String: Any] ?? [:]
         gc["enabled"] = true
         gc["defaultMaxUsedSpace"] = ContainerRuntimeMaintenance.buildCacheMaximum
-        // A disk-relative reserve can exceed the maximum when the VM disk grows.
         gc["defaultReservedSpace"] = ContainerRuntimeMaintenance.buildCacheReserve
+        gc["defaultMinFreeSpace"] = "\(ContainerRuntimeMaintenance.buildCacheMinimumFreeDiskPercent)%"
         // Use Docker's standard GC policies with this budget. Custom policies
         // and the legacy reserve setting can override the configured maximum.
         gc.removeValue(forKey: "policy")
