@@ -112,3 +112,45 @@ Deno.test('cleanup proxies only fixed host operations and rejects cross-site req
   assert.equal((await management.fetch(new Request(url, { method: 'POST', body: '{"command":"anything"}' }), env)).status, 202);
   assert.deepEqual(operations, ['GET /status', 'POST /cleanup']);
 });
+
+Deno.test('cleanup refreshes cached disk data without invalidating on every status poll', async () => {
+  let inventoryReads = 0;
+  let scanReads = 0;
+  const completedAt = '2026-10-04T06:05:19Z';
+  const env = {
+    DOCKER: { fetch: (input: string) => {
+      const path = new URL(input).pathname;
+      if (path === '/system/df') {
+        scanReads++;
+        return Promise.resolve(Response.json({ LayersSize: 42 }));
+      }
+      inventoryReads++;
+      return Promise.resolve(Response.json(path === '/volumes' ? { Volumes: [] } : []));
+    } },
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ phase: 'healthy', message: 'Ready' })) },
+    MAINTENANCE: { fetch: (_input: string, init: RequestInit) => Promise.resolve(Response.json({
+      running: init.method === 'POST', completedAt, results: [],
+    }, { status: init.method === 'POST' ? 202 : 200 })) },
+  };
+  const base = 'http://compose-ui.localhost/v1.24/disk-usage';
+  const request = (suffix = '', method = 'GET') => management.fetch(new Request(base + suffix, { method }), env);
+  assert.equal((await request('/scan', 'POST')).status, 200);
+  assert.equal((await (await request()).json()).report.categories[0].totalBytes, 42);
+  assert.equal(inventoryReads, 3);
+  assert.equal(scanReads, 1);
+
+  assert.equal((await request('/cleanup')).status, 200);
+  assert.equal((await (await request()).json()).report, undefined);
+  assert.equal(inventoryReads, 6);
+  assert.equal((await request('/cleanup')).status, 200);
+  await request();
+  assert.equal(inventoryReads, 6);
+
+  assert.equal((await request('/scan', 'POST')).status, 200);
+  assert.equal(scanReads, 2);
+  assert.equal((await request('/cleanup', 'POST')).status, 202);
+  assert.equal((await (await request()).json()).report, undefined);
+  assert.equal(inventoryReads, 9);
+  assert.equal((await request('/scan', 'POST')).status, 200);
+  assert.equal(scanReads, 3);
+});

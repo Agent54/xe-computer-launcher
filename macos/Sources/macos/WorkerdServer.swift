@@ -124,6 +124,8 @@ final class WorkerdServer {
     private let assetsURL: URL
     private let stateURL: URL
     private let runtimeStatusURL: URL
+    private let maintenanceSocketURL: URL
+    private let dockerSocketURL: URL
     private let managementPort: UInt16
     private let routingPort: UInt16
     private let tlsPort: UInt16
@@ -143,6 +145,8 @@ final class WorkerdServer {
          portHelperURL: URL = WorkerdPaths.portHelperURL,
          assetsURL: URL = WorkerdPaths.assetsURL, stateURL: URL = WorkerdPaths.stateURL,
          runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
+         maintenanceSocketURL: URL = ContainerMaintenanceServer.socketURL,
+         dockerSocketURL: URL = SmolVMSetup.dockerSocketURL,
          managementPort: UInt16 = 8094, routingPort: UInt16 = WorkerdPorts.defaultHTTP,
          tlsPort: UInt16 = WorkerdPorts.defaultHTTPS,
          acquirePrivilegedSockets: @escaping @Sendable () async throws -> PrivilegedPortSockets = { try await PrivilegedPortService.acquire() },
@@ -153,6 +157,8 @@ final class WorkerdServer {
         self.assetsURL = assetsURL
         self.stateURL = stateURL
         self.runtimeStatusURL = runtimeStatusURL
+        self.maintenanceSocketURL = maintenanceSocketURL
+        self.dockerSocketURL = dockerSocketURL
         self.managementPort = managementPort
         self.routingPort = routingPort
         self.tlsPort = tlsPort
@@ -238,8 +244,8 @@ final class WorkerdServer {
             "--directory-path", "assets=\(assetsURL.path)",
             "--directory-path", "status=\(runtimeStatusURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",
-            "--external-addr", "docker=unix:\(SmolVMSetup.dockerSocketURL.path)",
-            "--external-addr", "maintenance=unix:\(ContainerMaintenanceServer.socketURL.path)",
+            "--external-addr", "docker=unix:\(dockerSocketURL.path)",
+            "--external-addr", "maintenance=unix:\(maintenanceSocketURL.path)",
             "--external-addr", "router=unix:\(routerSocketURL.path)",
             "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
         if privilegedSockets != nil {

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Synchronization
 import Testing
 @testable import macos
 
@@ -50,10 +51,23 @@ struct WorkerdServerTests {
         var tlsPort = try freePort()
         while tlsPort == managementPort || tlsPort == routingPort { tlsPort = try freePort() }
         let runtimeStatus = root.appendingPathComponent("runtime-status", isDirectory: true)
+        let maintenanceSocket = root.appendingPathComponent("maintenance.sock")
+        let cleanupRuns = Mutex(0)
+        let maintenance = ContainerMaintenanceServer(socketURL: maintenanceSocket) { run in
+            if run { cleanupRuns.withLock { $0 += 1 } }
+            return ContainerMaintenanceServer.Reply(
+                status: run ? 202 : 200,
+                body: Data("{\"running\":\(run),\"completedAt\":\"2026-10-04T06:05:19Z\",\"results\":[]}".utf8)
+            )
+        }
+        try maintenance.start()
+        defer { maintenance.stop() }
         let logs = LogCollector()
         let server = WorkerdServer(executableURL: binary, configURL: config,
                                   assetsURL: assets, stateURL: root,
                                   runtimeStatusURL: runtimeStatus,
+                                  maintenanceSocketURL: maintenanceSocket,
+                                  dockerSocketURL: root.appendingPathComponent("missing-docker.sock"),
                                   managementPort: managementPort, routingPort: routingPort,
                                   tlsPort: tlsPort, log: { logs.lines.append($0) })
         let absent = root.appendingPathComponent("missing.sock")
@@ -75,6 +89,24 @@ struct WorkerdServerTests {
             let (html, response) = try await session.data(for: request)
             #expect((response as? HTTPURLResponse)?.statusCode == 200)
             #expect(html == (try Data(contentsOf: assets.appendingPathComponent("index.html"))))
+            try Data(#"{"phase":"healthy","message":"Ready"}"#.utf8)
+                .write(to: runtimeStatus.appendingPathComponent("status.json"))
+            // Initialize disk tracking before cleanup, even with Docker unavailable.
+            var inventoryRequest = URLRequest(url: server.uiURL.appendingPathComponent("v1.24/disk-usage"))
+            inventoryRequest.setValue("127.0.0.1:8094", forHTTPHeaderField: "Host")
+            let (_, inventoryResponse) = try await session.data(for: inventoryRequest)
+            #expect((inventoryResponse as? HTTPURLResponse)?.statusCode == 503)
+            var cleanupRequest = URLRequest(url: server.uiURL.appendingPathComponent("v1.24/disk-usage/cleanup"))
+            cleanupRequest.setValue("127.0.0.1:8094", forHTTPHeaderField: "Host")
+            let (statusBody, statusResponse) = try await session.data(for: cleanupRequest)
+            #expect((statusResponse as? HTTPURLResponse)?.statusCode == 200,
+                    "cleanup status: \(String(decoding: statusBody, as: UTF8.self)); logs: \(logs.lines.joined(separator: " | "))")
+            #expect(cleanupRuns.withLock { $0 } == 0)
+            cleanupRequest.httpMethod = "POST"
+            let (cleanupBody, cleanupResponse) = try await session.data(for: cleanupRequest)
+            #expect((cleanupResponse as? HTTPURLResponse)?.statusCode == 202,
+                    "cleanup trigger: \(String(decoding: cleanupBody, as: UTF8.self)); logs: \(logs.lines.joined(separator: " | "))")
+            #expect(cleanupRuns.withLock { $0 } == 1)
             var publicHTTP = URLRequest(url: URL(string: "http://127.0.0.1:\(routingPort)/")!)
             publicHTTP.setValue("compose-ui.localhost:\(routingPort)", forHTTPHeaderField: "Host")
             let (publicHTML, publicResponse) = try await session.data(for: publicHTTP)

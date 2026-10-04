@@ -48,8 +48,9 @@ export default {
           if (cleanup.completedAt) maintenanceCompletions.set(env.DOCKER, cleanup.completedAt);
         }
         return Response.json(cleanup, { status: response.status, headers: { 'Cache-Control': 'no-store' } });
-      } catch {
-        return Response.json({ message: 'Cleanup requires an updated Xe Launcher.' }, { status: 503 });
+      } catch (error) {
+        console.error('Cleanup service request failed:', error);
+        return Response.json({ message: 'Cleanup service unavailable.' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
       }
     }
     if (url.pathname === '/v1.24/disk-usage' || url.pathname === '/v1.24/disk-usage/scan') {
