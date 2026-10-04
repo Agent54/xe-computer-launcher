@@ -37,8 +37,12 @@ enum SmolVMSetup {
             removeStaleSocketIfPresent()
         }
         try Task.checkCancellation()
+        let currentDiskGiB = existing != nil
+            ? try await client.machineStatus(named: machineName).storageGiB : nil
+        let diskGiB = configuredResources.diskGiB(preserving: currentDiskGiB)
         let dockerConfigurationVolume = try DockerDaemonConfiguration.prepare(
-            in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true)
+            in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true),
+            diskGiB: diskGiB
         )
 
         if existing == nil {
@@ -48,7 +52,7 @@ enum SmolVMSetup {
                 artifactURL: SmolVMPaths.composeArtifactURL,
                 memoryMiB: configuredResources.memoryMiB,
                 cpus: configuredResources.cpus,
-                storageGiB: UInt64(configuredResources.diskGiB),
+                storageGiB: diskGiB,
                 networkBackend: "virtio-net",
                 volumes: [
                     "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro",
@@ -67,10 +71,9 @@ enum SmolVMSetup {
             )
             try await client.createMachine(spec)
         } else {
-            let stopped = try await client.machineStatus(named: machineName)
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
-                storageGiB: configuredResources.diskGiB(preserving: stopped.storageGiB),
+                storageGiB: diskGiB,
                 volumes: [stacksVolume, dockerConfigurationVolume]
             )
         }

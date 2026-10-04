@@ -40,11 +40,15 @@ actor ContainerRuntimeMaintenance {
         }
     }
 
-    static func buildCachePruneCommand(diskTotalBytes: UInt64) -> [String] {
+    static func buildCacheMinimumFreeBytes(diskTotalBytes: UInt64) -> UInt64 {
         let percent = UInt64(buildCacheMinimumFreeDiskPercent)
         // Round up without multiplying the full capacity, which could overflow.
-        let minimumFreeBytes = diskTotalBytes / 100 * percent
+        return diskTotalBytes / 100 * percent
             + (diskTotalBytes % 100 * percent + 99) / 100
+    }
+
+    static func buildCachePruneCommand(diskTotalBytes: UInt64) -> [String] {
+        let minimumFreeBytes = buildCacheMinimumFreeBytes(diskTotalBytes: diskTotalBytes)
         return [
             "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
             "--max-used-space", buildCacheMaximum, "--reserved-space", buildCacheReserve,

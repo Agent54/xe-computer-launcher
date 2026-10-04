@@ -4,7 +4,7 @@ enum DockerDaemonConfiguration {
     static let guestDirectory = "/etc/docker"
 
     /// Prepare the host-owned configuration before boot and return its read-only mount.
-    static func prepare(in directoryURL: URL) throws -> String {
+    static func prepare(in directoryURL: URL, diskGiB: UInt64) throws -> String {
         let configurationURL = directoryURL.appendingPathComponent("daemon.json")
         let current: Data
         do {
@@ -12,7 +12,7 @@ enum DockerDaemonConfiguration {
         } catch CocoaError.fileReadNoSuchFile {
             current = Data("{}".utf8)
         }
-        if let updated = try updatedConfiguration(current) {
+        if let updated = try updatedConfiguration(current, diskGiB: diskGiB) {
             let fm = FileManager.default
             try fm.createDirectory(
                 at: directoryURL,
@@ -25,7 +25,9 @@ enum DockerDaemonConfiguration {
         return "\(directoryURL.path):\(guestDirectory):ro"
     }
 
-    static func updatedConfiguration(_ data: Data) throws -> Data? {
+    static func updatedConfiguration(_ data: Data, diskGiB: UInt64) throws -> Data? {
+        let (diskTotalBytes, overflow) = diskGiB.multipliedReportingOverflow(by: 1 << 30)
+        guard diskGiB > 0, !overflow else { throw DockerDaemonConfigurationError.invalidCapacity }
         guard let current = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw DockerDaemonConfigurationError.invalidConfiguration
         }
@@ -39,7 +41,10 @@ enum DockerDaemonConfiguration {
         gc["enabled"] = true
         gc["defaultMaxUsedSpace"] = ContainerRuntimeMaintenance.buildCacheMaximum
         gc["defaultReservedSpace"] = ContainerRuntimeMaintenance.buildCacheReserve
-        gc["defaultMinFreeSpace"] = "\(ContainerRuntimeMaintenance.buildCacheMinimumFreeDiskPercent)%"
+        // Docker 28 validates percentages but its BuildKit startup parser only accepts byte sizes.
+        gc["defaultMinFreeSpace"] = String(
+            ContainerRuntimeMaintenance.buildCacheMinimumFreeBytes(diskTotalBytes: diskTotalBytes)
+        )
         // Use Docker's standard GC policies with this budget. Custom policies
         // and the legacy reserve setting can override the configured maximum.
         gc.removeValue(forKey: "policy")
@@ -52,10 +57,14 @@ enum DockerDaemonConfiguration {
     }
 }
 
-enum DockerDaemonConfigurationError: LocalizedError {
+enum DockerDaemonConfigurationError: LocalizedError, Equatable {
     case invalidConfiguration
+    case invalidCapacity
 
     var errorDescription: String? {
-        "The Docker daemon configuration must be a JSON object."
+        switch self {
+        case .invalidConfiguration: "The Docker daemon configuration must be a JSON object."
+        case .invalidCapacity: "The Docker data disk capacity is invalid."
+        }
     }
 }
