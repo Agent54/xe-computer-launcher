@@ -199,9 +199,11 @@ actor ContainerRuntimeSupervisor {
             return result
         } catch {
             state = .failed
+            let detail = error.localizedDescription
+            log("Container runtime failed to start: \(detail)")
             await publish(
                 phase: .failed,
-                message: "Container runtime failed to start",
+                message: detail,
                 reason: "startup_failure"
             )
             throw error

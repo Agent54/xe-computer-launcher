@@ -262,6 +262,38 @@ struct ContainerRuntimeSupervisorTests {
         #expect(await fixture.routerResets == 0)
     }
 
+    @Test func startupFailurePublishesAndRetainsTheActualDockerError() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent(".build/runtime-startup-tests/\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logStore = SystemLogStore(directoryURL: root.appendingPathComponent("logs"))
+        let failure = SmolVMSetupError.dockerStartupFailed("error initializing buildkit: invalid suffix: %")
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { throw failure },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
+            onStatusChanged: { _ in },
+            log: { logStore.append("runtime", $0) }
+        )
+        do {
+            _ = try await supervisor.start()
+            Issue.record("Startup should have failed")
+        } catch {
+            #expect(error.localizedDescription == failure.localizedDescription)
+        }
+        let snapshot = await supervisor.snapshot()
+        #expect(snapshot.phase == .failed)
+        #expect(snapshot.message == failure.localizedDescription)
+        let persisted = try JSONDecoder.withISO8601Dates.decode(
+            ContainerRuntimeSnapshot.self, from: Data(contentsOf: root.appendingPathComponent("status.json"))
+        )
+        #expect(persisted.message == failure.localizedDescription)
+        await logStore.flush()
+        let reopened = SystemLogStore(directoryURL: logStore.directoryURL)
+        #expect(await reopened.history(sources: ["runtime"]).entries.last?.line.contains(failure.localizedDescription) == true)
+    }
+
     @Test func machineStatusDecodesOldAndDiagnosticJSON() throws {
         let old = Data(#"{"name":"test","state":"running","labels":{}}"#.utf8)
         let oldMachine = try JSONDecoder().decode(SmolVMMachine.self, from: old)

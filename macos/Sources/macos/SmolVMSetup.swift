@@ -79,7 +79,12 @@ enum SmolVMSetup {
         }
 
         try Task.checkCancellation()
-        try await client.startMachine(named: machineName)
+        await RuntimeLogCollector.shared.beginAttempt()
+        do { try await client.startMachine(named: machineName) }
+        catch {
+            await RuntimeLogCollector.shared.collect(flushPartial: true)
+            throw error
+        }
         try await waitForDocker()
 
         return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
@@ -87,15 +92,32 @@ enum SmolVMSetup {
 
     private static func waitForDocker() async throws {
         let deadline = ContinuousClock.now + .seconds(90)
+        var nextDiagnostics = ContinuousClock.now
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             if await UnixSocketHTTP.isReady(at: dockerSocketURL) {
                 try Task.checkCancellation()
                 return
             }
+            if ContinuousClock.now >= nextDiagnostics {
+                await RuntimeLogCollector.shared.collect()
+                if let machine = try? await SmolVMClient.shared.machineStatus(named: machineName),
+                   !machine.isRunning || machine.workload?.state == "exited" {
+                    await RuntimeLogCollector.shared.collect(flushPartial: true)
+                    let detail = await RuntimeLogCollector.shared.failureDetail()
+                        ?? machine.workload?.lastExitReason
+                        ?? "Docker workload exited before its API became ready."
+                    throw SmolVMSetupError.dockerStartupFailed(detail)
+                }
+                nextDiagnostics = ContinuousClock.now + .seconds(2)
+            }
             try await Task.sleep(for: .milliseconds(250))
         }
 
+        await RuntimeLogCollector.shared.collect(flushPartial: true)
+        if let detail = await RuntimeLogCollector.shared.failureDetail() {
+            throw SmolVMSetupError.dockerStartupFailed(detail)
+        }
         throw SmolVMSetupError.dockerSocketUnavailable(dockerSocketURL.path)
     }
 
@@ -119,6 +141,7 @@ enum SmolVMSetup {
 enum SmolVMSetupError: LocalizedError, Sendable {
     case virtualizationUnavailable
     case dockerSocketUnavailable(String)
+    case dockerStartupFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -126,6 +149,8 @@ enum SmolVMSetupError: LocalizedError, Sendable {
             return VirtualizationSupport.unavailableWarning
         case .dockerSocketUnavailable(let path):
             return "SmolVM started, but its Docker API did not become ready at \(path)."
+        case .dockerStartupFailed(let detail):
+            return "Docker startup failed: \(detail)"
         }
     }
 }

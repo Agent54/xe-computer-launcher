@@ -630,7 +630,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             } catch {
                 ExternalState.shared.appendLog(
                     "launcher",
-                    "Warning: container services unavailable: \(error.localizedDescription). Xe Launcher will continue without container services."
+                    "Container startup failed: \(error.localizedDescription)"
                 )
             }
         }
@@ -699,6 +699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 do { try await GuestRouter.shared.reconcile() }
                 catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
+                await RuntimeLogCollector.shared.collect()
                 await runtimeSupervisor.reconcile()
                 if let composeServer {
                     do { try await composeServer.start(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
@@ -834,6 +835,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     "launcher",
                     "Shutdown complete in \(Self.elapsedDescription(since: shutdownStartedAt))"
                 )
+                await ExternalState.shared.logStore.flush()
                 finishTermination(sender)
             }
         }

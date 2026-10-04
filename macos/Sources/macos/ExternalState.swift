@@ -22,7 +22,6 @@ final class ExternalState: @unchecked Sendable {
         isDevelopment ? xeComputerDevelopmentShimAppName : xeComputerShimAppName
     }
 
-    private static let logBufferSize = 1000
     private static let requiredChromeFlags = [
         "enable-desktop-pwas-additional-windowing-controls@1",
         "enable-desktop-pwas-borderless@1",
@@ -46,11 +45,7 @@ final class ExternalState: @unchecked Sendable {
         let path: String
     }
 
-    struct LogEntry {
-        let source: String
-        let line: String
-        let timestamp: Date
-    }
+    typealias LogEntry = SystemLogStore.Entry
 
     struct Settings: Codable {
         let rawData: [String: Any]?
@@ -164,7 +159,7 @@ final class ExternalState: @unchecked Sendable {
         return isSubprocessRunning("browser")
     }
 
-    private var allLogs: [LogEntry] = []
+    let logStore = SystemLogStore(directoryURL: ExternalState.appDataURL.appendingPathComponent("logs", isDirectory: true))
 
     static let shared = ExternalState()
     private init() {}
@@ -362,25 +357,11 @@ final class ExternalState: @unchecked Sendable {
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
-        if let source {
-            return allLogs.filter { $0.source == source }
-        }
-        return allLogs
-    }
-
-    func clearLogs(source: String? = nil) {
-        if let source {
-            allLogs.removeAll { $0.source == source }
-        } else {
-            allLogs.removeAll()
-        }
+        logStore.snapshot(sources: source.map { [$0] }).entries
     }
 
     func appendLog(_ source: String, _ line: String) {
-        if allLogs.count >= Self.logBufferSize {
-            allLogs.removeFirst(allLogs.count - Self.logBufferSize + 1)
-        }
-        allLogs.append(LogEntry(source: source, line: line, timestamp: Date()))
+        logStore.append(source, line)
     }
 
 
