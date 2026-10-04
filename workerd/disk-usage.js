@@ -5,30 +5,71 @@ const list = value => Array.isArray(value) ? value : [];
 const sum = values => values.reduce((total, value) => total + (value ?? 0), 0);
 const containerName = row => list(row.Names)[0]?.replace(/^\//, '') || row.Id?.slice(0, 12) || 'Unnamed container';
 const inactive = state => ['created', 'exited', 'dead'].includes(state);
+const composeService = row => {
+  const service = row.Labels?.['com.docker.compose.service'];
+  return service ? { project: row.Labels?.['com.docker.compose.project'], name: service } : undefined;
+};
+const serviceKey = service => JSON.stringify([service.project ?? '', service.name]);
+const lastUsedAt = value => {
+  if (typeof value !== 'string' || value.startsWith('0001-')) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+};
 
 export function summarizeDiskUsage(data, sampledAt) {
   const images = list(data.Images);
   const containers = list(data.Containers);
   const volumes = list(data.Volumes);
   const cache = [...new Map(list(data.BuildCache).map(row => [row.ID, row])).values()];
+  // Attribute from labels and references already returned by /system/df, including stopped containers.
+  const imageOwners = new Map();
+  const volumeOwners = new Map();
+  const addOwner = (map, key, owner) => {
+    if (!key) return;
+    if (!map.has(key)) map.set(key, new Map());
+    map.get(key).set(owner.key, owner.service);
+  };
+  for (const row of containers) {
+    const service = composeService(row);
+    const owner = { key: service ? serviceKey(service) : `container:${row.Id}`, service };
+    addOwner(imageOwners, row.ImageID, owner);
+    for (const mount of list(row.Mounts)) {
+      if (mount.Type === 'volume') addOwner(volumeOwners, mount.Name, owner);
+    }
+  }
+  const attribution = (row, owners, dangling = false) => {
+    const references = owners ? [...owners.values()] : [];
+    const services = references.filter(Boolean).sort((a, b) => serviceKey(a).localeCompare(serviceKey(b)));
+    if (references.length > 1) return { group: 'shared', services, lastUsedAt: undefined };
+    if (dangling && references.length === 0) return { group: 'dangling', services, lastUsedAt: undefined };
+    const service = references.length ? references[0] : composeService(row);
+    return service ? { group: 'service', services: [service], lastUsedAt: undefined } : { group: 'other', services, lastUsedAt: undefined };
+  };
   const items = [
     ...images.map(row => ({
+      id: `images:${row.Id}`,
+      ...attribution(row, imageOwners.get(row.Id), row.Containers === 0 && !list(row.RepoTags).some(tag => tag !== '<none>:<none>')),
       kind: 'images', name: list(row.RepoTags).filter(tag => tag !== '<none>:<none>').join(', ') || row.Id?.slice(7, 19) || 'Untagged image',
       bytes: bytes(row.Size), reclaimableBytes: row.Containers > 0 ? 0 : row.Containers === 0 && bytes(row.SharedSize) !== undefined && bytes(row.Size) !== undefined
         ? Math.max(0, row.Size - row.SharedSize) : undefined,
       candidate: row.Containers === 0, detail: `${row.Containers ?? 'Unknown'} container references; ${bytes(row.SharedSize) ?? 'unknown'} shared bytes`,
     })),
     ...containers.map(row => ({
+      id: `containers:${row.Id}`, ...attribution(row),
       kind: 'containers', name: containerName(row), bytes: bytes(row.SizeRw),
       reclaimableBytes: inactive(row.State) ? bytes(row.SizeRw) : 0,
       candidate: inactive(row.State), detail: `${row.State || 'Unknown state'} · ${row.Labels?.['com.docker.compose.project'] || 'No Compose project'}`,
     })),
     ...volumes.map(row => ({
+      id: `volumes:${row.Name}`,
+      ...attribution(row, volumeOwners.get(row.Name), row.UsageData?.RefCount === 0),
       kind: 'volumes', name: row.Name, bytes: bytes(row.UsageData?.Size),
       reclaimableBytes: row.UsageData?.RefCount === 0 ? bytes(row.UsageData?.Size) : 0,
       candidate: row.UsageData?.RefCount === 0, detail: `${row.UsageData?.RefCount ?? 'Unknown'} container references · ${row.Driver || 'Unknown driver'}`,
     })),
     ...cache.map(row => ({
+      id: `build-cache:${row.ID}`, group: row.Shared === true ? 'shared' : 'build-cache', services: [],
+      lastUsedAt: lastUsedAt(row.LastUsedAt),
       kind: 'build-cache', name: row.Description || row.ID, bytes: bytes(row.Size),
       reclaimableBytes: row.InUse === false && row.Shared === false ? bytes(row.Size) : 0,
       candidate: row.InUse === false, detail: row.InUse ? 'In use' : row.Shared ? 'Unused; shares image layers' : 'Unused build cache',

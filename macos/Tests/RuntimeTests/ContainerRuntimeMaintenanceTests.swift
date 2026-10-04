@@ -21,7 +21,9 @@ struct ContainerRuntimeMaintenanceTests {
         let execute: ContainerRuntimeMaintenance.Execute = { command in
             commands.withLock { $0.append(command) }
             return SmolVMCommandResult(
-                standardOutput: "Deleted Images:\nsha256:example\nTotal reclaimed space: 10MB\n",
+                standardOutput: command.contains("buildx")
+                    ? "ID\tRECLAIMABLE\tSIZE\tLAST ACCESSED\nexample\ttrue\t10MB\t24 hours ago\nTotal:\t10MB\n"
+                    : "Deleted Images:\nsha256:example\nTotal reclaimed space: 10MB\n",
                 standardError: "", exitCode: 0
             )
         }
@@ -33,9 +35,10 @@ struct ContainerRuntimeMaintenanceTests {
         await first.value
         #expect(commands.withLock { $0 } == [
             ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"],
-            ["docker", "builder", "prune", "--all", "--force", "--keep-storage", "5GB"],
+            ["docker", "buildx", "prune", "--builder", "default", "--all", "--force",
+             "--max-used-space", "5GB", "--reserved-space", "1GB"],
         ])
-        #expect(logs.withLock { $0.last } == "Build cache cleanup completed: Total reclaimed space: 10MB")
+        #expect(logs.withLock { $0.last } == "Build cache cleanup completed: Total:\t10MB")
         let completed = await maintenance.snapshot()
         #expect(!completed.running)
         #expect(completed.completedAt == clock.withLock { $0 })
@@ -90,7 +93,10 @@ struct ContainerRuntimeMaintenanceTests {
         let commands = Mutex<[[String]]>([])
         let execute: ContainerRuntimeMaintenance.Execute = { command in
             commands.withLock { $0.append(command) }
-            return SmolVMCommandResult(standardOutput: "Total reclaimed space: 1.25GB\n", standardError: "", exitCode: 0)
+            return SmolVMCommandResult(
+                standardOutput: command.contains("buildx") ? "Total:\t1.25GB\n" : "Total reclaimed space: 1.25GB\n",
+                standardError: "", exitCode: 0
+            )
         }
         let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: execute, now: { clock }, log: { _ in })
         #expect(await maintenance.reconcile() == nil)
@@ -103,6 +109,17 @@ struct ContainerRuntimeMaintenanceTests {
         #expect(snapshot.results.map(\.reclaimedBytes) == [1_250_000_000, 1_250_000_000])
         #expect(snapshot.nextRunAt == clock.addingTimeInterval(4 * 60 * 60))
         #expect(await restored.reconcile() == nil)
+    }
+
+    @Test(arguments: ["Total:\t0B", "Total reclaimed space: 0B", "  Total:\t0B\r\n"])
+    func zeroReclaimedSpaceIsReported(output: String) {
+        #expect(ContainerRuntimeMaintenance.reclaimedBytes(output) == 0)
+    }
+
+    @Test func unrecognizedReclaimedTotalsRemainUnavailable() {
+        #expect(ContainerRuntimeMaintenance.reclaimedBytes("Total:\tunknown") == nil)
+        #expect(ContainerRuntimeMaintenance.reclaimedBytes("Total:\t-1GB") == nil)
+        #expect(ContainerRuntimeMaintenance.reclaimedBytes("Size:\t1GB") == nil)
     }
 
     @Test func cleanupDoesNotOverlapAndPausesBeforeVMShutdown() async throws {

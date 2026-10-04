@@ -30,7 +30,8 @@ actor ContainerRuntimeMaintenance {
             "docker", "image", "prune", "--all", "--force", "--filter", "until=32h",
         ]),
         ("Build cache cleanup", [
-            "docker", "builder", "prune", "--all", "--force", "--keep-storage", buildCacheMaximum,
+            "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
+            "--max-used-space", buildCacheMaximum, "--reserved-space", buildCacheReserve,
         ]),
     ]
 
@@ -156,9 +157,10 @@ actor ContainerRuntimeMaintenance {
                     ])
                 }
                 let reclaimed = result.standardOutput.split(separator: "\n")
-                    .last { $0.hasPrefix("Total reclaimed space:") }
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .last { $0.hasPrefix("Total reclaimed space:") || $0.hasPrefix("Total:") }
                 results.append(StepResult(name: step.name,
-                                          reclaimedBytes: reclaimed.flatMap { Self.reclaimedBytes(String($0)) },
+                                          reclaimedBytes: reclaimed.flatMap { Self.reclaimedBytes($0) },
                                           error: nil))
                 log(step.name + " completed" + (reclaimed.map { ": \($0)" } ?? ""))
             } catch is CancellationError {
@@ -176,8 +178,11 @@ actor ContainerRuntimeMaintenance {
     }
 
     static func reclaimedBytes(_ line: String) -> UInt64? {
-        let value = line.replacingOccurrences(of: "Total reclaimed space:", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let prefix = ["Total reclaimed space:", "Total:"].first(where: { line.hasPrefix($0) }) else {
+            return nil
+        }
+        let value = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
         let number = value.prefix { $0.isNumber || $0 == "." }
         let unit = value.dropFirst(number.count).trimmingCharacters(in: .whitespaces).lowercased()
         let factors: [String: Double] = ["b": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,

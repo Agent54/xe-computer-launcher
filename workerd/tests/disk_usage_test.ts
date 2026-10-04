@@ -79,6 +79,69 @@ Deno.test('reclaim estimates exclude shared layers, running containers and unkno
   assert.equal(report.categories[3].reclaimableBytes, 7);
 });
 
+Deno.test('storage ownership groups Compose services, shared references and genuinely dangling objects', () => {
+  const labels = (project: string, service: string) => ({ 'com.docker.compose.project': project, 'com.docker.compose.service': service });
+  const report = summarizeDiskUsage({
+    Images: [
+      { Id: 'web', RepoTags: ['app:web'], Containers: 2 },
+      { Id: 'shared', RepoTags: ['base:latest'], Containers: 3 },
+      { Id: 'stopped', RepoTags: ['<none>:<none>'], Containers: 1 },
+      { Id: 'dangling', RepoTags: ['<none>:<none>'], Containers: 0 },
+      { Id: 'tagged-unused', RepoTags: ['old:latest'], Containers: 0 },
+      { Id: 'labelled', RepoTags: ['app:worker'], Containers: 0, Labels: labels('app', 'worker') },
+    ],
+    Containers: [
+      { Id: 'web1', ImageID: 'web', Labels: labels('app', 'web'), Mounts: [{ Type: 'volume', Name: 'private' }, { Type: 'volume', Name: 'shared-data' }] },
+      { Id: 'web2', ImageID: 'web', State: 'exited', Labels: labels('app', 'web') },
+      { Id: 'base1', ImageID: 'shared', Labels: labels('app', 'web') },
+      { Id: 'base2', ImageID: 'shared', Labels: labels('other-app', 'web'), Mounts: [{ Type: 'volume', Name: 'shared-data' }] },
+      { Id: 'base3', ImageID: 'shared' },
+      { Id: 'old', ImageID: 'stopped', State: 'exited', Labels: labels('app', 'db') },
+    ],
+    Volumes: [
+      { Name: 'private', UsageData: { RefCount: 1 } },
+      { Name: 'shared-data', UsageData: { RefCount: 2 } },
+      { Name: 'orphan', UsageData: { RefCount: 0 } },
+    ],
+  }, 'now');
+  const item = (id: string) => report.items.find(row => row.id === id)!;
+  assert.equal(item('images:web').group, 'service');
+  assert.deepEqual(item('images:web').services, [{ project: 'app', name: 'web' }]);
+  assert.equal(item('images:shared').group, 'shared');
+  assert.deepEqual(item('images:shared').services, [{ project: 'app', name: 'web' }, { project: 'other-app', name: 'web' }]);
+  assert.equal(item('images:stopped').group, 'service');
+  assert.equal(item('images:stopped').candidate, false);
+  assert.equal(item('images:dangling').group, 'dangling');
+  assert.equal(item('images:tagged-unused').group, 'other');
+  assert.equal(item('images:labelled').group, 'service');
+  assert.equal(item('containers:web2').group, 'service');
+  assert.equal(item('volumes:private').group, 'service');
+  assert.equal(item('volumes:shared-data').group, 'shared');
+  assert.equal(item('volumes:orphan').group, 'dangling');
+});
+
+Deno.test('cache stays unattributed and last-used dates are never inferred from creation time', () => {
+  const report = summarizeDiskUsage({
+    Images: [{ Id: 'image', Created: 1700000000 }],
+    Containers: [{ Id: 'container', Created: 1700000000 }],
+    BuildCache: [
+      { ID: 'shared', Shared: true, InUse: false, Size: 100, LastUsedAt: '2026-10-03T08:00:00+02:00' },
+      { ID: 'private', Shared: false, InUse: false, Size: 50, Description: 'app/web COPY . .', CreatedAt: '2026-10-03T06:00:00Z' },
+      { ID: 'zero-time', LastUsedAt: '0001-01-01T00:00:00Z' },
+      { ID: 'bad-time', LastUsedAt: 'invalid' },
+      { ID: 'null-time', LastUsedAt: null },
+    ],
+  }, 'now');
+  const shared = report.items.find(row => row.id === 'build-cache:shared')!;
+  assert.equal(shared.group, 'shared');
+  assert.equal(shared.reclaimableBytes, 0);
+  assert.equal(shared.lastUsedAt, '2026-10-03T06:00:00.000Z');
+  const privateCache = report.items.find(row => row.id === 'build-cache:private')!;
+  assert.equal(privateCache.group, 'build-cache');
+  assert.equal(privateCache.reclaimableBytes, 50);
+  assert(report.items.filter(row => row !== shared).every(row => row.lastUsedAt === undefined));
+});
+
 Deno.test('disk routes require the right method and reject cross-site scan triggers', async () => {
   let reads = 0;
   const env = {
