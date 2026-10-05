@@ -75,7 +75,7 @@ final class ComposeServer {
         )
         // The fork unlinks existing socket files. Do not let it replace a live
         // listener owned by another launcher instance.
-        if await UnixSocketHTTP.isReady(at: socketURL, path: "/") {
+        if await UnixSocketHTTP.isReady(at: socketURL) {
             throw ComposeServerError.alreadyListening(socketURL.path)
         }
         try Task.checkCancellation()
@@ -135,7 +135,7 @@ final class ComposeServer {
             while ContinuousClock.now < deadline {
                 try Task.checkCancellation()
                 guard child.isRunning else { throw ComposeServerError.exited(child.terminationStatus) }
-                if await UnixSocketHTTP.isReady(at: socketURL, path: "/") {
+                if await UnixSocketHTTP.isReady(at: socketURL) {
                     try Task.checkCancellation()
                     guard child.isRunning else { throw ComposeServerError.exited(child.terminationStatus) }
                     log("Compose API ready at unix://\(socketURL.path), Docker host unix://\(dockerSocketURL.path)")

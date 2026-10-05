@@ -2,6 +2,27 @@ import Foundation
 
 enum DockerDaemonConfiguration {
     static let guestDirectory = "/etc/docker"
+    static let environment = [
+        "PATH=\(guestDirectory)/startup:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ]
+
+    static let guestPIDFile = "/run/docker.pid"
+
+    // Replace DinD's exact recursive cleanup with a single known PID file.
+    // Never search subdirectories or remove symlinks/directories. Other find
+    // invocations still go directly to BusyBox with their original arguments.
+    static let startupFindScript = #"""
+        #!/bin/sh
+        if [ "$#" -eq 5 ] && [ "$1" = /run ] && [ "$2" = /var/run ] && \
+           [ "$3" = -iname ] && [ "$4" = 'docker*.pid' ] && [ "$5" = -delete ]; then
+            if [ ! -L "\#(guestPIDFile)" ] && [ -f "\#(guestPIDFile)" ]; then
+                exec /bin/busybox rm -f -- "\#(guestPIDFile)"
+            fi
+            exit 0
+        fi
+        exec /bin/busybox find "$@"
+
+        """#
 
     /// Prepare the host-owned configuration before boot and return its read-only mount.
     static func prepare(in directoryURL: URL, diskGiB: UInt64) throws -> String {
@@ -22,6 +43,17 @@ enum DockerDaemonConfiguration {
             try updated.write(to: configurationURL, options: .atomic)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configurationURL.path)
         }
+        let startupURL = directoryURL.appendingPathComponent("startup", isDirectory: true)
+        let findURL = startupURL.appendingPathComponent("find")
+        let script = Data(startupFindScript.utf8)
+        let fm = FileManager.default
+        try fm.createDirectory(
+            at: startupURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+        )
+        if (try? Data(contentsOf: findURL)) != script {
+            try script.write(to: findURL, options: .atomic)
+        }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: findURL.path)
         return "\(directoryURL.path):\(guestDirectory):ro"
     }
 
@@ -32,6 +64,12 @@ enum DockerDaemonConfiguration {
             throw DockerDaemonConfigurationError.invalidConfiguration
         }
         var updated = current
+        // Keep the daemon and the startup cleanup on the same fixed path.
+        updated["pidfile"] = guestPIDFile
+        // Docker 28's configuration parser applies this boolean to AutoRestart.
+        // Keep service restart policies for crashes after an explicit start,
+        // but let the Xe Computer scheduler decide what to start after VM boot.
+        updated["restart"] = false
         updated["log-driver"] = ContainerRuntimeMaintenance.loggingDriver
         // Options from another driver may not be supported by the local driver.
         updated["log-opts"] = ContainerRuntimeMaintenance.loggingOptions

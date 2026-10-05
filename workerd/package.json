@@ -8,8 +8,8 @@
     "build:runtime": "deno task build:guest && bash docker/package-runtime.sh",
     "build": "mkdir -p dist/host-worker && cp config.capnp *.js dist/host-worker/",
     "dev": "bash ./dev.sh",
-    "test:unit": "deno test --no-config --no-lock tests/routing_test.ts tests/disk_usage_test.ts",
-    "test:integration": "deno run --no-config --no-lock --allow-read --allow-write=/tmp --allow-env --allow-net=127.0.0.1 --allow-run tests/integration.ts"
+    "test:unit": "deno test --no-config --no-lock tests/routing_test.ts tests/disk_usage_test.ts tests/service_startup_test.ts",
+    "test:integration": "deno run --no-config --no-lock --allow-read --allow-write=../macos/.build --allow-env --allow-net=127.0.0.1 --allow-run tests/integration.ts"
   },
   "keywords": [],
   "author": "",

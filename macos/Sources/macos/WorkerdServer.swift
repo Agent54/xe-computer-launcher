@@ -135,6 +135,7 @@ final class WorkerdServer {
     private var stopTask: Task<Void, Never>?
     private var stopping = false
     private var lockDescriptor: Int32 = -1
+    private var startupSocketURL: URL?
     private(set) var servingStandardPorts = false
 
     var isRunning: Bool { process?.isRunning == true }
@@ -208,6 +209,15 @@ final class WorkerdServer {
             log("Local Compose UI certificate authority created at \(prepared.certificateURL.path).")
         }
         let uiSocketURL = stateURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
+        let startupSocketURL = stateURL.appendingPathComponent("s-\(UUID().uuidString.prefix(8)).sock")
+        self.startupSocketURL = startupSocketURL
+        let startupStateURL = stateURL.appendingPathComponent("startup", isDirectory: true)
+        try FileManager.default.createDirectory(at: startupStateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Workerd owns validation and service-start policy. Publish the configured
+        // list as data; an absent setting explicitly supplies an empty list.
+        let startupServices = ExternalState.shared.settings.rawData?["compose_startup_services"] ?? []
+        let startupData = try JSONSerialization.data(withJSONObject: startupServices, options: [.fragmentsAllowed])
+        try startupData.write(to: runtimeStatusURL.appendingPathComponent("startup-services.json"), options: .atomic)
         let needsPrivilegedPorts = usesStandardPorts
         var privilegedSockets: PrivilegedPortSockets?
         if needsPrivilegedPorts {
@@ -241,8 +251,10 @@ final class WorkerdServer {
         var workerArguments = ["serve", "--experimental", prepared.directoryURL.appendingPathComponent("config.capnp").path,
             "--socket-addr", "management=127.0.0.1:\(managementPort)",
             "--socket-addr", "ui-https=unix:\(uiSocketURL.path)",
+            "--socket-addr", "startup=unix:\(startupSocketURL.path)",
             "--directory-path", "assets=\(assetsURL.path)",
             "--directory-path", "status=\(runtimeStatusURL.path)",
+            "--directory-path", "startup-state=\(startupStateURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",
             "--external-addr", "docker=unix:\(dockerSocketURL.path)",
             "--external-addr", "maintenance=unix:\(maintenanceSocketURL.path)",
@@ -326,6 +338,13 @@ final class WorkerdServer {
             await stop()
             throw error
         }
+    }
+
+    /// A short private notification keeps startup independent of browser traffic.
+    /// Workerd reads the published lifecycle snapshot and does all service work.
+    func notifyRuntimeChanged() async {
+        guard isRunning, !stopping, let startupSocketURL else { return }
+        _ = await UnixSocketHTTP.isReady(at: startupSocketURL, path: "/reconcile")
     }
 
     func requestStop() {

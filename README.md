@@ -38,6 +38,9 @@ services.
 On first launch, choose a folder for your Compose projects. The IWA UI provides
 access to Compose. Its server runs on your Mac and stays available during VM
 restarts; container operations resume when the VM is ready.
+During boot or recovery, Docker-dependent public API calls return a retryable
+503 with runtime status immediately. Compose's schema, ping, repository checkout
+and UI remain available.
 
 The selected folder is shared with SmolVM at `/stacks`. Compose resolves
 relative binds and `${STACKS_PATH}` on the Mac, then translates their sources
@@ -46,6 +49,12 @@ use the same mapping. Builds and Compose file discovery run on the Mac.
 Host bind sources outside the selected folder are rejected; guest Docker
 socket/storage paths and timezone files keep their guest paths. The Compose
 API socket lives in launcher app data, outside the shared stacks folder.
+
+In launcher mode, project paths and their symlink targets must resolve inside
+the selected folder, and default Compose file lookup stays in the requested
+directory. Compose configurations remain trusted host input: env files,
+includes and build contexts can still reference host resources outside that
+folder. The mount and project-path checks do not sandbox those reads.
 
 On first launch, the folder dialog offers standard web ports 80/443 when both
 are available. Without that selection, the shared listeners use the previous
@@ -132,8 +141,29 @@ Docker defaults to the `local` logging driver with three rotating 10 MB files
 per container. Before starting Docker, the launcher prepares the host-owned
 `smol/docker-config/daemon.json` and mounts its directory read-only at
 `/etc/docker`. New and existing VMs receive the same mount before boot; no guest
-installation script or extra configuration restart is needed. Other settings
-in the host configuration are preserved. Existing containers adopt the defaults
+installation script or extra configuration restart is needed. The daemon's
+PID-file path is fixed at `/run/docker.pid`. Other settings
+in the host configuration are preserved. Docker's boot-time container restart
+is disabled (`restart: false`). The launcher retains an explicit startup list
+in `compose_startup_services`, empty by default. Each entry supplies `project`,
+`service` and `path` (the Compose configuration path). Swift publishes the list
+and VM boot identifier and notifies a private workerd listener when runtime
+status changes. One workerd coordinator owns both configured startup and
+request-driven starts from the HTTP and TLS gateways. It starts the list once
+per VM boot, after Docker and Compose answer their readiness probes, and saves
+attempts in private launcher state so restarting workerd does not replay them.
+Service starts run in the background so they do not block management, routing
+or monitoring. VM shutdown/recovery cancels pending work. Services outside the
+list wait for an app request or scheduler action. Their restart policies still handle
+crashes after that explicit start. The mounted configuration also contains a
+small `startup/find` wrapper placed first on the guest PATH. It replaces DinD's
+exact stale-PID search with removal of `/run/docker.pid`, the daemon's configured
+PID file, only when it is a regular file and not a symlink. Startup does not
+search subdirectories or remove other PID files. Other `find` commands retain
+their normal behavior. SmolVM socket forwarding connects inside the workload's
+filesystem without sharing the VM's `/run` directory. This requires a runtime
+built with the socket mount fix; the launcher wrapper also limits cleanup on
+older runtimes. Existing containers adopt the logging defaults
 when recreated; explicit Compose logging settings take precedence. BuildKit automatically collects unused
 build cache with a 5 GB maximum and a 1 GB reserve, using Docker's standard GC
 policies. Collection is periodic; cache in use by active builds can exceed the

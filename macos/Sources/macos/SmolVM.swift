@@ -114,6 +114,7 @@ struct SmolVMMachineSpec: Sendable {
     var exposedSockets: [String] = []
     var mountedSockets: [String] = []
     var labels: [String: String] = [:]
+    var environment: [String] = []
 }
 
 enum SmolVMPaths {
@@ -225,10 +226,13 @@ actor SmolVMClient {
         for (key, value) in spec.labels.sorted(by: { $0.key < $1.key }) {
             arguments += ["--label", "\(key)=\(value)"]
         }
+        for variable in spec.environment {
+            arguments += ["--env", variable]
+        }
         _ = try await invoke(arguments)
     }
 
-    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String]) async throws {
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String], environment: [String] = []) async throws {
         var arguments = [
             "machine", "update", "--name", name,
             "--mem", String(memoryMiB), "--cpus", String(cpus),
@@ -236,6 +240,9 @@ actor SmolVMClient {
         ]
         for volume in volumes {
             arguments += ["--volume", volume]
+        }
+        for variable in environment {
+            arguments += ["--env", variable]
         }
         _ = try await invoke(arguments)
     }

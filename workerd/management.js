@@ -67,6 +67,13 @@ export default {
       return await diskUsageResponse(env.DOCKER, scan);
     }
     if (/^\/v1\.24\//.test(url.pathname)) {
+      // Docker's Unix-socket bridge exists before dockerd can answer requests.
+      // Do not leave callers waiting on it during boot or VM recovery. Compose's
+      // schema, ping and repository checkout are independent of the daemon.
+      if (!['/v1.24/', '/v1.24/_ping', '/v1.24/repos/checkout'].includes(url.pathname)) {
+        const runtime = await readRuntimeStatus(env);
+        if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      }
       const headers = new Headers(request.headers);
       // Browser credentials do not belong to the local Compose API.
       for (const name of ['cookie', 'authorization', 'host', 'forwarded', 'x-forwarded-host', 'x-forwarded-for']) headers.delete(name);

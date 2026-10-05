@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct SmolVMStartupResult: Sendable {
@@ -21,6 +22,7 @@ enum SmolVMSetup {
     static var memoryMiB: UInt32 { resources.memoryMiB }
 
     static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
+        let startedAt = ContinuousClock.now
         try Task.checkCancellation()
         guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
@@ -67,14 +69,16 @@ enum SmolVMSetup {
                     "dev.xe.computer.purpose": "runtime",
                     "dev.xe.computer.smolvm-release": "v1.16.2-compose_3",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
-                ]
+                ],
+                environment: DockerDaemonConfiguration.environment
             )
             try await client.createMachine(spec)
         } else {
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
-                volumes: [stacksVolume, dockerConfigurationVolume]
+                volumes: [stacksVolume, dockerConfigurationVolume],
+                environment: DockerDaemonConfiguration.environment
             )
         }
 
@@ -85,7 +89,10 @@ enum SmolVMSetup {
             await RuntimeLogCollector.shared.collect(flushPartial: true)
             throw error
         }
+        ExternalState.shared.appendLog("runtime", "SmolVM workload launched after \(startedAt.duration(to: .now)); waiting for Docker API")
+        let dockerWaitStartedAt = ContinuousClock.now
         try await waitForDocker()
+        ExternalState.shared.appendLog("runtime", "Docker API ready after \(dockerWaitStartedAt.duration(to: .now)) (total startup \(startedAt.duration(to: .now)))")
 
         return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
     }
@@ -132,8 +139,25 @@ enum SmolVMSetup {
 
     private static func removeStaleSocketIfPresent() {
         for socket in [dockerSocketURL, routerSocketURL] {
-            guard FileManager.default.fileExists(atPath: socket.path) else { continue }
-            try? FileManager.default.removeItem(at: socket)
+            do { try removeSocketIfPresent(at: socket) }
+            catch { ExternalState.shared.appendLog("runtime", error.localizedDescription) }
+        }
+    }
+
+    /// Never recursively remove a directory or follow a symlink at a socket path.
+    /// A path collision belongs to the user until it is proven to be a socket.
+    static func removeSocketIfPresent(at url: URL) throws {
+        var metadata = stat()
+        guard lstat(url.path, &metadata) == 0 else {
+            if errno == ENOENT { return }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard metadata.st_mode & S_IFMT == S_IFSOCK else {
+            throw SmolVMSetupError.unsafeSocketPath(url.path)
+        }
+        // unlink cannot recursively remove a replacement directory.
+        guard unlink(url.path) == 0 || errno == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
 }
@@ -142,6 +166,7 @@ enum SmolVMSetupError: LocalizedError, Sendable {
     case virtualizationUnavailable
     case dockerSocketUnavailable(String)
     case dockerStartupFailed(String)
+    case unsafeSocketPath(String)
 
     var errorDescription: String? {
         switch self {
@@ -151,6 +176,8 @@ enum SmolVMSetupError: LocalizedError, Sendable {
             return "SmolVM started, but its Docker API did not become ready at \(path)."
         case .dockerStartupFailed(let detail):
             return "Docker startup failed: \(detail)"
+        case .unsafeSocketPath(let path):
+            return "Refusing to remove a non-socket file at \(path)."
         }
     }
 }

@@ -166,9 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
     private var workerdServer = WorkerdServer()
-    private let runtimeSupervisor: ContainerRuntimeSupervisor = {
+    private lazy var runtimeSupervisor = makeRuntimeSupervisor()
+
+    private func makeRuntimeSupervisor() -> ContainerRuntimeSupervisor {
         // Cleanup must not occupy the VM lifecycle client's command queue.
         let maintenanceClient = SmolVMClient()
+        let workerd = workerdServer
         return ContainerRuntimeSupervisor(
             maintenance: ContainerRuntimeMaintenance(
                 stateURL: SmolVMPaths.dataURL.appendingPathComponent("maintenance.json"),
@@ -179,9 +182,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     )
                 },
                 log: { ExternalState.shared.appendLog("maintenance", $0) }
-            )
+            ),
+            onStatusChanged: { snapshot in
+                await MainActor.run { ContainerRuntimePresentation.shared.update(snapshot) }
+                await workerd.notifyRuntimeChanged()
+            }
         )
-    }()
+    }
     private lazy var maintenanceServer = makeMaintenanceServer()
 
     private func makeMaintenanceServer() -> ContainerMaintenanceServer {
@@ -493,7 +500,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     return
                 }
             }
-            if !setupDeferredOnThisLaunch { startHostServices() }
+            if !setupDeferredOnThisLaunch {
+                await runtimeSupervisor.prepareForLaunch()
+                startHostServices()
+            }
             if needsPortHelper && !setupDeferredOnThisLaunch {
                 let showRoutingProgressAt = ContinuousClock.now + .seconds(wasChoosingPorts ? 0 : 2)
                 var routingProgressVisible = false
@@ -696,16 +706,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 } catch is CancellationError { break }
                 catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
                 renderMenuLabels()
-                do { try await GuestRouter.shared.reconcile() }
-                catch is CancellationError { break }
-                catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
-                await RuntimeLogCollector.shared.collect()
-                await runtimeSupervisor.reconcile()
+                // Compose's listener does not need Docker. Start it before any
+                // guest commands, diagnostics or maintenance can occupy this loop.
                 if let composeServer {
                     do { try await composeServer.start(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
                     catch is CancellationError { break }
                     catch { ExternalState.shared.appendLog("compose", error.localizedDescription) }
                 }
+                do { try await GuestRouter.shared.reconcile() }
+                catch is CancellationError { break }
+                catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
+                await RuntimeLogCollector.shared.collect()
+                await runtimeSupervisor.reconcile()
+                await workerdServer.notifyRuntimeChanged()
                 do { try await Task.sleep(for: .seconds(2)) } catch { break }
             }
         }

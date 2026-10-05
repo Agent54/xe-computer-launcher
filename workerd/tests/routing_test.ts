@@ -1,7 +1,7 @@
 // Unit tests only: Docker, Compose, guest transport and upstream fetch are mocked.
 import assert from 'node:assert/strict';
 import gateway from '../gateway.js';
-import appGateway from '../app-gateway.js';
+import appGatewayWorker from '../app-gateway.js';
 import management from '../management.js';
 import tlsGateway from '../tls-gateway.js';
 import router from '../router.js';
@@ -10,6 +10,17 @@ import { clientHelloServerName } from '../tls-client-hello.js';
 import { resolveApplicationPort } from '../app-routing.js';
 import { resolveApplicationService } from '../app-discovery.js';
 import { applicationReady, applicationStarting, startApplication } from '../app-startup.js';
+import { ServiceStartupCoordinator } from '../service-startup.js';
+
+function withStartup<T extends object>(env: T) {
+  if ('STARTUP' in env) return env;
+  const coordinator = new ServiceStartupCoordinator();
+  return Object.assign(env, { STARTUP: { fetch: (request: Request) =>
+    coordinator.fetch(request, env, { waitUntil() {} }) } });
+}
+
+const appGateway = { fetch: (request: Request, env: object, ctx = { waitUntil(_promise: Promise<unknown>) {} }) =>
+  appGatewayWorker.fetch(request, withStartup(env), ctx) };
 
 interface TestContainer {
   Id: string;
@@ -217,7 +228,9 @@ Deno.test('signed Xe Computer origin uses Compose API on the HTTPS UI domain', a
   const url = 'https://compose-ui.localhost:5194';
   let upstream: Request | undefined;
   const env = {
-    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ http: 5196, https: 5194, publicHttpReady: true })) },
+    RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('status.json')
+      ? { phase: 'healthy', message: 'Container runtime ready' }
+      : { http: 5196, https: 5194, publicHttpReady: true })) },
     COMPOSE: { fetch: (request: Request) => {
       upstream = request;
       return Promise.resolve(Response.json(request.method === 'POST' ? { path: 'stacks/demo' } : []));
@@ -278,6 +291,46 @@ Deno.test('runtime failures are enriched only while the supervisor reports an ou
   const browserFailure = await surfaceRuntimeFailure(new Response('backend EOF', { status: 500 }), env, navigation);
   assert.match(browserFailure.headers.get('content-type')!, /text\/html/);
   assert.match(await browserFailure.text(), /Container VM ran out of memory; restarting…/);
+});
+
+Deno.test('Compose management answers during boot without contacting a stalled Docker backend', async () => {
+  let runtime = { phase: 'starting', message: 'Starting container runtime…' };
+  let forwarded = 0;
+  const env = {
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json(runtime)) },
+    COMPOSE: { fetch: () => { forwarded++; return new Promise<Response>(() => {}); } },
+    ASSETS: { fetch: () => Promise.resolve(new Response('compose-ui')) },
+  };
+  let timer: number | undefined;
+  try {
+    await Promise.race([
+      (async () => {
+        for (const phase of ['starting', 'restarting', 'degraded', 'failed', 'stopped']) {
+          runtime = { ...runtime, phase };
+          for (const path of ['ls', 'system', 'ps/demo', 'start/demo/container']) {
+            const response = await management.fetch(new Request(`http://compose-ui.localhost/v1.24/${path}`), env);
+            assert.equal(response.status, 503);
+            assert.equal(response.headers.get('retry-after'), '2');
+            assert.equal((await response.json()).runtime.phase, phase);
+          }
+        }
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('API waited for Docker during startup')), 1000);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+  assert.equal(forwarded, 0);
+  assert.equal(await (await management.fetch(new Request('http://compose-ui.localhost/'), env)).text(), 'compose-ui');
+  assert.equal((await (await management.fetch(new Request('http://compose-ui.localhost/v1.24/runtime-status'), env)).json()).phase, 'stopped');
+
+  const available = { ...env, COMPOSE: { fetch: () => { forwarded++; return Promise.resolve(Response.json({ ok: true })); } } };
+  for (const path of ['', '_ping', 'repos/checkout']) {
+    assert.equal((await management.fetch(new Request(`http://compose-ui.localhost/v1.24/${path}`), available)).status, 200);
+  }
+  runtime = { phase: 'healthy', message: 'Container runtime ready' };
+  assert.equal((await management.fetch(new Request('http://compose-ui.localhost/v1.24/ls'), available)).status, 200);
+  assert.equal(forwarded, 4);
 });
 
 Deno.test('browser app requests show the runtime loader until Compose and the VM recover', async t => {
@@ -785,7 +838,8 @@ Deno.test('startup errors reach the loader and API safely', async () => {
   ];
   for (const [index, test] of cases.entries()) {
     const service = { id: `failure-${index}`, service: 'agenda', project: 'startup-errors', state: 'uncreated' };
-    const start = await startApplication(service, { COMPOSE: { fetch: async () => test.fetch() } });
+    const env = withStartup({ COMPOSE: { fetch: async () => test.fetch() } });
+    const start = await startApplication(service, env);
     try {
       await start.promise;
       assert.equal(start.pending, false);
@@ -803,17 +857,17 @@ Deno.test('startup errors reach the loader and API safely', async () => {
         headers: { Accept: 'application/json' },
       }), service, start.error);
       assert.deepEqual(await api.json(), { app: 'agenda', state: 'failed', message: test.message });
-    } finally { applicationReady(service); }
+    } finally { await applicationReady(service, env); }
   }
 });
 
-Deno.test('uncreated apps wait for runtime readiness, while existing containers can start', async () => {
+Deno.test('apps wait for runtime readiness, while existing containers need no router build gate', async () => {
   const service = { id: '', service: 'agenda', project: 'readiness-test', state: 'uncreated' };
   let phase = 'starting';
   let routerReady = false;
   let starts = 0;
   let release: (() => void) | undefined;
-  const env = {
+  const env = withStartup({
     RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ phase, message: 'Starting container runtime…' })) },
     ROUTER: { fetch: (request: Request) => {
       assert.equal(new URL(request.url).pathname, '/__xe_router_health');
@@ -823,7 +877,7 @@ Deno.test('uncreated apps wait for runtime readiness, while existing containers 
       starts++;
       return new Promise<Response>(resolve => { release = () => resolve(Response.json({ ok: true })); });
     } },
-  };
+  });
   try {
     for (phase of ['starting', 'restarting', 'degraded', 'diagnosing']) {
       const deferred = await startApplication(service, env);
@@ -836,25 +890,26 @@ Deno.test('uncreated apps wait for runtime readiness, while existing containers 
       assert.equal(starts, 0);
     }
 
+    phase = 'healthy';
     const existing = await startApplication({ ...service, id: 'readiness-existing', state: 'exited' }, env);
     assert.equal(starts, 1, 'an existing container does not need a build readiness gate');
     release!();
     await existing.promise;
+    await applicationReady({ ...service, id: 'readiness-existing' }, env);
 
-    phase = 'healthy';
     const waitingForRouter = await startApplication(service, env);
     assert.equal(waitingForRouter.message, 'Starting application router…');
     assert.equal(starts, 1, 'the guest router must also be ready before building');
     routerReady = true;
     const [first, second] = await Promise.all([startApplication(service, env), startApplication(service, env)]);
-    assert.equal(first, second, 'concurrent ports share the same start after checking readiness');
+    assert.equal(first.pending, second.pending);
     assert.equal(starts, 2);
     release!();
     await first.promise;
   } finally {
     release?.();
-    applicationReady(service);
-    applicationReady({ ...service, id: 'readiness-existing' });
+    await applicationReady(service, env);
+    await applicationReady({ ...service, id: 'readiness-existing' }, env);
   }
 });
 

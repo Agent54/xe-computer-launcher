@@ -104,6 +104,7 @@ struct ContainerRuntimeSupervisorTests {
         )
 
         _ = try await supervisor.start()
+        let initialBootId = try #require((await supervisor.snapshot()).bootId)
         await supervisor.reconcile()
         await supervisor.reconcile()
         await supervisor.reconcile()
@@ -111,6 +112,7 @@ struct ContainerRuntimeSupervisorTests {
         let snapshot = await supervisor.snapshot()
         #expect(snapshot.phase == .healthy)
         #expect(snapshot.reason == "oom_recovered")
+        #expect(snapshot.bootId != initialBootId)
         #expect(await fixture.starts == 2)
         #expect(await fixture.routerResets == 1)
         #expect(await fixture.routerReconciles == 1)
@@ -118,6 +120,7 @@ struct ContainerRuntimeSupervisorTests {
         let data = try Data(contentsOf: root.appendingPathComponent("status.json"))
         let persisted = try JSONDecoder.withISO8601Dates.decode(ContainerRuntimeSnapshot.self, from: data)
         #expect(persisted.phase == snapshot.phase)
+        #expect(persisted.bootId == snapshot.bootId)
         #expect(persisted.reason == snapshot.reason)
         #expect(persisted.oomKillCount == snapshot.oomKillCount)
         #expect(persisted.hostResources?.cpuPercent == 12.5)
@@ -156,12 +159,42 @@ struct ContainerRuntimeSupervisorTests {
         )
 
         _ = try await supervisor.start()
+        let initialBootId = try #require((await supervisor.snapshot()).bootId)
         await supervisor.reconcile()
         #expect((await supervisor.snapshot()).phase == .degraded)
         await supervisor.reconcile()
         #expect((await supervisor.snapshot()).phase == .healthy)
+        #expect((await supervisor.snapshot()).bootId == initialBootId)
         #expect(await fixture.starts == 1)
         #expect(await fixture.routerResets == 0)
+    }
+
+    @Test func preparingHostListenersClearsAStaleHealthySnapshot() async throws {
+        let macosRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let root = macosRoot.appendingPathComponent(".build/runtime-startup-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ContainerRuntimeStatusStore(directoryURL: root)
+        let fixture = RuntimeFixture(probes: [true], diagnostics: [machine(oomKillCount: 0)])
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: store,
+            startMachine: { await fixture.start() },
+            readDiagnostics: { await fixture.diagnostic() },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        var stale = await supervisor.snapshot()
+        stale = ContainerRuntimeSnapshot(phase: .healthy, message: "old launch", reason: nil,
+            updatedAt: stale.updatedAt, recoveryAttempt: nil, memoryTotalBytes: nil,
+            memoryAvailableBytes: nil, oomKillCount: nil, hostResources: nil, bootId: "old-boot")
+        try await store.publish(stale)
+        await supervisor.prepareForLaunch()
+        #expect((await supervisor.snapshot()).phase == .starting)
+        #expect((await supervisor.snapshot()).bootId == nil)
+        _ = try await supervisor.start()
+        let bootId = (await supervisor.snapshot()).bootId
+        await supervisor.prepareForLaunch()
+        #expect((await supervisor.snapshot()).phase == .healthy)
+        #expect((await supervisor.snapshot()).bootId == bootId)
     }
 
     @Test func repeatedFailuresStopAtTheRecoveryLimit() async throws {

@@ -10,7 +10,7 @@ the launcher UI to Compose and running containers:
 - **Discovery:** `app-discovery.js` resolves running, stopped, and uncreated apps
   through Compose's existing project, config, and service APIs. Project/config
   variants share a 100 ms server cache across hostnames and port selectors;
-  startup invalidates the affected variant immediately. Docker lookup has the
+  app-request startup completion invalidates the affected variant. Docker lookup has the
   same 100 ms limit. Cache expiry is measured from fetch start, so slow requests
   cannot extend the reuse window. Pending requests share a fetch; these caches
   are held in Workerd memory and never stored in the browser.
@@ -184,6 +184,17 @@ arbitrary Docker endpoint and never invoke pruning or shell commands.
 
 Run `deno task test:unit` for port selection tests with mocked backends; these
 do not start workerd, Docker, or a VM.
+
+The host `startup` worker coordinates the configured `compose_startup_services`
+list (empty by default) and app requests from both HTTP and TLS gateways. Swift
+publishes `status.json` with a VM `bootId` and `startup-services.json`, then sends
+short notifications to the private startup Unix socket. The worker checks VM,
+Docker and Compose readiness, starts only the listed services in the background,
+and cancels pending starts on shutdown or VM recovery. Its writable disk binding
+contains only `boot.json` in the launcher's private `workerd/startup` directory;
+it records attempts before dispatch so a workerd restart resumes remaining
+entries without repeating them. The coordinator's endpoints are internal and
+are not exposed through the public management or application gateways.
 
 The integration suite starts separate host and guest workers linked by a Unix
 socket, using disposable Docker/Compose backends. It uses `curl` for TLS requests

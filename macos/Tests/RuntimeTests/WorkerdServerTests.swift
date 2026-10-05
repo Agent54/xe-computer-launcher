@@ -43,8 +43,7 @@ struct WorkerdServerTests {
         let binary = macosRoot.appendingPathComponent(".build/workerd/workerd")
         let assets = macosRoot.appendingPathComponent(".build/compose-ui")
         try #require(FileManager.default.isExecutableFile(atPath: binary.path), "Run make workerd compose-ui before runtime tests")
-        let config = macosRoot.appendingPathComponent(".build/workerd/resources/config.capnp")
-        try #require(FileManager.default.fileExists(atPath: config.path), "Run make workerd to stage the host worker sources before runtime tests")
+        let config = macosRoot.deletingLastPathComponent().appendingPathComponent("workerd/config.capnp")
         let managementPort = try freePort()
         var routingPort = try freePort()
         while routingPort == managementPort { routingPort = try freePort() }
@@ -76,6 +75,12 @@ struct WorkerdServerTests {
             Issue.record("workerd startup: \(error); logs: \(logs.lines.joined(separator: " | "))")
             throw error
         }
+        await server.notifyRuntimeChanged()
+        let startupList = try Data(contentsOf: runtimeStatus.appendingPathComponent("startup-services.json"))
+        #expect(try JSONSerialization.jsonObject(with: startupList) is [Any])
+        let startupSocket = try #require((try FileManager.default.contentsOfDirectory(atPath: root.path))
+            .first { $0.hasPrefix("s-") && $0.hasSuffix(".sock") })
+        #expect(await UnixSocketHTTP.isReady(at: root.appendingPathComponent(startupSocket), path: "/reconcile"))
         do {
             #expect(server.isRunning)
             let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets,
@@ -217,7 +222,7 @@ struct WorkerdServerTests {
         let root = URL(fileURLWithPath: "/tmp/xe-workerd-pending-\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: root) }
         let binary = macosRoot.appendingPathComponent(".build/workerd/workerd")
-        let config = macosRoot.appendingPathComponent(".build/workerd/resources/config.capnp")
+        let config = macosRoot.deletingLastPathComponent().appendingPathComponent("workerd/config.capnp")
         let assets = macosRoot.appendingPathComponent(".build/compose-ui")
         try #require(FileManager.default.isExecutableFile(atPath: binary.path))
         try #require(FileManager.default.fileExists(atPath: config.path))

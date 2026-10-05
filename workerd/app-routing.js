@@ -172,9 +172,9 @@ export async function routeApplication(request, env, ctx) {
   }));
   if (response.headers.get('x-xe-router-unavailable') === 'true') {
     invalidateApplicationService(service, env);
-    const start = applicationStart(service);
+    const start = await applicationStart(service, env);
     if (start) return applicationStarting(request, service, start.error);
   }
-  if (response.status < 500) applicationReady(service);
+  if (response.status < 500) ctx.waitUntil(applicationReady(service, env));
   return response;
 }

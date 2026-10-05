@@ -34,6 +34,7 @@ const config :Workerd.Config = (
       bindings = [
         (name = "MANAGEMENT", service = "management"),
         (name = "ROUTER", service = "router"),
+        (name = "STARTUP", service = "startup"),
         (name = "COMPOSE", service = "compose"),
         (name = "RUNTIME_STATUS", service = "status"),
       ],
@@ -73,11 +74,29 @@ const config :Workerd.Config = (
       globalOutbound = "deny",
       bindings = [
         (name = "ROUTER", service = "router"),
+        (name = "STARTUP", service = "startup"),
         (name = "COMPOSE", service = "compose"),
         (name = "RUNTIME_STATUS", service = "status"),
         (name = "UI_TLS", service = "ui-tls"),
       ],
     )),
+    (name = "startup", worker = (
+      compatibilityDate = "2026-04-05",
+      modules = [
+        (name = "service-startup.js", esModule = embed "service-startup.js"),
+        (name = "runtime-status.js", esModule = embed "runtime-status.js"),
+        (name = "startup-response.js", esModule = embed "startup-response.js"),
+      ],
+      globalOutbound = "deny",
+      bindings = [
+        (name = "ROUTER", service = "router"),
+        (name = "COMPOSE", service = "compose"),
+        (name = "DOCKER", service = "docker"),
+        (name = "RUNTIME_STATUS", service = "status"),
+        (name = "STARTUP_STATE", service = "startup-state"),
+      ],
+    )),
+    (name = "startup-state", disk = (writable = true)),
     (name = "router", external = (http = ())),
     (name = "assets", disk = (writable = false)),
     (name = "status", disk = (writable = false)),
@@ -88,6 +107,7 @@ const config :Workerd.Config = (
     (name = "deny", network = (allow = [])),
   ],
   sockets = [
+    (name = "startup", address = "unix:startup.sock", http = (), service = "startup"),
     (name = "management", address = "127.0.0.1:8094", http = (), service = "management-gateway"),
     (name = "ingest", address = "127.0.0.1:5196", http = (), service = "app-gateway"),
     (name = "tls", address = "127.0.0.1:5194", tcp = (), service = "tls-gateway"),

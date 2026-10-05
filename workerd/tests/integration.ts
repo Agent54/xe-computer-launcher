@@ -18,7 +18,7 @@ const guestConfig = packaged ? resolve(inputArgs[4]) : undefined;
 const args = packaged ? inputArgs.slice(0, 4) : inputArgs;
 const [binary, workerDir, assets, composeBinary] = (args.length === 4 ? args :
   [args[0], dirname(dirname(fileURLToPath(import.meta.url))), args[1], args[2]]).map(p => resolve(p));
-const root = await Deno.makeTempDir({ dir: '/tmp', prefix: 'xe-worker-' });
+const root = await Deno.makeTempDir({ dir: resolve(dirname(fileURLToPath(import.meta.url)), '../../macos/.build'), prefix: 'xe-worker-' });
 const composePath = join(root, 'compose.sock');
 const dockerPath = join(root, 'docker.sock');
 const routerPath = join(root, 'workerd.sock');
@@ -109,6 +109,7 @@ async function startUnix(path: string) {
       }, {
         ID: sleepingState === 'uncreated' ? '' : sleepingId,
         Name: 'demo-sleeping-1', Service: 'sleeping', State: sleepingState,
+        Labels: { 'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml' },
         Publishers: [{ TargetPort: appPort, PublishedPort: 32002, Protocol: 'tcp' }],
       }]);
     } else if (requestPath === '/v1.24/failure') {
@@ -251,8 +252,10 @@ try {
   securePort = (tlsApp.address() as { port: number }).port;
   try {
   await Deno.mkdir(statusPath);
+  const startupStatePath = join(root, 'startup-state');
+  await Deno.mkdir(startupStatePath);
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
-    phase: 'healthy', message: 'Container runtime ready', reason: null,
+    phase: 'healthy', bootId: 'integration-boot', message: 'Container runtime ready', reason: null,
   }));
   await Deno.writeTextFile(join(statusPath, 'app-ports.json'), JSON.stringify({
     http: routingPort, https: tlsPort,
@@ -269,10 +272,13 @@ try {
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
     '--socket-addr', `tls=127.0.0.1:${tlsPort}`,
     '--socket-addr', `ui-https=unix:${uiSocketPath}`,
+    '--socket-addr', `startup=unix:${join(root, 'startup.sock')}`,
     '--directory-path', `assets=${assets}`,
     '--directory-path', `status=${statusPath}`,
+    '--directory-path', `startup-state=${startupStatePath}`,
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`,
     '--external-addr', `docker=unix:${dockerPath}`,
+    '--external-addr', `maintenance=unix:${join(root, 'maintenance.sock')}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
   const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
@@ -408,8 +414,21 @@ try {
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
-    phase: 'starting', message: 'Starting container runtime…', reason: null,
+    phase: 'starting', bootId: 'integration-boot', message: 'Starting container runtime…', reason: null,
   }));
+  await Deno.writeTextFile(join(statusPath, 'startup-services.json'), JSON.stringify([
+    { project: 'demo', service: 'sleeping', path: 'demo/compose.yaml' },
+  ]));
+  async function notifyStartup() {
+    const result = await new Deno.Command('curl', { args: [
+      '--disable', '--noproxy', '*', '--silent', '--show-error', '--fail', '--max-time', '1',
+      '--unix-socket', join(root, 'startup.sock'), '--output', '/dev/null',
+      '--write-out', '%{http_code}', 'http://localhost/reconcile',
+    ], stdout: 'piped', stderr: 'piped' }).output();
+    assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
+    assert.equal(new TextDecoder().decode(result.stdout), '202');
+  }
+  await notifyStartup();
   const waiting = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.match(waiting.body.toString(), /<h1>sleeping<\/h1>/);
   assert.match(waiting.body.toString(), /Starting container runtime…/);
@@ -417,8 +436,23 @@ try {
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 0);
   assert.equal((await request()).status, 200, 'Compose UI stays available during runtime startup');
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
-    phase: 'healthy', message: 'Container runtime ready', reason: null,
+    phase: 'healthy', bootId: 'integration-boot', message: 'Container runtime ready', reason: null,
   }));
+  await notifyStartup();
+  for (let i = 0; i < 100 && !releaseContainerStart; i++) await sleep(10);
+  assert(releaseContainerStart, 'configured startup runs without a browser request');
+  await notifyStartup();
+  assert.equal((await request('/reconcile')).status, 404, 'the startup listener is private');
+  // Optional extended check for builds that outlive a short request. Keep
+  // notifying as the host supervisor does, with no app request holding it open.
+  const startupHoldMs = Number(Deno.env.get('XE_TEST_STARTUP_HOLD_MS') || 0);
+  const heldAt = Date.now();
+  while (Date.now() - heldAt < startupHoldMs) {
+    await sleep(Math.min(2000, startupHoldMs - (Date.now() - heldAt)));
+    await notifyStartup();
+    assert.equal((await request()).status, 200, 'management stays responsive during a long configured start');
+    assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 1);
+  }
   const sleeping = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.equal(sleeping.status, 503);
   assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
@@ -436,7 +470,10 @@ try {
   assert.equal((await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' })).body.toString(), 'upstream-ok');
   assert.equal(seen.at(-1)!.path, '/deep/link?q=1');
   assert.deepEqual(await tlsRequest('sleeping_demo--p32002.app.localhost', true), { status: 200, body: 'upstream-ok' });
-  console.log('PASS: uncreated app discovery, immediate HTTP/HTTPS loader, single-container creation, and original URL recovery');
+  const checkpoint = JSON.parse(await Deno.readTextFile(join(startupStatePath, 'boot.json')));
+  assert.equal(checkpoint.bootId, 'integration-boot');
+  assert.equal(checkpoint.attempted.length, 1);
+  console.log('PASS: private readiness notification, configured startup, shared HTTP/HTTPS starts, durable boot checkpoint, and original URL recovery');
 
   await stopProcess(guest);
   assert.equal((await request('/', appOptions)).status, 503);

@@ -21,6 +21,7 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     let oomKillCount: UInt64?
     let hostResources: HostResourceSnapshot?
     var vmResources: VMResourceSnapshot? = nil
+    var bootId: String? = nil
 
     var menuDescription: String { message }
 }
@@ -104,7 +105,7 @@ actor ContainerRuntimeSupervisor {
     typealias ReadHostResources = @Sendable () async -> HostResourceSnapshot?
     typealias ReadVMResources = @Sendable (SmolVMMachine?) async -> VMResourceSnapshot?
     typealias Sleep = @Sendable (Duration) async throws -> Void
-    typealias StatusChanged = @Sendable (ContainerRuntimeSnapshot) -> Void
+    typealias StatusChanged = @Sendable (ContainerRuntimeSnapshot) async -> Void
     typealias Log = @Sendable (String) -> Void
 
     private enum State {
@@ -138,6 +139,7 @@ actor ContainerRuntimeSupervisor {
     private var recoveryDates: [Date] = []
     private var lastDiagnosticsAt = Date.distantPast
     private var lastDiagnostics: SmolVMMachine?
+    private var bootId: String?
 
     init(
         configuration: Configuration = Configuration(),
@@ -182,6 +184,7 @@ actor ContainerRuntimeSupervisor {
     @discardableResult
     func start() async throws -> SmolVMStartupResult {
         state = .starting
+        bootId = UUID().uuidString
         await publish(phase: .starting, message: "Starting container runtime…")
         do {
             let result = try await startMachine()
@@ -208,6 +211,12 @@ actor ContainerRuntimeSupervisor {
             )
             throw error
         }
+    }
+
+    /// Clear a previous launch's healthy snapshot before starting host listeners.
+    func prepareForLaunch() async {
+        guard state == .idle else { return }
+        await publish(phase: .starting, message: "Starting container runtime…")
     }
 
     func reconcile() async {
@@ -253,8 +262,8 @@ actor ContainerRuntimeSupervisor {
     func stop() async throws {
         state = .stopped
         await maintenance?.pause()
-        try await stopMachine()
         await publish(phase: .stopped, message: "Container runtime stopped")
+        try await stopMachine()
     }
 
     func snapshot() async -> ContainerRuntimeSnapshot {
@@ -347,6 +356,7 @@ actor ContainerRuntimeSupervisor {
         log(message)
 
         await resetRouter()
+        bootId = UUID().uuidString
         await publish(
             phase: .restarting,
             message: message,
@@ -412,13 +422,14 @@ actor ContainerRuntimeSupervisor {
             memoryAvailableBytes: memory?.availableBytes,
             oomKillCount: memory?.oomKillCount,
             hostResources: hostResources,
-            vmResources: vmResources
+            vmResources: vmResources,
+            bootId: bootId
         )
         do {
             try await statusStore.publish(snapshot)
         } catch {
             log("Could not publish container runtime status: " + error.localizedDescription)
         }
-        onStatusChanged(snapshot)
+        await onStatusChanged(snapshot)
     }
 }

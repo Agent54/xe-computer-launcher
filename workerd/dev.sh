@@ -24,7 +24,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
     -subj '/CN=compose-ui.localhost' \
     -addext 'subjectAltName=DNS:compose-ui.localhost,DNS:*.app.localhost' >/dev/null 2>&1
 chmod 600 "$runtime_dir/ui.key"
-mkdir "$runtime_dir/status"
+mkdir "$runtime_dir/status" "$runtime_dir/startup-state"
+printf '[]\n' > "$runtime_dir/status/startup-services.json"
 printf '{"http":%s,"https":%s}\n' "$http_port" "$https_port" > "$runtime_dir/status/app-ports.json"
 public_http_port=""
 if [[ "$http_port" != 80 ]]; then public_http_port=":$http_port"; fi
@@ -33,11 +34,14 @@ printf 'Compose UI: http://compose-ui.localhost%s/\n' "$public_http_port"
     --inspector-addr=0.0.0.0:9229 --verbose \
     --directory-path "assets=$COMPOSE_UI_ASSETS" \
     --directory-path "status=$runtime_dir/status" \
+    --directory-path "startup-state=$runtime_dir/startup-state" \
     --socket-addr "ingest=127.0.0.1:$http_port" \
     --socket-addr "tls=127.0.0.1:$https_port" \
     --socket-addr "ui-https=unix:$runtime_dir/ui-https.sock" \
+    --socket-addr "startup=unix:$runtime_dir/startup.sock" \
     --external-addr "ui-tls=unix:$runtime_dir/ui-https.sock" \
     --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" \
-    --external-addr "docker=unix:$DOCKER_SOCKET" &
+    --external-addr "docker=unix:$DOCKER_SOCKET" \
+    --external-addr "maintenance=unix:${MAINTENANCE_SOCKET:-$runtime_dir/maintenance.sock}" &
 child=$!
 wait "$child"
