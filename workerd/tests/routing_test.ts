@@ -301,7 +301,7 @@ Deno.test('Compose management answers during boot without contacting a stalled D
     COMPOSE: { fetch: () => { forwarded++; return new Promise<Response>(() => {}); } },
     ASSETS: { fetch: () => Promise.resolve(new Response('compose-ui')) },
   };
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       (async () => {
