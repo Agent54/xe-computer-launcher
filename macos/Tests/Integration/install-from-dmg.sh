@@ -11,6 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOSITORY_DMG="$(cd "$SCRIPT_DIR/../.." && pwd)/dist/Xe Launcher.dmg"
 DMG_PATH="${DMG_PATH:-$REPOSITORY_DMG}"
 MOUNT_POINT=""
+OWNS_MOUNT=0
+MOUNT_DEVICE=""
+MOUNT_DEVICE_NODE=""
 DEV_MODE=false
 DEV_INSTALL_ARGUMENT="--xe-computer-development-install"
 INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
@@ -622,6 +625,12 @@ end run
 APPLESCRIPT
 }
 
+disk_image_info() {
+    hdiutil info -plist \
+        | plutil -convert json -o - - \
+        | osascript -l JavaScript "$SCRIPT_DIR/disk-image-info.jxa" "$1" "$DMG_PATH"
+}
+
 detach_disk_image() {
     local target="$1"
     if [[ -d "$target" || -b "$target" ]]; then
@@ -632,8 +641,13 @@ detach_disk_image() {
 
 cleanup_mount() {
     stop_runner_auth_helper
-    if [[ -n "$MOUNT_POINT" ]]; then
-        detach_disk_image "$MOUNT_POINT" || true
+    if [[ "$OWNS_MOUNT" == "1" && -n "$MOUNT_POINT" ]]; then
+        local current_mount
+        current_mount="$(disk_image_info mount)" || return 0
+        if [[ "$current_mount" == "$MOUNT_DEVICE_NODE"$'\n'"$MOUNT_POINT" \
+            && "$(stat -f '%d' "$MOUNT_POINT" 2>/dev/null || true)" == "$MOUNT_DEVICE" ]]; then
+            detach_disk_image "$MOUNT_POINT" || true
+        fi
     fi
 }
 
@@ -641,31 +655,48 @@ trap cleanup_mount EXIT
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "this test must run on macOS"
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
+DMG_PATH="$(cd "$(dirname "$DMG_PATH")" && pwd -P)/$(basename "$DMG_PATH")"
 if ! run_with_timeout 8 osascript \
     -e 'tell application "System Events" to tell first application process whose frontmost is true to get count of menu bars' \
     >/dev/null 2>&1; then
     fail "UI automation lacks Accessibility access (or macOS blocked its Automation request). In System Settings > Privacy & Security > Accessibility, enable the GUI-session runner that launches this test, then quit and reopen it before retrying. The current test runner must be trusted; Terminal's grant does not transfer to ChatGPT/Codex, and SSH sessions do not inherit it."
 fi
 
+image_already_attached="$(disk_image_info attached)" \
+    || fail "could not inspect existing mounts of the requested DMG"
 log "opening the DMG through Launch Services"
 open "$DMG_PATH"
 
 SOURCE_APP=""
 deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )) && [[ -z "$SOURCE_APP" ]]; do
+    if [[ -z "$MOUNT_POINT" ]]; then
+        requested_mount="$(disk_image_info mount)" \
+            || fail "could not identify the requested DMG's mounted volume"
+        if [[ -z "$requested_mount" ]]; then
+            sleep 1
+            continue
+        fi
+        MOUNT_DEVICE_NODE="${requested_mount%%$'\n'*}"
+        MOUNT_POINT="${requested_mount#*$'\n'}"
+        MOUNT_DEVICE="$(stat -f '%d' "$MOUNT_POINT")"
+        case "$image_already_attached" in
+            true) OWNS_MOUNT=0 ;;
+            false) OWNS_MOUNT=1 ;;
+            *) fail "invalid prior attachment state for the requested DMG" ;;
+        esac
+    fi
     while IFS= read -r -d '' candidate; do
         candidate_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$candidate/Contents/Info.plist" 2>/dev/null || true)"
         if [[ "$candidate_bundle_id" == "$BUNDLE_ID" ]]; then
             SOURCE_APP="$candidate"
             break
         fi
-    done < <(find /Volumes -maxdepth 3 -type d -name '*.app' -print0 2>/dev/null)
+    done < <(find "$MOUNT_POINT" -maxdepth 3 -type d -name '*.app' -print0 2>/dev/null)
     [[ -n "$SOURCE_APP" ]] || sleep 1
 done
+[[ -n "$MOUNT_POINT" ]] || fail "the requested DMG did not mount within 60 seconds"
 [[ -n "$SOURCE_APP" ]] || fail "DMG does not contain an app with bundle identifier $BUNDLE_ID"
-volume_relative_path="${SOURCE_APP#/Volumes/}"
-volume_name="${volume_relative_path%%/*}"
-MOUNT_POINT="/Volumes/${volume_name}"
 log "found source app at $SOURCE_APP"
 
 log "verifying the Applications drag-and-drop target"

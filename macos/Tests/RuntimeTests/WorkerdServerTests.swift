@@ -123,7 +123,7 @@ struct WorkerdServerTests {
             let direct = Process()
             direct.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
             let rootCertificate = root.appendingPathComponent("ui-https/root.crt")
-            direct.arguments = ["--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
+            direct.arguments = ["--disable", "--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
                                 "--unix-socket", root.appendingPathComponent(socketPath).path,
                                 httpsURL]
             let directOutput = Pipe()
@@ -140,7 +140,7 @@ struct WorkerdServerTests {
             }
             let wildcard = Process()
             wildcard.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            wildcard.arguments = ["--silent", "--show-error", "--cacert", rootCertificate.path,
+            wildcard.arguments = ["--disable", "--silent", "--show-error", "--cacert", rootCertificate.path,
                                   "--noproxy", "*", "--unix-socket", root.appendingPathComponent(socketPath).path,
                                   "--output", "/dev/null", "--write-out", "%{http_code}",
                                   "https://web_demo.app.localhost:\(tlsPort)/"]
@@ -168,7 +168,7 @@ struct WorkerdServerTests {
             #expect(wildcardResult == "503")
             let curl = Process()
             curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            curl.arguments = ["--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
+            curl.arguments = ["--disable", "--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
                               "--resolve", "compose-ui.localhost:\(tlsPort):127.0.0.1", httpsURL]
             let curlOutput = Pipe()
             curl.standardOutput = curlOutput
@@ -201,7 +201,7 @@ struct WorkerdServerTests {
             #expect(server.isRunning)
             let restarted = Process()
             restarted.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            restarted.arguments = ["--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
+            restarted.arguments = ["--disable", "--silent", "--show-error", "--cacert", rootCertificate.path, "--noproxy", "*",
                                    "--resolve", "compose-ui.localhost:\(tlsPort):127.0.0.1", httpsURL]
             let restartedOutput = Pipe()
             restarted.standardOutput = restartedOutput

@@ -185,7 +185,7 @@ async function tlsRequest(hostname: string, publicPort = false): Promise<{ statu
   // Use the URL hostname for TLS SNI as well as HTTP Host. Deno's node:https
   // compatibility client can omit SNI when connecting to a loopback IP.
   const result = await new Deno.Command('curl', { args: [
-    '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5',
+    '--disable', '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5',
     '--resolve', `${hostname}:${tlsPort}:127.0.0.1`,
     '--header', `Host: ${publicPort ? `${hostname}:${tlsPort}` : hostname}`,
     '--write-out', '\n%{http_code}', `https://${hostname}:${tlsPort}/`,

@@ -1,0 +1,43 @@
+ObjC.import('Foundation');
+
+function canonicalPath(path) {
+    return ObjC.unwrap($(path).stringByStandardizingPath.stringByResolvingSymlinksInPath);
+}
+
+// Read JSON converted from hdiutil info -plist. Never select an image by its
+// volume name or by searching for an app on unrelated mounted volumes.
+function run(argv) {
+    const input = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+    const text = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(input, $.NSUTF8StringEncoding));
+    const info = JSON.parse(text);
+    if (!Array.isArray(info.images)) throw new Error('Disk image metadata has no image list');
+    const requestedPath = canonicalPath(argv[1]);
+    const images = info.images
+        .filter(image => typeof image['image-path'] === 'string' &&
+            canonicalPath(image['image-path']) === requestedPath);
+    if (argv[0] === 'attached') return images.length > 0 ? 'true' : 'false';
+    if (argv[0] !== 'mount') throw new Error('Unknown disk image metadata request');
+    const entities = images.flatMap(image => {
+        if (!Array.isArray(image['system-entities'])) {
+            throw new Error('Requested disk image has no device metadata');
+        }
+        return image['system-entities'];
+    });
+
+    function device(entity) {
+        const value = entity['dev-entry'];
+        if (typeof value !== 'string' || !/^\/dev\/disk[0-9]+(?:s[0-9]+)*$/.test(value)) {
+            throw new Error('Requested disk image has an invalid device entry');
+        }
+        return value;
+    }
+
+    const mounts = entities.filter(entity => typeof entity['mount-point'] === 'string');
+    if (mounts.length === 0) return '';
+    if (mounts.length !== 1) throw new Error('Requested disk image has multiple mounted volumes');
+    const mount = mounts[0]['mount-point'];
+    if (!mount.startsWith('/Volumes/') || /[\r\n]/.test(mount)) {
+        throw new Error('Requested disk image has an unexpected mount point');
+    }
+    return device(mounts[0]) + '\n' + mount;
+}

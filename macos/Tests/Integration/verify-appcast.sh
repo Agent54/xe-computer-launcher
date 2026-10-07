@@ -25,7 +25,7 @@ temporary_appcast=""
 if [[ "$source_path" == https://* ]]; then
     temporary_appcast="$(mktemp "${TMPDIR:-/tmp}/xe-launcher-appcast.XXXXXX")"
     trap 'rm -f "$temporary_appcast"' EXIT
-    curl \
+    curl --disable \
         --fail-with-body \
         --silent \
         --show-error \
@@ -90,7 +90,7 @@ for ((index = 1; index <= actual_delta_count; index++)); do
     seen_delta_versions+="$delta_from"$'\n'
 
     if [[ "$source_path" == https://* ]]; then
-        if ! curl \
+        if ! curl --disable \
             --fail-with-body \
             --silent \
             --show-error \

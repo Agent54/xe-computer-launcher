@@ -38,8 +38,10 @@ installation. It explicitly disables Trash and permanently removes only the
 exact previous Xe test installation, data, and owned generated-shim paths after
 removing trust for the prior run's local HTTPS certificate. It refuses to run outside
 the launcher's release or integration jobs on the self-hosted macOS ARM64 GitHub Actions runner,
-and permanent removal refuses targets that contain mounted filesystems. Manual
-runs use `cleanup.sh` and retain the recoverable behavior described above;
+and both cleanup modes refuse targets that contain mounted filesystems or have
+symlinked ancestor directories. Manual runs use `cleanup.sh` and retain the
+recoverable behavior described above. Trash moves use an atomic rename and fail
+across filesystems instead of copying and deleting the source;
 ambient environment variables cannot enable permanent cleanup. Failed workspace
 build artifacts remain available until the next checkout cleans the workspace.
 Timestamped entries created by older workflow versions are not touched and
@@ -167,8 +169,12 @@ quarantine from the installed development copy, then launches that copy through
 Launch Services. The latter gives Xe Launcher its own TCC audit identity so the
 native Accessibility prompt and System Settings row belong to the app.
 
-The test opens the DMG through Launch Services, waits for Finder's normal
-`/Volumes` mount, locates `Xe Launcher.app` by its bundle identifier, opens the
+The test opens the DMG through Launch Services and waits for Finder's normal
+`/Volumes` mount. It identifies that volume from the requested image's exact
+file path in disk-image metadata, then locates `Xe Launcher.app` by its bundle
+identifier only within that volume. On exit it detaches only an image that was
+not attached before the test, after rechecking its image path, mount point and
+device. Existing attachments are preserved. It opens the
 app through Launch Services, approves the quarantined app's Gatekeeper
 **downloaded from the Internet** confirmation with its default **Open** action
 when quarantine requires it, chooses the installer alert's default

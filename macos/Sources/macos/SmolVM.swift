@@ -173,12 +173,20 @@ actor SmolVMClient {
 
     private let fileManager = FileManager.default
     private let runtimeURL: URL
+    private let guestRuntimeURL: URL
     private let dataURL: URL
+    private let runtimeHomeURL: URL
     private var activeProcess: Process?
 
-    init(runtimeURL: URL = SmolVMPaths.runtimeURL, dataURL: URL = SmolVMPaths.dataURL) {
+    init(
+        runtimeURL: URL = SmolVMPaths.runtimeURL,
+        dataURL: URL = SmolVMPaths.dataURL,
+        guestRuntimeURL: URL = SmolVMPaths.guestRuntimeURL
+    ) {
         self.runtimeURL = runtimeURL
+        self.guestRuntimeURL = guestRuntimeURL
         self.dataURL = dataURL
+        self.runtimeHomeURL = dataURL.appendingPathComponent("runtime-home", isDirectory: true)
     }
 
     func listMachines() async throws -> [SmolVMMachine] {
@@ -282,12 +290,11 @@ actor SmolVMClient {
             try Task.checkCancellation()
             try await Task.sleep(for: .milliseconds(25))
         }
-        try prepareStateDirectories()
-
         let executableURL = runtimeURL.appendingPathComponent("smolvm-bin")
         guard fileManager.isExecutableFile(atPath: executableURL.path) else {
             throw SmolVMError.runtimeMissing(executableURL.path)
         }
+        try prepareStateDirectories()
 
         let temporaryDirectory = dataURL.appendingPathComponent("tmp", isDirectory: true)
         let commandID = UUID().uuidString
@@ -316,12 +323,12 @@ actor SmolVMClient {
         process.standardOutput = outputHandle
         process.standardError = errorHandle
         process.environment = [
-            "HOME": SmolVMPaths.runtimeHomeURL.path,
+            "HOME": runtimeHomeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": temporaryDirectory.path,
             "SMOLVM_DATA_DIR": dataURL.path,
             "SMOLVM_LIB_DIR": runtimeURL.appendingPathComponent("lib", isDirectory: true).path,
-            "SMOLVM_AGENT_ROOTFS_TAR": SmolVMPaths.guestRuntimeURL.appendingPathComponent("agent-rootfs.tar").path,
+            "SMOLVM_AGENT_ROOTFS_TAR": guestRuntimeURL.appendingPathComponent("agent-rootfs.tar").path,
             "DYLD_LIBRARY_PATH": runtimeURL.appendingPathComponent("lib", isDirectory: true).path,
         ]
 
@@ -382,23 +389,29 @@ actor SmolVMClient {
             throw SmolVMError.statePathTooLong(dataURL.path)
         }
 
+        let templateNames = ["storage-template.ext4.zst", "overlay-template.ext4.zst"]
+        // Validate the bundled inputs before creating or chmod'ing any state.
+        for filename in templateNames {
+            let source = guestRuntimeURL.appendingPathComponent(filename)
+            guard fileManager.fileExists(atPath: source.path) else {
+                throw SmolVMError.runtimeMissing(source.path)
+            }
+        }
+
         for directory in [
             dataURL,
             dataURL.appendingPathComponent("tmp", isDirectory: true),
-            SmolVMPaths.socketsURL,
-            SmolVMPaths.runtimeHomeURL,
-            SmolVMPaths.runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true),
+            dataURL.appendingPathComponent("sockets", isDirectory: true),
+            runtimeHomeURL,
+            runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true),
         ] {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         }
 
-        let templateDirectory = SmolVMPaths.runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true)
-        for filename in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
-            let source = SmolVMPaths.guestRuntimeURL.appendingPathComponent(filename)
-            guard fileManager.fileExists(atPath: source.path) else {
-                throw SmolVMError.runtimeMissing(source.path)
-            }
+        let templateDirectory = runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true)
+        for filename in templateNames {
+            let source = guestRuntimeURL.appendingPathComponent(filename)
             let destination = templateDirectory.appendingPathComponent(filename)
             if let existingTarget = try? fileManager.destinationOfSymbolicLink(atPath: destination.path) {
                 if existingTarget == source.path {

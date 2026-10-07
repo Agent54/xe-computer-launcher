@@ -59,6 +59,27 @@ configure_cleanup_mode() {
     esac
 }
 
+refuse_ancestor_symlinks() {
+    local path="$1"
+    local ancestor
+
+    case "$path" in
+        /*) ;;
+        *) fail "cleanup paths must be absolute: $path" ;;
+    esac
+    case "$path" in
+        *'/../'* | *'/./'* | *'//'* | */.. | */.)
+            fail "cleanup paths must be normalized: $path" ;;
+    esac
+    ancestor="$(dirname "$path")"
+    while :; do
+        [[ ! -L "$ancestor" ]] \
+            || fail "refusing cleanup through symlinked ancestor: $ancestor"
+        [[ "$ancestor" == / ]] && break
+        ancestor="$(dirname "$ancestor")"
+    done
+}
+
 refuse_mounted_cleanup_target() {
     local path="$1"
     local parent_device
@@ -95,7 +116,7 @@ refuse_mounted_cleanup_target() {
     done < <(find -x "$path" -type d -print0)
 }
 
-permanently_remove_owned_path() {
+require_owned_cleanup_path() {
     local path="$1"
 
     case "$path" in
@@ -107,12 +128,39 @@ permanently_remove_owned_path() {
         "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app")
             ;;
         *)
-            fail "refusing permanent removal of unowned path: $path"
+            fail "refusing cleanup of unowned path: $path"
             ;;
     esac
 
+    refuse_ancestor_symlinks "$path"
+}
+
+permanently_remove_owned_path() {
+    local path="$1"
+
+    require_owned_cleanup_path "$path"
     refuse_mounted_cleanup_target "$path"
     rm -rf -- "$path"
+}
+
+trash_owned_path() {
+    local path="$1"
+    local label="$2"
+    local destination
+
+    require_owned_cleanup_path "$path"
+    refuse_mounted_cleanup_target "$path"
+    refuse_ancestor_symlinks "${HOME}/.Trash/placeholder"
+    [[ -d "${HOME}/.Trash" && ! -L "${HOME}/.Trash" ]] \
+        || fail "Trash must be an existing directory without a symlink: ${HOME}/.Trash"
+    destination="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-${label}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+    rmdir "$destination"
+    log "moving $path to $destination"
+    # rename(2) either moves the entry atomically or fails (including EXDEV).
+    # Unlike mv, it never falls back to copying and recursively deleting a tree.
+    perl -e 'rename $ARGV[0], $ARGV[1] or die "atomic Trash rename failed: $!\n";' \
+        -- "$path" "$destination" \
+        || fail "could not safely move cleanup target to Trash: $path"
 }
 
 detach_disk_image() {
@@ -127,7 +175,6 @@ trash_generated_shim_if_owned() {
     local shim_path="$1"
     local plist_path="${shim_path}/Contents/Info.plist"
     local shim_user_data_dir
-    local trashed_shim
 
     [[ -d "$shim_path" && -f "$plist_path" ]] || return 0
     shim_user_data_dir="$(
@@ -140,10 +187,7 @@ trash_generated_shim_if_owned() {
         log "permanently removing stale generated app shim at $shim_path"
         permanently_remove_owned_path "$shim_path"
     else
-        trashed_shim="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-shim-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-        rmdir "$trashed_shim"
-        log "moving stale generated app shim to $trashed_shim"
-        mv "$shim_path" "$trashed_shim"
+        trash_owned_path "$shim_path" shim
     fi
 }
 
@@ -184,6 +228,7 @@ configure_cleanup_mode "$@"
 
 log "stopping existing app processes"
 bundle_id_pattern="${BUNDLE_ID//./[.]}"
+helium_bundle_pattern="/Library/Application Support/${bundle_id_pattern}/(Helium[.]app|helium/[^/]+/Helium[.]app)"
 launcher_pattern='/X[Ee] Launcher[.]app/Contents/MacOS/bin'
 if [[ "$STOP_ONLY" == "1" ]]; then
     # Ask Cocoa to quit normally so the launcher can stop Workerd, Compose,
@@ -218,15 +263,27 @@ stop_matching_processes \
     "/Library/Application Support/${bundle_id_pattern}/shims/.*/Xe Computer[^/]*[.]app/Contents/MacOS/app_mode_loader"
 stop_matching_processes \
     "Xe Computer app shims launched by Xe Launcher's Helium" \
-    "app_mode_loader .*--launched-by-chrome-bundle-path=.*/Library/Application Support/${bundle_id_pattern}/Helium[.]app"
+    "app_mode_loader .*--launched-by-chrome-bundle-path=.*${helium_bundle_pattern}"
 stop_matching_processes \
     "Xe Launcher's Helium and helper processes" \
-    "/Library/Application Support/${bundle_id_pattern}/Helium[.]app/"
+    "${helium_bundle_pattern}/"
 
 if [[ "$STOP_ONLY" == "1" ]]; then
     log "app processes stopped; preserving the installed app, shim files, data, port helper, and permissions"
     exit 0
 fi
+
+# Validate every owned root before changing certificates, bundles or data. The
+# checks also run immediately before each deletion/rename below.
+for cleanup_path in \
+    "$INSTALLED_APP" "$APP_DATA" \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app" \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app"; do
+    require_owned_cleanup_path "$cleanup_path"
+    refuse_mounted_cleanup_target "$cleanup_path"
+done
 
 # Removing the app data would otherwise strand a trusted CA in the user's
 # Keychain with no remaining certificate file for a later cleanup to identify.
@@ -294,10 +351,7 @@ if [[ -e "$INSTALLED_APP" ]]; then
         log "permanently removing existing installed app at $INSTALLED_APP"
         permanently_remove_owned_path "$INSTALLED_APP"
     else
-        trashed_app="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-app-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-        rmdir "$trashed_app"
-        log "moving existing installed app to $trashed_app"
-        mv "$INSTALLED_APP" "$trashed_app"
+        trash_owned_path "$INSTALLED_APP" app
     fi
 fi
 
@@ -307,10 +361,7 @@ if [[ -e "$APP_DATA" ]]; then
         log "permanently removing existing app data at $APP_DATA"
         permanently_remove_owned_path "$APP_DATA"
     else
-        trashed_data="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-        rmdir "$trashed_data"
-        log "moving existing app data to $trashed_data"
-        mv "$APP_DATA" "$trashed_data"
+        trash_owned_path "$APP_DATA" data
     fi
 fi
 

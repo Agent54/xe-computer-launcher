@@ -615,7 +615,7 @@ jobs:
             '{"content":"Xe Launcher %s %s is available: %s"}' \
             "$RELEASE_TAG" "$release_kind" "$release_url")"
 
-          curl --fail-with-body \
+          curl --disable --fail-with-body \
             --silent \
             --show-error \
             --retry 3 \

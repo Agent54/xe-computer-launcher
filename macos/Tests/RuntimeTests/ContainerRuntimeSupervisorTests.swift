@@ -153,6 +153,8 @@ struct ContainerRuntimeSupervisorTests {
             readDiagnostics: { await fixture.diagnostic() },
             resetRouter: { await fixture.resetRouter() },
             reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
             sleep: { _ in },
             onStatusChanged: { _ in },
             log: { _ in }
@@ -179,7 +181,14 @@ struct ContainerRuntimeSupervisorTests {
         let supervisor = ContainerRuntimeSupervisor(
             statusStore: store,
             startMachine: { await fixture.start() },
+            stopMachine: { await fixture.stop() },
+            probeDocker: { await fixture.probe() },
             readDiagnostics: { await fixture.diagnostic() },
+            resetRouter: { await fixture.resetRouter() },
+            reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
+            sleep: { _ in },
             onStatusChanged: { _ in }, log: { _ in }
         )
         var stale = await supervisor.snapshot()
@@ -219,6 +228,8 @@ struct ContainerRuntimeSupervisorTests {
             readDiagnostics: { await fixture.diagnostic() },
             resetRouter: { await fixture.resetRouter() },
             reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: { nil },
+            readVMResources: { _ in nil },
             sleep: { _ in },
             onStatusChanged: { _ in },
             log: { _ in }
@@ -274,8 +285,11 @@ struct ContainerRuntimeSupervisorTests {
         let supervisor = ContainerRuntimeSupervisor(
             statusStore: ContainerRuntimeStatusStore(directoryURL: root),
             startMachine: { throw SmolVMSetupError.dockerSocketUnavailable("test.sock") },
+            stopMachine: { await fixture.stop() },
             probeDocker: { await fixture.probe() },
             readDiagnostics: { await fixture.diagnostic() },
+            resetRouter: { await fixture.resetRouter() },
+            reconcileRouter: { await fixture.reconcileRouter() },
             readHostResources: { nil },
             readVMResources: { _ in nil },
             onStatusChanged: { _ in },
@@ -304,6 +318,11 @@ struct ContainerRuntimeSupervisorTests {
         let supervisor = ContainerRuntimeSupervisor(
             statusStore: ContainerRuntimeStatusStore(directoryURL: root),
             startMachine: { throw failure },
+            stopMachine: {},
+            probeDocker: { false },
+            readDiagnostics: { throw failure },
+            resetRouter: {},
+            reconcileRouter: {},
             readHostResources: { nil },
             readVMResources: { _ in nil },
             onStatusChanged: { _ in },

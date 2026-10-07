@@ -31,8 +31,16 @@ enum VMResourceSampler {
         await guestDiskSampler.invalidate()
     }
 
-    static func snapshot(machine: SmolVMMachine?, dataURL: URL = SmolVMPaths.dataURL) async -> VMResourceSnapshot {
-        let directory = machineDirectory(named: SmolVMSetup.machineName, dataURL: dataURL)
+    static func snapshot(machine: SmolVMMachine?) async -> VMResourceSnapshot {
+        await snapshot(machine: machine, dataURL: SmolVMPaths.dataURL, guestDiskSampler: guestDiskSampler)
+    }
+
+    // A custom state directory must also supply its guest reader; otherwise a
+    // fixture snapshot could still execute commands through the shared client.
+    static func snapshot(
+        machine: SmolVMMachine?, dataURL: URL, guestDiskSampler: VMGuestDiskSampler
+    ) async -> VMResourceSnapshot {
+        let directory = machineDirectory(named: machine?.name ?? SmolVMSetup.machineName, dataURL: dataURL)
         let running = machine?.isRunning == true
         let disk = await diskSampler.sample(in: directory)
         let guestDisk = await guestDiskSampler.sample(machine: machine)

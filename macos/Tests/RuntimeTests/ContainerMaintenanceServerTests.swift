@@ -14,7 +14,7 @@ struct ContainerMaintenanceServerTests {
     private func request(_ method: String, _ path: String, socket: URL) async throws -> String {
         let result = try await Task.detached {
             try ProcessCapture.standardOutput(executableURL: URL(fileURLWithPath: "/usr/bin/curl"), arguments: [
-                "--silent", "--show-error", "--noproxy", "*", "--max-time", "5",
+                "--disable", "--silent", "--show-error", "--noproxy", "*", "--max-time", "5",
                 "--unix-socket", socket.path, "--request", method,
                 "--write-out", "\n%{http_code}", "http://maintenance\(path)",
             ])

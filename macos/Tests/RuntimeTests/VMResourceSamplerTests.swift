@@ -54,7 +54,11 @@ struct VMResourceSamplerTests {
 
     @Test func stoppedMachineDoesNotSampleLiveMemory() async {
         let machine = SmolVMMachine(name: "xe-launcher", state: "stopped", labels: nil, memory: nil, workload: nil, pid: getpid(), memoryMiB: 8192)
-        let sample = await VMResourceSampler.snapshot(machine: machine, dataURL: URL(fileURLWithPath: "/tmp/missing-smol-\(UUID().uuidString)"))
+        let sample = await VMResourceSampler.snapshot(
+            machine: machine,
+            dataURL: URL(fileURLWithPath: "/tmp/missing-smol-\(UUID().uuidString)"),
+            guestDiskSampler: VMGuestDiskSampler(read: { _ in nil })
+        )
         #expect(sample.memoryResidentBytes == nil)
         #expect(sample.memoryLimitBytes == UInt64(8192) * 1024 * 1024)
         #expect(sample.diskAllocatedBytes == nil)
