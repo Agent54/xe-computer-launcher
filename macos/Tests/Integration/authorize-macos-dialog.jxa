@@ -117,8 +117,6 @@ function run() {
                         }
                         $.NSThread.sleepForTimeInterval(0.2);
                         if (passwordField.focused() !== true) continue;
-                        // Keep password handling unchanged after this app-current check.
-                        if (process.frontmost() !== true) continue;
 
                         if (certificateDialog && certificateAttempts === 1) {
                             // A second attempt uses the field's AX setter when
