@@ -1,20 +1,4 @@
 ObjC.import('Foundation');
-ObjC.import('AppKit');
-
-function ownsSecureFocus(process, field) {
-    // Some secure controls expose only a role. An unavailable subrole must not
-    // cause an otherwise valid, securely focused field to be rejected.
-    let role = '';
-    let subrole = '';
-    try { role = field.role(); } catch {}
-    try { subrole = field.subrole(); } catch {}
-    if (subrole !== 'AXSecureTextField' && role !== 'AXSecureTextField') return false;
-    try {
-        const frontmost = $.NSWorkspace.sharedWorkspace.frontmostApplication;
-        return process.frontmost() === true && field.focused() === true &&
-            Number(frontmost.processIdentifier) === Number(process.unixId());
-    } catch { return false; }
-}
 
 function clickCenter(process, element) {
     const position = element.position();
@@ -107,6 +91,15 @@ function run() {
                             !/Helium/i.test(context);
                         if (certificateDialog) certificatePromptVisible = true;
                         if (!passwordField || !(permissionDialog || certificateDialog)) continue;
+                        if (permissionDialog) {
+                            passwordField.click();
+                            if (passwordField.focused() !== true) continue;
+                            // Global keystrokes require the matched app to be current.
+                            if (process.frontmost() !== true) continue;
+                            events.keystroke(password);
+                            events.keyCode(36);
+                            return '[installer-integration] submitted password in matching macOS permission dialog';
+                        }
                         if (certificateDialog &&
                             (certificateAttempts >= 2 || Date.now() - lastCertificateSubmission < 5000)) {
                             continue;
@@ -115,10 +108,6 @@ function run() {
                         // AX focus can be true inside an inactive process. Key
                         // events still go to the frontmost app, so activate the
                         // owner and physically click the secure field first.
-                        try {
-                            const owner = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(process.unixId()));
-                            owner.activateWithOptions($.NSApplicationActivateAllWindows);
-                        } catch {}
                         try { process.frontmost = true; } catch {}
                         try { window.performAction('AXRaise'); } catch {}
                         try {
@@ -127,26 +116,19 @@ function run() {
                             passwordField.click();
                         }
                         $.NSThread.sleepForTimeInterval(0.2);
-                        if (!ownsSecureFocus(process, passwordField)) continue;
+                        if (passwordField.focused() !== true) continue;
+                        // Keep password handling unchanged after this app-current check.
+                        if (process.frontmost() !== true) continue;
 
                         if (certificateDialog && certificateAttempts === 1) {
                             // A second attempt uses the field's AX setter when
                             // macOS allows it, avoiding global key routing.
                             try { passwordField.value = password; }
-                            catch {
-                                if (!ownsSecureFocus(process, passwordField)) continue;
-                                events.keystroke(password);
-                            }
+                            catch { events.keystroke(password); }
                         } else {
-                            if (!ownsSecureFocus(process, passwordField)) continue;
                             events.keystroke(password);
                         }
                         $.NSThread.sleepForTimeInterval(0.2);
-                        if (!ownsSecureFocus(process, passwordField)) continue;
-                        if (permissionDialog) {
-                            events.keyCode(36);
-                            return '[installer-integration] submitted password in matching macOS permission dialog';
-                        }
                         if (submitButton) {
                             try {
                                 if (!clickCenter(process, submitButton)) submitButton.click();
@@ -154,7 +136,6 @@ function run() {
                                 submitButton.click();
                             }
                         } else {
-                            if (!ownsSecureFocus(process, passwordField)) continue;
                             events.keyCode(36);
                         }
                         certificateAttempts += 1;

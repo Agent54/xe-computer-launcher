@@ -35,6 +35,13 @@ fi
 [[ -n "$WORKSPACE" && "$SCRIPT_DIR" == "${WORKSPACE%/}/macos/Tests/Integration" ]] \
     || fail "cleanup-ci.sh must run from the checked-out launcher workspace"
 
+# Self-hosted runners do not report the macOS build in GitHub's job header.
+# Record it and installed Apple updates before cleanup can fail, so a runner
+# upgrade can be distinguished from a regression in the authorization helper.
+printf '[installer-cleanup] macOS version and installed Apple update history\n'
+/usr/bin/sw_vers
+/usr/sbin/softwareupdate --history
+
 # A surviving launcher or add-trusted-cert process can still own an approval
 # dialog or recreate its trust setting while removal is running. Stop it first,
 # preserving the certificates and app data until removal has been verified.
