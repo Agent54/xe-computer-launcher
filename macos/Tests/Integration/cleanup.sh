@@ -291,7 +291,7 @@ root_certificate="$APP_DATA/workerd/ui-https/root.crt"
 leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
 if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     && security verify-cert -q -L -p ssl -n compose-ui.localhost \
-        -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
+        -c "$leaf_certificate" >/dev/null 2>&1; then
     log "removing local HTTPS certificate trust"
     security remove-trusted-cert "$root_certificate" \
         || fail "could not remove local HTTPS certificate trust before deleting its source"

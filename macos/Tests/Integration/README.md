@@ -47,12 +47,23 @@ build artifacts remain available until the next checkout cleans the workspace.
 Timestamped entries created by older workflow versions are not touched and
 require one-time runner maintenance.
 
+At CI start, existing launcher and certificate-approval processes are stopped
+before removing the old certificate's trust. The trust checks evaluate only the
+leaf certificate against macOS's trust stores; supplying the root certificate
+would not prove it was trusted in the Keychain. Removal and verification remain
+required before deleting the old app data.
+
 After the About-dialog test, both workflows run `cleanup.sh --stop-only` even
 if the test fails. It asks Xe Launcher to quit gracefully, then stops any
 remaining Workerd, SmolVM, Helium, Xe Computer shim, or pending Xe certificate
-approval processes. It does not
-delete the installed app or data, unregister the port helper, reset permissions,
-or detach the DMG; those remain available to inspect until the next run starts.
+approval processes. The installer exit handler stops its authorization helpers
+and detaches only the DMG it opened, after verifying the image and device.
+CI preserves the installed app, app data (including logs and VM disks), shim
+files, DMG file and workspace build artifacts for manual debugging until the
+next CI run starts. A detached DMG can be reopened manually, including when
+installation failed before the app was copied. End-of-run app shutdown does not
+delete the installed app or data, unregister the port helper, or reset permissions;
+the installation remains available to inspect until the next run starts.
 The launchd helper itself remains registered and keeps 80/443 reserved.
 
 On a fresh VM, `tccutil` may report that the bundle is not registered; the test treats

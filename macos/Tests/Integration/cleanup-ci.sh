@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-# CI runners are disposable. Never use cleanup.sh's recoverable Trash behavior
-# here: permanently remove only the exact allowlisted Xe paths.
+# Run destructive cleanup only at CI start. Preserve each finished run for
+# manual debugging until the next job starts, removing only allowlisted Xe paths.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="${GITHUB_WORKSPACE:-}"
 
@@ -35,6 +35,11 @@ fi
 [[ -n "$WORKSPACE" && "$SCRIPT_DIR" == "${WORKSPACE%/}/macos/Tests/Integration" ]] \
     || fail "cleanup-ci.sh must run from the checked-out launcher workspace"
 
+# A surviving launcher or add-trusted-cert process can still own an approval
+# dialog or recreate its trust setting while removal is running. Stop it first,
+# preserving the certificates and app data until removal has been verified.
+bash "${SCRIPT_DIR}/cleanup.sh" --stop-only
+
 root_certificate="$HOME/Library/Application Support/dev.xe.computer/workerd/ui-https/root.crt"
 leaf_certificate="$HOME/Library/Application Support/dev.xe.computer/workerd/ui-https/ui.crt"
 auth_pid=""
@@ -48,9 +53,11 @@ trap stop_auth_helper EXIT
 
 # The CI account persists between jobs. Remove trust for the previous run's
 # unique CA before cleanup deletes the only copy of its certificate.
+# Evaluate the leaf alone so macOS must discover a trusted root in its stores.
+# Supplying root.crt in the chain can accept it even without Keychain trust.
 if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     && security verify-cert -q -L -p ssl -n compose-ui.localhost \
-        -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
+        -c "$leaf_certificate" >/dev/null 2>&1; then
     printf '[installer-cleanup] removing previous local HTTPS certificate trust\n'
     if [[ -n "${XE_CI_MAC_PASSWORD:-}" ]]; then
         XE_CI_AUTH_KIND=certificate \
@@ -62,10 +69,15 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         security remove-trusted-cert "$root_certificate" \
         || fail "could not remove the previous local HTTPS certificate trust"
     stop_auth_helper
-    if security verify-cert -q -L -p ssl -n compose-ui.localhost \
-        -c "$leaf_certificate" -c "$root_certificate" >/dev/null 2>&1; then
-        fail "the previous local HTTPS certificate is still trusted"
-    fi
+    # Security.framework can briefly retain the prior evaluation after a trust
+    # change. Wait for it to become visible, then fail if trust remains.
+    trust_removal_deadline=$((SECONDS + 10))
+    while security verify-cert -q -L -p ssl -n compose-ui.localhost \
+        -c "$leaf_certificate" >/dev/null 2>&1; do
+        (( SECONDS < trust_removal_deadline )) \
+            || fail "the previous local HTTPS certificate is still trusted"
+        sleep 0.25
+    done
 fi
 unset XE_CI_MAC_PASSWORD
 

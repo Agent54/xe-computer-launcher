@@ -2,10 +2,16 @@ ObjC.import('Foundation');
 ObjC.import('AppKit');
 
 function ownsSecureFocus(process, field) {
+    // Some secure controls expose only a role. An unavailable subrole must not
+    // cause an otherwise valid, securely focused field to be rejected.
+    let role = '';
+    let subrole = '';
+    try { role = field.role(); } catch {}
+    try { subrole = field.subrole(); } catch {}
+    if (subrole !== 'AXSecureTextField' && role !== 'AXSecureTextField') return false;
     try {
         const frontmost = $.NSWorkspace.sharedWorkspace.frontmostApplication;
-        const secure = field.subrole() === 'AXSecureTextField' || field.role() === 'AXSecureTextField';
-        return secure && process.frontmost() === true && field.focused() === true &&
+        return process.frontmost() === true && field.focused() === true &&
             Number(frontmost.processIdentifier) === Number(process.unixId());
     } catch { return false; }
 }
@@ -109,6 +115,10 @@ function run() {
                         // AX focus can be true inside an inactive process. Key
                         // events still go to the frontmost app, so activate the
                         // owner and physically click the secure field first.
+                        try {
+                            const owner = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(process.unixId()));
+                            owner.activateWithOptions($.NSApplicationActivateAllWindows);
+                        } catch {}
                         try { process.frontmost = true; } catch {}
                         try { window.performAction('AXRaise'); } catch {}
                         try {

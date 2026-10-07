@@ -327,6 +327,7 @@ jobs:
 
       - name: Quit integration-test apps and preserve installation
         if: ${{ always() && steps.checkout.outcome == 'success' }}
+        # Keep failed runs available for manual debugging until the next CI start.
         run: bash macos/Tests/Integration/cleanup.sh --stop-only
 
       - name: Generate signed Sparkle appcast and deltas

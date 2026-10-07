@@ -639,6 +639,8 @@ detach_disk_image() {
     fi
 }
 
+# Only unmount an image opened by this test. Preserve the installed app, data
+# and DMG file for manual debugging; destructive cleanup is at the next CI start.
 cleanup_mount() {
     stop_runner_auth_helper
     if [[ "$OWNS_MOUNT" == "1" && -n "$MOUNT_POINT" ]]; then
