@@ -207,6 +207,11 @@ To build from a local Compose UI checkout, explicitly set
 release until `macos/ComposeUI.lock` is updated to one containing the matching
 shared-domain links.
 
+To build the Compose backend from a local checkout, set
+`COMPOSE_SERVER_SOURCE_DIR=/absolute/path/to/compose` when running `make`.
+This requires Go and includes local backend fixes without waiting for a release.
+Without this override, builds use the checksum-pinned `macos/ComposeServer.lock` release.
+
 CI builds the guest worker and macOS app together. See [worker development](workerd/README.md)
 and [integration tests](macos/Tests/Integration/README.md) for contributor details.
 

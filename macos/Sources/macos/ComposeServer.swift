@@ -40,8 +40,10 @@ final class ComposeServer {
     private let stacksURL: URL
     let socketURL: URL
     private let log: @MainActor @Sendable (String) -> Void
+    private let probe: @MainActor @Sendable (URL) async -> Bool
     private var process: Process?
     private var stopping = false
+    private var failedHealthChecks = 0
 
     var isRunning: Bool { process?.isRunning == true }
 
@@ -49,6 +51,9 @@ final class ComposeServer {
         executableURL: URL = ComposeServerPaths.executableURL,
         stacksURL: URL = ComposeServerPaths.stacksURL,
         socketURL: URL = ComposeServerPaths.socketURL,
+        probe: @escaping @MainActor @Sendable (URL) async -> Bool = {
+            await UnixSocketHTTP.isReady(at: $0, timeout: .milliseconds(750))
+        },
         log: @escaping @MainActor @Sendable (String) -> Void = {
             ExternalState.shared.appendLog("compose", $0)
         }
@@ -56,7 +61,29 @@ final class ComposeServer {
         self.executableURL = executableURL
         self.stacksURL = stacksURL.resolvingSymlinksInPath()
         self.socketURL = socketURL
+        self.probe = probe
         self.log = log
+    }
+
+    /// Process liveness alone cannot detect an API listener that stopped
+    /// answering. Probe Compose independently of Docker and recover our child.
+    func reconcile(dockerSocketURL: URL) async throws {
+        try Task.checkCancellation()
+        if let child = process, child.isRunning {
+            let ready = await probe(socketURL)
+            try Task.checkCancellation()
+            guard process === child else { return }
+            if ready {
+                failedHealthChecks = 0
+                return
+            }
+            failedHealthChecks += 1
+            guard failedHealthChecks >= 3 else { return }
+            log("Compose API is not responding after 3 health checks; restarting the Compose server.")
+            await stop()
+            try Task.checkCancellation()
+        }
+        try await start(dockerSocketURL: dockerSocketURL)
     }
 
     @discardableResult
@@ -123,6 +150,7 @@ final class ComposeServer {
         }
 
         stopping = false
+        failedHealthChecks = 0
         do {
             try child.run()
         } catch {

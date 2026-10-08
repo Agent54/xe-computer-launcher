@@ -2,6 +2,12 @@ import Foundation
 import Testing
 @testable import macos
 
+@MainActor
+private final class ComposeServerHealthFixture {
+    var ready = false
+    var logs: [String] = []
+}
+
 @Suite(.serialized)
 @MainActor
 struct ComposeServerTests {
@@ -98,6 +104,38 @@ struct ComposeServerTests {
             // The same root can be used after quit/update cleanup.
             try await server.start(dockerSocketURL: dockerSocket)
             #expect(await UnixSocketHTTP.isReady(at: socket))
+        } catch {
+            await server.stop()
+            throw error
+        }
+        await server.stop()
+    }
+
+    @Test func restartsAnUnresponsiveComposeAPIWithoutDocker() async throws {
+        let helper = helperURL
+        try #require(FileManager.default.isExecutableFile(atPath: helper.path))
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = ComposeServerHealthFixture()
+        let server = ComposeServer(
+            executableURL: helper, stacksURL: root,
+            socketURL: root.appendingPathComponent("compose.sock"),
+            probe: { _ in fixture.ready }, log: { fixture.logs.append($0) }
+        )
+        let dockerSocket = root.appendingPathComponent("missing-docker.sock")
+        try await server.start(dockerSocketURL: dockerSocket)
+        do {
+            try await server.reconcile(dockerSocketURL: dockerSocket)
+            fixture.ready = true
+            try await server.reconcile(dockerSocketURL: dockerSocket)
+            fixture.ready = false
+            for _ in 0..<2 { try await server.reconcile(dockerSocketURL: dockerSocket) }
+            #expect(fixture.logs.filter { $0.contains("Compose API ready") }.count == 1)
+            try await server.reconcile(dockerSocketURL: dockerSocket)
+            #expect(server.isRunning)
+            #expect(fixture.logs.filter { $0.contains("Compose API ready") }.count == 2)
+            #expect(fixture.logs.contains { $0.contains("restarting the Compose server") })
+            #expect(await UnixSocketHTTP.isReady(at: server.socketURL))
         } catch {
             await server.stop()
             throw error

@@ -709,7 +709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 // Compose's listener does not need Docker. Start it before any
                 // guest commands, diagnostics or maintenance can occupy this loop.
                 if let composeServer {
-                    do { try await composeServer.start(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
+                    do { try await composeServer.reconcile(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
                     catch is CancellationError { break }
                     catch { ExternalState.shared.appendLog("compose", error.localizedDescription) }
                 }

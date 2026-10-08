@@ -6,6 +6,26 @@ macos_dir="$(dirname "$script_dir")"
 source "$macos_dir/ComposeServer.lock"
 
 destination="${1:?usage: prepare-compose-server.sh DESTINATION}"
+source_dir="${COMPOSE_SERVER_SOURCE_DIR:-}"
+
+if [[ -n "$source_dir" ]]; then
+    [[ -f "$source_dir/go.mod" ]] || { echo "Compose server source is missing go.mod: $source_dir" >&2; exit 1; }
+    command -v go >/dev/null 2>&1 || { echo "Install Go to build COMPOSE_SERVER_SOURCE_DIR." >&2; exit 1; }
+    source_dir="$(cd "$source_dir" && pwd)"
+    mkdir -p "$(dirname "$destination")"
+    destination="$(cd "$(dirname "$destination")" && pwd)/$(basename "$destination")"
+    source_version="$(git -C "$source_dir" describe --tags --always --dirty 2>/dev/null || echo local)"
+    (
+        cd "$source_dir"
+        go build -trimpath -tags fsnotify \
+            -ldflags "-w -X github.com/docker/compose/v5/internal.Version=$source_version" \
+            -o "$destination" ./cmd
+    )
+    file "$destination" | grep -q 'Mach-O 64-bit executable arm64'
+    echo "Built local Compose server $source_version from $source_dir at $destination"
+    exit 0
+fi
+
 cache_dir="${COMPOSE_SERVER_CACHE_DIR:-$macos_dir/.build/compose-server-assets/$COMPOSE_SERVER_RELEASE_TAG}"
 asset_dir="${COMPOSE_SERVER_ASSET_DIR:-}"
 
