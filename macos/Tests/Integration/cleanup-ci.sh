@@ -93,10 +93,14 @@ bash "${SCRIPT_DIR}/cleanup.sh" --ci-permanent
 # System Settings restores its last pane across launches. A previous CI run
 # may leave Login Items or Accessibility open, so start each installer test
 # with a fresh Settings window and let the native permission action navigate.
+# Other logged-in accounts may have their own Settings process. Only stop and
+# wait for the runner's instance, including one with no visible window.
+settings_user_id="$(id -u)"
 printf '[installer-cleanup] closing System Settings before the next test\n'
-pkill -x "System Settings" 2>/dev/null || true
+pkill -u "$settings_user_id" -x "System Settings" 2>/dev/null || true
 for _ in {1..20}; do
-    pgrep -x "System Settings" >/dev/null 2>&1 || exit 0
+    pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1 || exit 0
     sleep 0.25
 done
+pgrep -u "$settings_user_id" -l -x "System Settings" >&2 || true
 fail "System Settings did not close before the next test"

@@ -858,13 +858,16 @@ fi
 
 # The background-item pane must not be reused for the next permission. The
 # native Accessibility prompt opens its own System Settings destination.
+# Ignore Settings processes belonging to other logged-in accounts.
+settings_user_id="$(id -u)"
 log "closing System Settings before Accessibility approval"
-pkill -x "System Settings" 2>/dev/null || true
+pkill -u "$settings_user_id" -x "System Settings" 2>/dev/null || true
 for _ in {1..20}; do
-    pgrep -x "System Settings" >/dev/null 2>&1 || break
+    pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1 || break
     sleep 0.25
 done
-if pgrep -x "System Settings" >/dev/null 2>&1; then
+if pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1; then
+    pgrep -u "$settings_user_id" -l -x "System Settings" >&2 || true
     fail "System Settings did not close before Accessibility approval"
 fi
 
