@@ -16,9 +16,11 @@ struct UnixSocketHTTPTests {
     }
 
     @Test func stalledPeerHonorsDeadline() async throws {
-        let result = try await probeResponse(chunks: [], stall: .milliseconds(500), timeout: .milliseconds(100))
+        let result = try await probeResponse(chunks: [], waitForClientClose: true, timeout: .milliseconds(100))
         #expect(!result.ready)
-        #expect(result.elapsed < .milliseconds(400))
+        // The client must time out while the peer is still holding the socket
+        // open. Task scheduling and continuation delays are not socket I/O.
+        #expect(result.peerSawClientClose)
     }
 
     @Test func rejectsOversizedSocketPath() async {
@@ -27,8 +29,8 @@ struct UnixSocketHTTPTests {
 
     /// A native Unix socket fixture; no Docker, VM, or subprocess required.
     private func probeResponse(
-        chunks: [String], stall: Duration = .zero, timeout: Duration = .seconds(1)
-    ) async throws -> (ready: Bool, elapsed: Duration) {
+        chunks: [String], waitForClientClose: Bool = false, timeout: Duration = .seconds(1)
+    ) async throws -> (ready: Bool, peerSawClientClose: Bool) {
         let path = "/tmp/xe-probe-\(UUID().uuidString.prefix(8)).sock"
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         try #require(listener >= 0)
@@ -48,29 +50,40 @@ struct UnixSocketHTTPTests {
         try #require(bound == 0)
         try #require(listen(listener, 1) == 0)
 
-        let peer = Task.detached {
-            var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
-            guard poll(&pending, 1, 2000) > 0 else { return }
-            let connection = accept(listener, nil, nil)
-            guard connection >= 0 else { return }
-            defer { close(connection) }
-            var enabled: Int32 = 1
-            _ = setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
-            var incoming = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
-            guard poll(&incoming, 1, 1000) > 0 else { return }
-            var request = [UInt8](repeating: 0, count: 1024)
-            _ = recv(connection, &request, request.count, 0)
-            try? await Task.sleep(for: stall)
-            for chunk in chunks {
-                let bytes = Array(chunk.utf8)
-                _ = bytes.withUnsafeBytes { send(connection, $0.baseAddress, bytes.count, 0) }
-                try? await Task.sleep(for: .milliseconds(20))
+        async let peerSawClientClose: Bool = withCheckedContinuation { continuation in
+            // Blocking fixture I/O must not occupy Swift's cooperative workers,
+            // where it could delay the very probe being tested.
+            DispatchQueue.global().async {
+                var sawClientClose = false
+                defer { continuation.resume(returning: sawClientClose) }
+                var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+                guard poll(&pending, 1, 2000) > 0 else { return }
+                let connection = accept(listener, nil, nil)
+                guard connection >= 0 else { return }
+                defer { close(connection) }
+                var enabled: Int32 = 1
+                _ = setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
+                var incoming = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
+                guard poll(&incoming, 1, 1000) > 0 else { return }
+                var request = [UInt8](repeating: 0, count: 1024)
+                guard recv(connection, &request, request.count, 0) > 0 else { return }
+                if waitForClientClose {
+                    // A generous watchdog bounds a broken probe. If it fires,
+                    // the fixture closes the peer and the assertion must fail.
+                    var disconnect = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
+                    guard poll(&disconnect, 1, 5000) > 0 else { return }
+                    var byte: UInt8 = 0
+                    sawClientClose = recv(connection, &byte, 1, 0) == 0
+                    return
+                }
+                for chunk in chunks {
+                    let bytes = Array(chunk.utf8)
+                    _ = bytes.withUnsafeBytes { send(connection, $0.baseAddress, bytes.count, 0) }
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
             }
         }
-        let started = ContinuousClock.now
         let ready = await UnixSocketHTTP.isReady(at: URL(fileURLWithPath: path), timeout: timeout)
-        let elapsed = started.duration(to: .now)
-        await peer.value
-        return (ready, elapsed)
+        return (ready, await peerSawClientClose)
     }
 }
