@@ -3,7 +3,12 @@
 set -euo pipefail
 
 APP_NAME="Xe Launcher"
-INSTALLED_APP="${INSTALLED_APP:-/Applications/${APP_NAME}.app}"
+if [[ -z "${INSTALLED_APP:-}" ]]; then
+    INSTALLED_APP="/Applications/${APP_NAME}.app"
+    if [[ ! -d "$INSTALLED_APP" && -d "${HOME}/Applications/${APP_NAME}.app" ]]; then
+        INSTALLED_APP="${HOME}/Applications/${APP_NAME}.app"
+    fi
+fi
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 STATUS_MENU_IDENTIFIER="dev.xe.computer.status-menu"
 STATUS_MENU_LABEL="Xe Launcher status menu"

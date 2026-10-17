@@ -24,4 +24,6 @@ if [[ -d "$frameworks_dir/Testing.framework" ]]; then
   )
 fi
 
+/bin/bash Tests/Integration/test-install-targets.sh
+
 exec /usr/bin/xcrun swift "${test_args[@]}" "$@"

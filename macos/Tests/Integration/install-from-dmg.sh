@@ -4,7 +4,9 @@ set -euo pipefail
 
 APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
-INSTALLED_APP="/Applications/${APP_NAME}.app"
+SYSTEM_INSTALLED_APP="/Applications/${APP_NAME}.app"
+USER_INSTALLED_APP="${HOME}/Applications/${APP_NAME}.app"
+INSTALLED_APP="$SYSTEM_INSTALLED_APP"
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 MANAGED_XE_COMPUTER_APP="${APP_DATA}/shims/default/Xe Computer.app"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,6 +32,39 @@ log() {
 fail() {
     printf '[installer-integration] ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+press_installation_button() {
+    if [[ "$DEV_MODE" == true ]]; then
+        press_process_button "bin" "$1" "$2" "$3"
+    else
+        press_ui_button "$BUNDLE_ID" "$1" "$2" "$3"
+    fi
+}
+
+wait_for_installed_bundle() {
+    local timeout_seconds="${1:-30}"
+    local deadline=$((SECONDS + timeout_seconds))
+
+    while (( SECONDS < deadline )); do
+        [[ -d "$INSTALLED_APP" ]] && return 0
+        if [[ "$INSTALLED_APP" == "$SYSTEM_INSTALLED_APP" ]] \
+            && press_installation_button "Install for This User" \
+                "Applications Folder Requires Permission" 1 >/dev/null 2>&1; then
+            INSTALLED_APP="$USER_INSTALLED_APP"
+            log "accepted the personal Applications folder fallback: $INSTALLED_APP"
+            deadline=$((SECONDS + timeout_seconds))
+        fi
+        sleep 0.25
+    done
+    [[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
+}
+
+installed_app_is_running() {
+    local executable_pattern
+    executable_pattern="$(printf '%s' "$INSTALLED_APP/Contents/MacOS/bin" \
+        | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+    pgrep -u "$(id -u)" -f "^${executable_pattern}( |$)" >/dev/null
 }
 
 usage() {
@@ -653,11 +688,19 @@ cleanup_mount() {
     fi
 }
 
+# Allow the installation-state tests to load these functions without launching
+# an app, mounting a disk image, or registering cleanup handlers.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 trap cleanup_mount EXIT
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "this test must run on macOS"
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
 DMG_PATH="$(cd "$(dirname "$DMG_PATH")" && pwd -P)/$(basename "$DMG_PATH")"
+for installed_candidate in "$SYSTEM_INSTALLED_APP" "$USER_INSTALLED_APP"; do
+    [[ ! -e "$installed_candidate" && ! -L "$installed_candidate" ]] \
+        || fail "existing installation found at $installed_candidate; run cleanup.sh before this test"
+done
 if ! run_with_timeout 8 osascript \
     -e 'tell application "System Events" to tell first application process whose frontmost is true to get count of menu bars' \
     >/dev/null 2>&1; then
@@ -747,11 +790,7 @@ else
 fi
 
 log "waiting for the installed bundle to be created"
-deadline=$((SECONDS + 30))
-while (( SECONDS < deadline )) && [[ ! -d "$INSTALLED_APP" ]]; do
-    sleep 0.25
-done
-[[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
+wait_for_installed_bundle
 [[ -f "$INSTALLED_APP/Contents/Library/LaunchDaemons/dev.xe.computer.ports.plist" ]] \
     || fail "installed app is missing the port helper launch daemon plist"
 [[ -x "$INSTALLED_APP/Contents/MacOS/port-helper" ]] \
@@ -940,14 +979,14 @@ fi
 log "waiting for installation and relaunch"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    if [[ -d "$INSTALLED_APP" ]] && pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; then
+    if [[ -d "$INSTALLED_APP" ]] && installed_app_is_running; then
         break
     fi
     sleep 1
 done
 
-pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null \
-    || fail "installed app did not relaunch from /Applications"
+installed_app_is_running \
+    || fail "installed app did not relaunch from $INSTALLED_APP"
 
 log "verifying installed signature"
 codesign --verify --deep --strict --verbose=2 "$INSTALLED_APP"
@@ -1070,10 +1109,10 @@ helper_pid_before="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "
 run_with_timeout 10 osascript -l JavaScript -e \
     'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate;'
 deadline=$((SECONDS + 70))
-while pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null && (( SECONDS < deadline )); do
+while installed_app_is_running && (( SECONDS < deadline )); do
     sleep 0.5
 done
-if pgrep -f '/Applications/Xe Launcher.app/Contents/MacOS/bin' >/dev/null; then
+if installed_app_is_running; then
     fail "launcher did not quit before the approved-helper relaunch check"
 fi
 # Model an older release's whole-file hash changing after code signing. The
@@ -1100,6 +1139,10 @@ done
 helper_pid_after="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
 [[ "$helper_pid_after" == "$helper_pid_before" ]] \
     || fail "update bookkeeping unnecessarily replaced the approved helper ($helper_pid_before -> $helper_pid_after)"
+
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+    printf 'INSTALLED_APP=%s\n' "$INSTALLED_APP" >> "$GITHUB_ENV"
+fi
 
 if [[ "$DEV_MODE" == true ]]; then
     log "PASS: development DMG installation, relaunch, signature, quarantine, Xe Computer, and permission checks succeeded"

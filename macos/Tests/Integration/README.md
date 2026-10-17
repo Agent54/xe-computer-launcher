@@ -28,7 +28,7 @@ Run destructive cleanup only in a disposable test account or VM. `cleanup.sh`:
 - unregisters the standard-port helper when the installed app supports CI teardown;
 - resets TCC permissions for `dev.xe.computer`;
 - removes trust for the generated local HTTPS certificate from the test user's Keychain;
-- removes `/Applications/Xe Launcher.app`;
+- removes Xe Launcher from `/Applications` and the test user's `~/Applications`;
 - moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
   with a timestamp, so accidentally removed data can be recovered;
 - detaches stale Xe Launcher disk-image mounts.
@@ -72,27 +72,47 @@ that as an already-clean permission state and continues.
 ## One-time machine setup
 
 1. Use macOS 26.2 or newer. The app declares 26.2 as its minimum version.
-2. Log into the test user at the macOS GUI. UI scripting cannot run from a
-   machine that only has a pre-login or SSH session.
+2. Use a dedicated standard account for the runner and log into that account
+   from the Mac's login or user-switching screen, then open the terminal there.
+   Changing only the shell user with `su` or `sudo` does not switch the terminal
+   application's desktop session. UI scripting cannot run from a machine that
+   only has a pre-login or SSH session. Authenticate individual administrator requests
+   with a separate administrator account; do not run Actions as that account.
 3. Open **System Settings → Privacy & Security → Accessibility** and enable the
    program that launches the script. For a manual run this is normally
-   Terminal, iTerm, or the terminal application used by the VM. For CI, enable
-   the runner application or its UI-test launcher. After enabling it, completely
-   quit and reopen that program so its new TCC authorization takes effect.
+   Terminal, iTerm, or the terminal application used by the VM. When CI starts
+   with `./run.sh` in that GUI terminal, approve the terminal application too.
+   A service or another UI-test launcher can have a different responsible
+   process; use the TCC log's attribution to identify it. After enabling it,
+   completely quit and reopen that program so its new authorization takes effect.
 4. On the first manual run, macOS may also ask whether that program may control
    **System Events**. Approve it. This grants the Apple Events permission used
-   to click the install alert.
-5. Ensure the test user can run `sudo` to remove the existing application. A
-   dedicated local test account can cache credentials before running; a CI
-   account should provide non-interactive sudo.
-6. Approve Xe Launcher's background port helper once as an administrator.
+   to click the install alert. DMG builds also require control of **Finder**
+   for the installer window and icon layout. Approve that Automation request
+   in the runner's GUI session before running CI.
+5. The installer first tries `/Applications/Xe Launcher.app`. If macOS denies
+   access, the test accepts the real **Install for This User** prompt and
+   verifies `~/Applications/Xe Launcher.app` instead. The runner needs write
+   access to its personal Applications folder; it does not need write access to
+   all of `/Applications`. Cleanup covers both exact installation paths and
+   does not invoke `sudo`. Remove any old installation owned by another account
+   separately before provisioning this dedicated test machine.
+6. Approve Xe Launcher's background port helper with separate administrator
+   credentials when requested.
    After the first signed install selects ports 80/443, macOS shows a
    **Background Items Added** notification. The test opens **System Settings →
    General → Login Items & Extensions** and attempts to enable Xe Launcher under
    **Allow in Background**. If the switch is not clicked automatically, enable
-   it in the runner's GUI session. For unattended CI, set the repository Actions
-   secret `XE_CI_MAC_PASSWORD` to the dedicated, administrator-capable macOS
-   runner account's password.
+   it in the runner's GUI session and authenticate with the separate
+   administrator account. CI cleanup unregisters the helper, so a fresh
+   installation may require approval again. A standard account's password
+   cannot satisfy an administrator request.
+   The optional repository Actions secret `XE_CI_MAC_PASSWORD` supplies only
+   a password for the account already selected in a native authorization
+   dialog; the authorization script cannot select a separate administrator
+   username.
+   Leave it unset and complete dialogs manually when CI must not hold those
+   credentials. This does not require running the job as an administrator.
    The installer test and CI cleanup use it only for Xe Launcher permission
    and local HTTPS certificate dialogs; it is not passed to the app or printed
    in logs. Without the secret, complete
@@ -123,14 +143,44 @@ bound, that option is not offered; selecting 80/443 continues through the
 normal macOS background-helper approval flow. Choosing **Not Now** leaves
 local routing and browser restoration stopped until the next launch.
 
-Accessibility and Automation grants belong to the process that invokes
-`osascript`. If the test is invoked over SSH, granting Terminal locally does
+Accessibility and Automation grants are attributed to the responsible app
+reported by TCC, which can be an ancestor of `osascript`. If the test is invoked
+over SSH, granting Terminal locally does
 not grant the SSH session the same permissions. Prefer a logged-in launch agent
 or another GUI-session runner whose executable has been approved in advance.
 The raw error may say `osascript is not allowed assistive access`; for a normal
 interactive run, approve the terminal application responsible for launching
 `/usr/bin/osascript`, then restart that terminal. The test checks this before
 performing UI automation.
+
+Validate Finder Automation with the actual `osascript` command in the GUI
+terminal used to provision the runner:
+
+```sh
+/usr/bin/osascript -e 'tell application "Finder" to get name of startup disk'
+```
+
+Allow Finder control if prompted and run the command again. For a service,
+also verify the real CI job; a successful Terminal test does not establish the
+service's Automation permission. A direct Finder command in Script Editor
+is not an equivalent check: Script Editor can use Apple's private Apple Events
+entitlement, which a child interpreter does not inherit.
+
+Screen Sharing can show a separate desktop while another account owns the
+Mac's main console session. If Finder consent fails without showing a dialog,
+check the runner's session with:
+
+```sh
+/usr/sbin/scutil <<< 'show State:/Users/ConsoleUser'
+```
+
+Within `SessionInfo`, find `kCGSSessionUserNameKey : github-actions-runner`
+(or the actual runner account name) and check `kCGSSessionOnConsoleKey`.
+Use the runner's main console session (`TRUE`) when provisioning permissions;
+the top-level `Name` and `/dev/console` ownership alone do not identify it.
+If user switching is stuck with `mSwitchInProgress already`, restart the Mac
+normally after saving work and log into the runner account first. This clears
+the stuck login processes without making the runner an administrator.
 
 ## Build and run
 
@@ -192,14 +242,29 @@ when quarantine requires it, chooses the installer alert's default
 **Install in Applications**, approves the same system confirmation for the
 newly installed copy if macOS shows it again, and verifies:
 
-- installation as `/Applications/Xe Launcher.app`;
-- relaunch from `/Applications`, not the mounted disk image;
+- installation as `/Applications/Xe Launcher.app`, or the personal
+  `~/Applications/Xe Launcher.app` after the app offers and the test accepts its
+  permission fallback;
+- relaunch from that exact installation path in the test user's account;
 - the expected bundle identifier;
 - strict code-signature validity;
 - successful Gatekeeper assessment in distribution mode;
 - removal of the installed bundle's quarantine attribute;
 - provisioning and launch of the managed Xe Computer app shim; and
 - no macOS App Management request or "prevented from modifying apps" warning.
+
+On success, the installer test writes its selected `INSTALLED_APP` path to
+`GITHUB_ENV` for the separate About-dialog step. Manual About tests discover a
+personal installation when no system-wide copy exists; an explicit
+`INSTALLED_APP` still selects the intended bundle when both copies are present.
+
+The runtime test command also runs focused installation-target regression
+checks. They can be run independently without launching an app or cleaning a
+real installation:
+
+```sh
+bash macos/Tests/Integration/test-install-targets.sh
+```
 
 For Accessibility onboarding, the installer test uses the native macOS
 permission dialog's **Open System Settings** button before enabling the app in
@@ -232,8 +297,10 @@ cleanup, artifact/build preparation, and the test invocation:
   run: macos/Tests/Integration/about-version.sh
 ```
 
-The runner still needs the Accessibility, Automation, sudo, signing,
-and GUI-session prerequisites described above. If a hosted runner cannot grant
+The runner still needs the Accessibility, Automation, installation access,
+signing, and GUI-session prerequisites described above. Privileged onboarding
+requests need separate administrator approval even though the job runs as a
+standard user. If a hosted runner cannot grant
 those UI permissions, use a preconfigured self-hosted runner; do not create a
 second CI-specific test implementation.
 
