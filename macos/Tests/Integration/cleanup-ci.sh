@@ -67,10 +67,13 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         -c "$leaf_certificate" >/dev/null 2>&1; then
     printf '[installer-cleanup] removing previous local HTTPS certificate trust\n'
     if [[ -n "${XE_CI_MAC_PASSWORD:-}" ]]; then
+        printf '[installer-cleanup] runner password is configured; starting certificate authorization helper\n'
         XE_CI_AUTH_KIND=certificate \
             XE_CI_CERT_PATH="$root_certificate" \
-            osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" 2>/dev/null &
+            osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" &
         auth_pid=$!
+    else
+        printf '[installer-cleanup] XE_CI_MAC_PASSWORD is unset; complete the user certificate authorization dialog manually\n'
     fi
     perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 90 \
         security remove-trusted-cert "$root_certificate" \

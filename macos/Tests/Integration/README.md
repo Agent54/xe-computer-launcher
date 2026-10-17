@@ -121,6 +121,15 @@ that as an already-clean permission state and continues.
    cannot select another username and does not elevate the runner. Leave it
    unset to complete these user-Keychain dialogs manually.
 
+The certificate authorization helper first assigns the password directly to the
+secure field in a matching user certificate-trust dialog. If macOS rejects that
+operation, keyboard input requires the dialog's process to be frontmost and the
+secure field to be focused; it replaces an existing entry before typing. The
+helper makes at most two submission attempts. CI logs its dialog detection,
+field-assignment path, and numeric Apple Event errors without logging field
+values or raw exceptions that could contain the password. The actual trust
+change and subsequent certificate verification still determine success.
+
 After installation, hold Option while opening the Xe Launcher status menu to
 show **Local App Ports** (80/443 or 5196/5194) and **Compose Storage Folder**.
 Either change takes effect after quitting and reopening the launcher. Choosing
@@ -279,6 +288,15 @@ real installation:
 
 ```sh
 bash macos/Tests/Integration/test-install-targets.sh
+```
+
+The authorization helper's simulated UI checks run with the runtime suite too.
+From the `macos` directory, they can be run without real credentials or dialogs:
+
+```sh
+deno run --no-config --no-lock \
+  --allow-read=Tests/Integration/authorize-macos-dialog.jxa \
+  Tests/Integration/test-authorize-macos-dialog.mjs
 ```
 
 For manual fresh Accessibility onboarding, the installer test uses the native macOS

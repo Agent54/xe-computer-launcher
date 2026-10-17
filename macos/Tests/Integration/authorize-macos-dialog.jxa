@@ -10,24 +10,58 @@ function clickCenter(process, element) {
     return true;
 }
 
-function run() {
+function authorizationFailure(message) {
+    const error = new Error(message);
+    error.authorizationMessage = message;
+    throw error;
+}
+
+function errorCode(error) {
+    // Apple Event errors can include the command's password argument in their
+    // message. Only a numeric error code may leave this process.
+    return error && typeof error.errorNumber === 'number'
+        ? ' (Apple Event error ' + error.errorNumber + ')' : '';
+}
+
+function focusSecureField(process, window, passwordField) {
+    try { process.frontmost = true; } catch {}
+    try { window.performAction('AXRaise'); } catch {}
+    if (process.frontmost() !== true) return false;
+    try {
+        if (!clickCenter(process, passwordField)) passwordField.click();
+    } catch {
+        passwordField.click();
+    }
+    $.NSThread.sleepForTimeInterval(0.2);
+    return process.frontmost() === true && passwordField.focused() === true;
+}
+
+function authorizeDialog() {
     const environment = $.NSProcessInfo.processInfo.environment;
     const password = ObjC.unwrap(environment.objectForKey('XE_CI_MAC_PASSWORD'));
     const authKind = ObjC.unwrap(environment.objectForKey('XE_CI_AUTH_KIND'));
     const certPath = environment.objectForKey('XE_CI_CERT_PATH');
     if (typeof password !== 'string' || password.length === 0) {
-        return '[installer-integration] macOS authorization helper has no password';
+        authorizationFailure('macOS authorization helper has no password');
     }
     let events;
     try {
         events = Application('/System/Library/CoreServices/System Events.app');
-    } catch {
-        return '[installer-integration] macOS authorization helper could not open System Events';
+    } catch (error) {
+        authorizationFailure('macOS authorization helper could not open System Events' + errorCode(error));
     }
     // A SecurityAgent password panel can be visible while System Settings or
     // Terminal owns the menu bar. Inspect only known authorization processes,
-    // then focus the matching secure field before typing the secret.
-    const authProcesses = new Set(['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings', 'security']);
+    // then address the matching secure field before considering keyboard input.
+    const authProcesses = ['SecurityAgent', 'AuthorizationHost', 'CoreAuthenticationAgent', 'System Settings', 'security'];
+    const reported = new Set();
+    function reportOnce(key, message) {
+        if (reported.has(key)) return;
+        reported.add(key);
+        console.log('[installer-integration] ' + message);
+    }
+    reportOnce('started', 'macOS authorization helper started for ' +
+        (authKind === 'certificate' ? 'certificate trust' : 'permission approval'));
     const deadline = Date.now() + 240000;
     let inspected = false;
     let certificateAttempts = 0;
@@ -43,10 +77,13 @@ function run() {
         }
         let certificatePromptVisible = false;
         let inspectedThisPoll = false;
-        try {
-            for (const process of events.applicationProcesses()) {
-                const processName = process.name();
-                if (!authProcesses.has(processName)) continue;
+        for (const processName of authProcesses) {
+            try {
+                // Query only known owners. An unrelated or disappearing GUI
+                // process must not prevent us from reaching SecurityAgent.
+                const process = events.applicationProcesses.byName(processName);
+                if (!process.exists()) continue;
+                reportOnce('owner-' + processName, 'inspecting authorization UI owned by ' + processName);
                 for (const window of process.windows()) {
                     const windowName = String(window.name() || '');
                     let surfaces = [window];
@@ -88,8 +125,14 @@ function run() {
                             $.NSFileManager.defaultManager.fileExistsAtPath(certPath) &&
                             /Certificate Trust Settings/i.test(context) &&
                             /security|Xe Launcher|Xe Computer Local Development CA/i.test(context) &&
-                            !/Helium/i.test(context);
-                        if (certificateDialog) certificatePromptVisible = true;
+                            !/Helium|System Certificate Trust Settings/i.test(context);
+                        if (certificateDialog) {
+                            certificatePromptVisible = true;
+                            reportOnce('matched', 'matched certificate trust dialog owned by ' + processName);
+                            if (!passwordField) {
+                                reportOnce('no-field', 'matching certificate dialog exposes no secure password field');
+                            }
+                        }
                         if (!passwordField || !(permissionDialog || certificateDialog)) continue;
                         if (permissionDialog) {
                             passwordField.click();
@@ -105,45 +148,55 @@ function run() {
                             continue;
                         }
 
-                        // AX focus can be true inside an inactive process. Key
-                        // events still go to the frontmost app, so activate the
-                        // owner and physically click the secure field first.
-                        try { process.frontmost = true; } catch {}
-                        try { window.performAction('AXRaise'); } catch {}
-                        try {
-                            if (!clickCenter(process, passwordField)) passwordField.click();
-                        } catch {
-                            passwordField.click();
-                        }
-                        $.NSThread.sleepForTimeInterval(0.2);
-                        if (passwordField.focused() !== true) continue;
-
-                        if (certificateDialog && certificateAttempts === 1) {
-                            // A second attempt uses the field's AX setter when
-                            // macOS allows it, avoiding global key routing.
-                            try { passwordField.value = password; }
-                            catch { events.keystroke(password); }
-                        } else {
-                            events.keystroke(password);
-                        }
-                        $.NSThread.sleepForTimeInterval(0.2);
-                        if (submitButton) {
+                        // Address the matched secure field directly first. This
+                        // does not route the secret through global keyboard focus.
+                        let filled = false;
+                        if (certificateAttempts === 0) {
                             try {
-                                if (!clickCenter(process, submitButton)) submitButton.click();
-                            } catch {
-                                submitButton.click();
+                                passwordField.value = password;
+                                filled = true;
+                                reportOnce('ax-filled', 'filled certificate password field through Accessibility');
+                            } catch (error) {
+                                reportOnce('ax-unavailable', 'secure field rejected Accessibility value assignment' + errorCode(error));
                             }
+                        }
+                        if (!filled) {
+                            if (!focusSecureField(process, window, passwordField)) {
+                                reportOnce('no-focus', 'certificate dialog could not become frontmost with its secure field focused; no password keystrokes sent');
+                                continue;
+                            }
+                            // Replace a partial or rejected entry on every retry.
+                            events.keystroke('a', {using: 'command down'});
+                            if (process.frontmost() !== true || passwordField.focused() !== true) continue;
+                            events.keystroke(password);
+                            reportOnce('typed', 'filled certificate password field using guarded keyboard input');
+                        }
+                        $.NSThread.sleepForTimeInterval(0.2);
+                        if (!submitButton && !focusSecureField(process, window, passwordField)) continue;
+                        // Count before dispatch: an Apple Event can be delivered
+                        // even when its reply fails. Never submit endlessly.
+                        certificateAttempts += 1;
+                        lastCertificateSubmission = Date.now();
+                        console.log('[installer-integration] submitting certificate authorization attempt ' + certificateAttempts);
+                        if (submitButton) {
+                            // Prefer a targeted AX click. Keep the physical-click
+                            // fallback for protected panels that ignore it.
+                            let clicked = false;
+                            if (certificateAttempts === 2 && process.frontmost() === true) {
+                                clicked = clickCenter(process, submitButton);
+                            }
+                            if (!clicked) submitButton.click();
                         } else {
                             events.keyCode(36);
                         }
-                        certificateAttempts += 1;
-                        lastCertificateSubmission = Date.now();
                     }
                 }
+                inspected = true;
+                inspectedThisPoll = true;
+            } catch (error) {
+                reportOnce('inspection-' + processName, 'could not complete authorization UI operation for ' + processName + errorCode(error));
             }
-            inspected = true;
-            inspectedThisPoll = true;
-        } catch {}
+        }
         if (authKind === 'certificate' && certificateAttempts > 0 && inspectedThisPoll) {
             certificateQuietPolls = certificatePromptVisible ? 0 : certificateQuietPolls + 1;
             if (certificateQuietPolls >= 8) {
@@ -151,16 +204,26 @@ function run() {
             }
             if (certificateAttempts >= 2 && certificatePromptVisible &&
                 Date.now() - lastCertificateSubmission >= 5000) {
-                throw new Error('certificate authorization dialog remained open after password submission');
+                authorizationFailure('certificate authorization dialog remained open after password submission');
             }
         }
         $.NSThread.sleepForTimeInterval(0.25);
     }
     if (authKind === 'certificate') {
-        throw new Error('certificate authorization dialog did not complete before the timeout');
+        authorizationFailure('certificate authorization dialog did not complete before the timeout');
     }
     if (!inspected) {
         return '[installer-integration] macOS authorization helper could not inspect the dialog';
     }
     return '[installer-integration] no matching macOS authorization dialog appeared';
+}
+
+function run() {
+    try {
+        return authorizeDialog();
+    } catch (error) {
+        // Never expose a raw scripting exception: it can contain credentials.
+        throw new Error(error.authorizationMessage ||
+            'macOS authorization helper failed' + errorCode(error));
+    }
 }

@@ -25,5 +25,8 @@ if [[ -d "$frameworks_dir/Testing.framework" ]]; then
 fi
 
 /bin/bash Tests/Integration/test-install-targets.sh
+deno run --no-config --no-lock \
+  --allow-read=Tests/Integration/authorize-macos-dialog.jxa \
+  Tests/Integration/test-authorize-macos-dialog.mjs
 
 exec /usr/bin/xcrun swift "${test_args[@]}" "$@"
