@@ -245,7 +245,7 @@ start_runner_auth_helper() {
     XE_CI_MAC_PASSWORD="$runner_password" \
         XE_CI_AUTH_KIND="$auth_kind" \
         XE_CI_CERT_PATH="$APP_DATA/workerd/ui-https/root.crt" \
-        osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" 2>/dev/null &
+        osascript -l JavaScript "$SCRIPT_DIR/authorize-macos-dialog.jxa" &
     if [[ "$auth_kind" == certificate ]]; then
         runner_certificate_auth_pid=$!
     else
