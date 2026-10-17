@@ -75,9 +75,15 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     else
         printf '[installer-cleanup] XE_CI_MAC_PASSWORD is unset; complete the user certificate authorization dialog manually\n'
     fi
-    perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 90 \
-        security remove-trusted-cert "$root_certificate" \
-        || fail "could not remove the previous local HTTPS certificate trust"
+    if removal_output="$(perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 90 \
+        security remove-trusted-cert "$root_certificate" 2>&1)"; then
+        :
+    elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
+        printf '[installer-cleanup] CA has no current-user trust setting; verifying that the old certificate is no longer trusted\n'
+    else
+        printf '%s\n' "$removal_output" >&2
+        fail "could not remove the previous local HTTPS certificate trust"
+    fi
     stop_auth_helper
     # Security.framework can briefly retain the prior evaluation after a trust
     # change. Wait for it to become visible, then fail if trust remains.
@@ -85,7 +91,7 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     while security verify-cert -q -L -p ssl -n compose-ui.localhost \
         -c "$leaf_certificate" >/dev/null 2>&1; do
         (( SECONDS < trust_removal_deadline )) \
-            || fail "the previous local HTTPS certificate is still trusted"
+            || fail "the previous local HTTPS certificate still validates after current-user trust cleanup; inspect its remaining trust source before deleting app data"
         sleep 0.25
     done
 fi
