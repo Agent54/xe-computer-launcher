@@ -57,6 +57,11 @@ before removing the old certificate's trust. The trust checks evaluate only the
 leaf certificate against macOS's trust stores; supplying the root certificate
 would not prove it was trusted in the Keychain. Removal and verification remain
 required before deleting the old app data.
+If macOS reports that the CA has no current-user trust setting, cleanup treats
+the setting as already absent and still verifies that the old leaf no longer
+validates. All other removal errors remain fatal. If the leaf keeps validating,
+cleanup preserves app data and reports the remaining trust source as unresolved;
+successful TLS validation alone does not identify a per-user CA trust record.
 
 After the About-dialog test, both workflows run `cleanup.sh --stop-only` even
 if the test fails. It asks Xe Launcher to quit gracefully, then stops any

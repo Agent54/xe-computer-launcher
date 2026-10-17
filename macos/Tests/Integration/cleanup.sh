@@ -332,8 +332,21 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     && security verify-cert -q -L -p ssl -n compose-ui.localhost \
         -c "$leaf_certificate" >/dev/null 2>&1; then
     log "removing local HTTPS certificate trust"
-    security remove-trusted-cert "$root_certificate" \
-        || fail "could not remove local HTTPS certificate trust before deleting its source"
+    if removal_output="$(security remove-trusted-cert "$root_certificate" 2>&1)"; then
+        :
+    elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
+        log "CA has no current-user trust setting; verifying that the old certificate is no longer trusted"
+    else
+        printf '%s\n' "$removal_output" >&2
+        fail "could not remove local HTTPS certificate trust before deleting its source"
+    fi
+    trust_removal_deadline=$((SECONDS + 10))
+    while security verify-cert -q -L -p ssl -n compose-ui.localhost \
+        -c "$leaf_certificate" >/dev/null 2>&1; do
+        (( SECONDS < trust_removal_deadline )) \
+            || fail "the old HTTPS certificate still validates after current-user trust cleanup; preserving app data for inspection"
+        sleep 0.25
+    done
 fi
 
 if [[ "$PRESERVE_PERMISSIONS" != "1" ]]; then
