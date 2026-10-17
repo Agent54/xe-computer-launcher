@@ -290,15 +290,6 @@ real installation:
 bash macos/Tests/Integration/test-install-targets.sh
 ```
 
-The authorization helper's simulated UI checks run with the runtime suite too.
-From the `macos` directory, they can be run without real credentials or dialogs:
-
-```sh
-deno run --no-config --no-lock \
-  --allow-read=Tests/Integration/authorize-macos-dialog.jxa \
-  Tests/Integration/test-authorize-macos-dialog.mjs
-```
-
 For manual fresh Accessibility onboarding, the installer test uses the native macOS
 permission dialog's **Open System Settings** button before enabling the app in
 the Privacy & Security pane. It never opens that pane independently: bypassing
