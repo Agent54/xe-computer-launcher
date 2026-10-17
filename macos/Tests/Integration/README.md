@@ -8,12 +8,14 @@ the DMG, when the installed copy starts, and when testing its later relaunch.
 The disclaimer opens after AppKit finishes launching, while launcher state and
 runtime components remain uninitialized until it is accepted.
 It also accepts the first-run user data storage prompt using the
-default `stacks` folder and selects local HTTP/HTTPS ports 80/443. It approves
+default `stacks` folder. Both CI workflows use `--standard-user`: HTTP/HTTPS
+ports 5196/5194 and a persistent, preapproved Accessibility grant. It approves
 Xe Launcher's macOS user-Keychain prompt for its generated local HTTPS
 certificate and verifies SSL trust before waiting for Compose UI. The
-test then relaunches an approved installation with an older registration marker
-and verifies that HTTPS and Xe Computer resume without replacing the running
-port helper or asking for its approval again. The
+test then relaunches the installation and verifies that both ports and
+Xe Computer resume with the saved settings. The manual default profile tests
+80/443, fresh Accessibility onboarding, and migration of an approved port
+helper's registration marker without replacing the running helper. The
 `verify-sparkle.sh` and `verify-appcast.sh` scripts validate the embedded
 updater and its published feed without changing an installed application. The
 same scripts are intended to run inside a local UTM macOS guest and directly on
@@ -34,15 +36,18 @@ Run destructive cleanup only in a disposable test account or VM. `cleanup.sh`:
 - detaches stale Xe Launcher disk-image mounts.
 
 The release and pull-request workflows run `cleanup-ci.sh` only before
-installation. It explicitly disables Trash and permanently removes only the
-exact previous Xe test installation, data, and owned generated-shim paths after
+installation. It retains the installed signed app and its privacy grants,
+and permanently removes only the exact previous Xe test data and owned
+generated-shim paths after
 removing trust for the prior run's local HTTPS certificate. It refuses to run outside
 the launcher's release or integration jobs on the self-hosted macOS ARM64 GitHub Actions runner,
 and both cleanup modes refuse targets that contain mounted filesystems or have
 symlinked ancestor directories. Manual runs use `cleanup.sh` and retain the
 recoverable behavior described above. Trash moves use an atomic rename and fail
 across filesystems instead of copying and deleting the source;
-ambient environment variables cannot enable permanent cleanup. Failed workspace
+ambient environment variables cannot enable permanent cleanup. CI neither
+unregisters nor approves a privileged helper; the 5196/5194 setup must not create
+a helper-registration marker. Failed workspace
 build artifacts remain available until the next checkout cleans the workspace.
 Timestamped entries created by older workflow versions are not touched and
 require one-time runner maintenance.
@@ -64,7 +69,8 @@ next CI run starts. A detached DMG can be reopened manually, including when
 installation failed before the app was copied. End-of-run app shutdown does not
 delete the installed app or data, unregister the port helper, or reset permissions;
 the installation remains available to inspect until the next run starts.
-The launchd helper itself remains registered and keeps 80/443 reserved.
+The manual 80/443 profile leaves its approved launchd helper registered and
+reserving those ports until it is unregistered or custom ports are selected.
 
 On a fresh VM, `tccutil` may report that the bundle is not registered; the test treats
 that as an already-clean permission state and continues.
@@ -97,44 +103,38 @@ that as an already-clean permission state and continues.
    all of `/Applications`. Cleanup covers both exact installation paths and
    does not invoke `sudo`. Remove any old installation owned by another account
    separately before provisioning this dedicated test machine.
-6. Approve Xe Launcher's background port helper with separate administrator
-   credentials when requested.
-   After the first signed install selects ports 80/443, macOS shows a
-   **Background Items Added** notification. The test opens **System Settings →
-   General → Login Items & Extensions** and attempts to enable Xe Launcher under
-   **Allow in Background**. If the switch is not clicked automatically, enable
-   it in the runner's GUI session and authenticate with the separate
-   administrator account. CI cleanup unregisters the helper, so a fresh
-   installation may require approval again. A standard account's password
-   cannot satisfy an administrator request.
-   The optional repository Actions secret `XE_CI_MAC_PASSWORD` supplies only
-   a password for the account already selected in a native authorization
-   dialog; the authorization script cannot select a separate administrator
-   username.
-   Leave it unset and complete dialogs manually when CI must not hold those
-   credentials. This does not require running the job as an administrator.
-   The installer test and CI cleanup use it only for Xe Launcher permission
-   and local HTTPS certificate dialogs; it is not passed to the app or printed
-   in logs. Without the secret, complete
-   any administrator prompt in the runner's GUI session. The test waits for the
-   launch daemon and verifies both public ports without restarting the launcher.
-   The approved helper remains registered across normal app restarts, reserving
-   80/443 until custom ports are selected.
+6. Install a Developer ID signed Xe Launcher in the runner's account, keep the
+   default 5196/5194 ports, and approve **Xe Launcher** under **Privacy &
+   Security → Accessibility** once. Have an administrator authenticate this
+   setup action if macOS requires it; the runner stays Standard. Quit the app
+   normally afterward. CI retains this bundle, refreshes its contents from each
+   verified DMG, and exercises the installer's **Open Installed App** flow.
+   It checks that the new build matches the retained app's signing requirement
+   before copying, and preserves the app directory. If the grant is missing,
+   CI fails with setup instructions and never changes the Accessibility switch.
+   A fresh machine can perform its first installation during the test, but must
+   receive this one-time approval before unattended runs can pass.
+7. The optional repository Actions secret `XE_CI_MAC_PASSWORD` supplies the
+   runner account's password for its native local HTTPS certificate dialogs.
+   CI still verifies HTTPS trust and removes the prior test CA before resetting
+   app data. The secret is not passed to Xe Launcher or printed in logs. It
+   cannot select another username and does not elevate the runner. Leave it
+   unset to complete these user-Keychain dialogs manually.
 
 After installation, hold Option while opening the Xe Launcher status menu to
 show **Local App Ports** (80/443 or 5196/5194) and **Compose Storage Folder**.
 Either change takes effect after quitting and reopening the launcher. Choosing
 another storage folder does not move existing projects.
 
-The cleanup deliberately resets Xe Launcher's own permissions on every run. After
-the installed copy relaunches, the test grants its Accessibility request in
-System Settings. If macOS requires a password to change that switch, the same
-optional `XE_CI_MAC_PASSWORD` secret is used. This interaction is part of the
-integration test, not a persistent one-time machine grant. CI closes System
-Settings before the test and between the background-item and Accessibility
-steps, so each macOS permission action opens its intended pane. Xe Launcher
-keeps its setup message visible and does not start services until both the
-port helper and Accessibility are confirmed.
+The manual default profile deliberately resets Xe Launcher's permissions with
+`cleanup.sh`, selects 80/443, and handles the native background-helper and
+Accessibility onboarding dialogs. These actions may need separate administrator
+approval and belong on a disposable test machine with an operator present.
+The optional password helper enters a password only for the account already
+selected by macOS. It cannot supply a Standard user's credentials to satisfy an
+administrator request. Xe Launcher keeps its setup message visible until the
+required permissions are confirmed. These app features and their manual tests
+remain available; the Standard-user CI profile does not request them.
 
 An existing installation with a saved storage folder but no confirmed port
 choice—including older setups that silently saved 5196/5194—gets a one-time
@@ -202,6 +202,21 @@ macos/Tests/Integration/install-from-dmg.sh
 macos/Tests/Integration/about-version.sh
 ```
 
+To reproduce the Standard-user CI profile while retaining the one-time
+Accessibility grant and installed app, use:
+
+```sh
+bash macos/Tests/Integration/cleanup.sh --preserve-permissions
+macos/Tests/Integration/install-from-dmg.sh --standard-user
+macos/Tests/Integration/about-version.sh
+```
+
+This still resets app data and local certificate trust. Use a dedicated test
+account. A retained installation must belong to the runner, be writable, and
+have a matching signing identity. Keep only one installation path. Ad-hoc
+`--dev` builds cannot use persistent-permission mode because their signing
+identity can change on every build.
+
 To test a DMG from another location, including a downloaded CI artifact:
 
 ```sh
@@ -266,7 +281,7 @@ real installation:
 bash macos/Tests/Integration/test-install-targets.sh
 ```
 
-For Accessibility onboarding, the installer test uses the native macOS
+For manual fresh Accessibility onboarding, the installer test uses the native macOS
 permission dialog's **Open System Settings** button before enabling the app in
 the Privacy & Security pane. It never opens that pane independently: bypassing
 the native dialog would leave an unanswered permission request queued in the
@@ -291,16 +306,18 @@ cleanup, artifact/build preparation, and the test invocation:
 - name: Run installer integration test
   env:
     DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Launcher.dmg
-  run: macos/Tests/Integration/install-from-dmg.sh
+  run: macos/Tests/Integration/install-from-dmg.sh --standard-user
 
 - name: Verify version in About dialog
   run: macos/Tests/Integration/about-version.sh
 ```
 
-The runner still needs the Accessibility, Automation, installation access,
-signing, and GUI-session prerequisites described above. Privileged onboarding
-requests need separate administrator approval even though the job runs as a
-standard user. If a hosted runner cannot grant
+The runner still needs the persistent Accessibility, Automation, installation
+access, signing, and GUI-session prerequisites described above. The Standard-user
+profile checks HTTP and HTTPS on 5196/5194, including after relaunch, and never
+changes Accessibility switches or registers a privileged helper. DMG formatting,
+signatures, Gatekeeper, TLS trust, Compose API, Xe Computer, and About checks
+remain enabled. If a hosted runner cannot grant
 those UI permissions, use a preconfigured self-hosted runner; do not create a
 second CI-specific test implementation.
 

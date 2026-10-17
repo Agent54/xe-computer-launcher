@@ -17,6 +17,10 @@ OWNS_MOUNT=0
 MOUNT_DEVICE=""
 MOUNT_DEVICE_NODE=""
 DEV_MODE=false
+STANDARD_USER_MODE=false
+EXISTING_INSTALLED_APP=""
+HTTP_PORT=80
+HTTPS_PORT=443
 DEV_INSTALL_ARGUMENT="--xe-computer-development-install"
 INSTALLED_RELAUNCH_ARGUMENT="--xe-computer-installed-relaunch"
 TEST_STARTED_AT="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -47,7 +51,15 @@ wait_for_installed_bundle() {
     local deadline=$((SECONDS + timeout_seconds))
 
     while (( SECONDS < deadline )); do
-        [[ -d "$INSTALLED_APP" ]] && return 0
+        if [[ -n "$EXISTING_INSTALLED_APP" ]]; then
+            if [[ "$INSTALLED_APP" == "$EXISTING_INSTALLED_APP" ]] \
+                && press_installation_button "Open Installed App" \
+                    "Xe Launcher Is Already Installed" 1 >/dev/null 2>&1; then
+                return 0
+            fi
+        elif [[ -d "$INSTALLED_APP" ]]; then
+            return 0
+        fi
         if [[ "$INSTALLED_APP" == "$SYSTEM_INSTALLED_APP" ]] \
             && press_installation_button "Install for This User" \
                 "Applications Folder Requires Permission" 1 >/dev/null 2>&1; then
@@ -57,7 +69,87 @@ wait_for_installed_bundle() {
         fi
         sleep 0.25
     done
+    if [[ -n "$EXISTING_INSTALLED_APP" ]]; then
+        fail "installer did not offer the retained installation at $EXISTING_INSTALLED_APP"
+    fi
     [[ -d "$INSTALLED_APP" ]] || fail "installed app was not created at $INSTALLED_APP"
+}
+
+find_existing_installation() {
+    local candidate
+    for candidate in "$SYSTEM_INSTALLED_APP" "$USER_INSTALLED_APP"; do
+        [[ -e "$candidate" || -L "$candidate" ]] || continue
+        [[ "$STANDARD_USER_MODE" == true ]] \
+            || fail "existing installation found at $candidate; run cleanup.sh before this test"
+        [[ -z "$EXISTING_INSTALLED_APP" ]] \
+            || fail "both installation paths exist; provision only one CI installation"
+        [[ -d "$candidate" && ! -L "$candidate" && -O "$candidate" && -w "$candidate" ]] \
+            || fail "retained CI installation must be a writable bundle owned by the runner: $candidate"
+        local ancestor="$(dirname "$candidate")"
+        while [[ "$ancestor" != / ]]; do
+            [[ ! -L "$ancestor" ]] || fail "retained installation has a symlinked ancestor: $ancestor"
+            ancestor="$(dirname "$ancestor")"
+        done
+        EXISTING_INSTALLED_APP="$candidate"
+    done
+}
+
+refresh_existing_installation() {
+    [[ -n "$EXISTING_INSTALLED_APP" ]] || return 0
+    local requirement
+    local INSTALLED_APP="$EXISTING_INSTALLED_APP"
+    if installed_app_is_running; then
+        fail "retained installation is still running; stop it before refreshing $INSTALLED_APP"
+    fi
+    requirement="$(codesign -d -r- "$EXISTING_INSTALLED_APP" 2>&1 \
+        | sed -n 's/^designated => //p')"
+    [[ -n "$requirement" ]] || fail "retained installation has no signing requirement"
+    codesign --verify --strict -R "=$requirement" "$SOURCE_APP" \
+        || fail "new build does not match the retained app's signing identity; provision its Accessibility permission again"
+    log "refreshing the retained bundle from the verified DMG: $EXISTING_INSTALLED_APP"
+    # Preserve the app directory and TCC identity while replacing all contents,
+    # including removing files absent from the new build. Never open the old build.
+    /usr/bin/rsync -aEc --delete -- "$SOURCE_APP/" "$EXISTING_INSTALLED_APP/"
+    xattr -dr com.apple.quarantine "$EXISTING_INSTALLED_APP"
+    codesign --verify --deep --strict "$EXISTING_INSTALLED_APP" \
+        || fail "refreshed CI installation has an invalid signature"
+}
+
+compose_ui_responds() {
+    /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
+        --resolve "compose-ui.localhost:${HTTP_PORT}:127.0.0.1" \
+        --output /dev/null "http://compose-ui.localhost:${HTTP_PORT}/" \
+        && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
+            --resolve "compose-ui.localhost:${HTTPS_PORT}:127.0.0.1" \
+            --output /dev/null "https://compose-ui.localhost:${HTTPS_PORT}/"
+}
+
+verify_saved_ports() {
+    local saved_http_port saved_https_port saved_port_choice
+    saved_http_port="$(plutil -extract app_http_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    saved_https_port="$(plutil -extract app_https_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    saved_port_choice="$(plutil -extract app_port_choice_confirmed raw "$APP_DATA/settings.json" 2>/dev/null || true)"
+    [[ "$saved_http_port" == "$HTTP_PORT" && "$saved_https_port" == "$HTTPS_PORT" && "$saved_port_choice" == true ]]
+}
+
+approve_app_accessibility() {
+    if [[ "$STANDARD_USER_MODE" == true ]]; then
+        log "checking that Xe Launcher continued with its persistent Accessibility grant"
+        # Certificate generation follows the app's own AXIsProcessTrusted check.
+        # A subprocess probe here could inherit the terminal's grant instead.
+        local deadline=$((SECONDS + ${1:-30}))
+        while (( SECONDS < deadline )); do
+            [[ -f "$APP_DATA/workerd/ui-https/root.crt" ]] && return 0
+            sleep 1
+        done
+        fail "Xe Launcher did not continue with its persistent Accessibility grant. Approve the signed installed app once in the runner's GUI session, then retry; CI never resets or changes the switch."
+    fi
+    log "accepting the native macOS Accessibility permission prompt"
+    start_runner_auth_helper
+    drain_accessibility_permission_prompts "$APP_NAME" 60
+    log "granting Accessibility access to the installed app"
+    grant_accessibility_permission "$APP_NAME" 90
+    stop_runner_auth_helper permission
 }
 
 installed_app_is_running() {
@@ -69,11 +161,17 @@ installed_app_is_running() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--dev]
+Usage: $(basename "$0") [--dev|--standard-user]
+
+  With no flag, test the full 80/443, port-helper, and fresh Accessibility
+  onboarding flow. Have administrator approval available for macOS dialogs.
 
   --dev  Test an ad-hoc-signed development DMG. Strict code-signature checks
          still run, but Gatekeeper assessments requiring Developer ID signing
          and notarization are skipped.
+  --standard-user  Use ports 5196/5194 and a persistent, preapproved app
+                   Accessibility grant. Refresh any retained signed installation
+                   in place; never approve a helper or change privacy switches.
 EOF
 }
 
@@ -81,6 +179,11 @@ while (( $# > 0 )); do
     case "$1" in
         --dev)
             DEV_MODE=true
+            ;;
+        --standard-user)
+            STANDARD_USER_MODE=true
+            HTTP_PORT=5196
+            HTTPS_PORT=5194
             ;;
         -h|--help)
             usage
@@ -92,6 +195,8 @@ while (( $# > 0 )); do
     esac
     shift
 done
+[[ "$DEV_MODE" != true || "$STANDARD_USER_MODE" != true ]] \
+    || fail "persistent-permission mode requires a Developer ID signed build, not --dev"
 
 # Apple Events can wait forever when the process running this test has not yet
 # been granted Automation or Accessibility access. Keep every UI operation
@@ -697,10 +802,7 @@ trap cleanup_mount EXIT
 [[ "$(uname -s)" == "Darwin" ]] || fail "this test must run on macOS"
 [[ -f "$DMG_PATH" ]] || fail "DMG not found at: $DMG_PATH"
 DMG_PATH="$(cd "$(dirname "$DMG_PATH")" && pwd -P)/$(basename "$DMG_PATH")"
-for installed_candidate in "$SYSTEM_INSTALLED_APP" "$USER_INSTALLED_APP"; do
-    [[ ! -e "$installed_candidate" && ! -L "$installed_candidate" ]] \
-        || fail "existing installation found at $installed_candidate; run cleanup.sh before this test"
-done
+find_existing_installation
 if ! run_with_timeout 8 osascript \
     -e 'tell application "System Events" to tell first application process whose frontmost is true to get count of menu bars' \
     >/dev/null 2>&1; then
@@ -760,6 +862,8 @@ else
     spctl --assess --type execute --verbose=2 "$SOURCE_APP" \
         || fail "Gatekeeper rejected the source app: $SOURCE_APP"
 fi
+
+refresh_existing_installation
 
 if [[ "$DEV_MODE" == true ]]; then
     log "development mode: dismissing stale Gatekeeper denial dialogs"
@@ -829,95 +933,87 @@ fi
 
 accept_startup_disclaimer
 
-log "selecting standard app ports 80/443"
-if ! press_ui_button "$BUNDLE_ID" "Use ports 80/443 for local apps (requires administrator approval)" "Choose user data storage" 60 AXCheckBox; then
-    log "listeners on standard ports, if any:"
-    lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
-    fail "standard app ports could not be selected in the setup dialog"
+if [[ "$STANDARD_USER_MODE" == true ]]; then
+    log "keeping the default unprivileged app ports 5196/5194"
+else
+    log "selecting standard app ports 80/443"
+    if ! press_ui_button "$BUNDLE_ID" "Use ports 80/443 for local apps (requires administrator approval)" "Choose user data storage" 60 AXCheckBox; then
+        lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
+        fail "standard app ports could not be selected in the setup dialog"
+    fi
 fi
 log "choosing the default user data storage folder"
 press_ui_button "$BUNDLE_ID" "Use Default Folder" "Choose user data storage" 60
-saved_http_port=""
-saved_https_port=""
-saved_port_choice=""
 deadline=$((SECONDS + 10))
 while (( SECONDS < deadline )); do
-    saved_http_port="$(plutil -extract app_http_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
-    saved_https_port="$(plutil -extract app_https_port raw "$APP_DATA/settings.json" 2>/dev/null || true)"
-    saved_port_choice="$(plutil -extract app_port_choice_confirmed raw "$APP_DATA/settings.json" 2>/dev/null || true)"
-    [[ "$saved_http_port" == "80" && "$saved_https_port" == "443" && "$saved_port_choice" == "true" ]] && break
+    verify_saved_ports && break
     sleep 0.25
 done
-[[ "$saved_http_port" == "80" && "$saved_https_port" == "443" && "$saved_port_choice" == "true" ]] \
-    || fail "setup saved app ports ${saved_http_port:-unset}/${saved_https_port:-unset} (confirmed: ${saved_port_choice:-unset}), expected confirmed 80/443"
+verify_saved_ports || fail "setup did not save confirmed app ports $HTTP_PORT/$HTTPS_PORT"
 
-log "checking whether the background port helper needs administrator approval"
-if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
-    log "port helper is already active"
-elif press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 30 >/dev/null 2>&1; then
-    log "enabling Xe Launcher under Allow in Background"
-    # Opening the pane is asynchronous. Activate the already-open Settings app
-    # without a blocking Apple Event, then bound the optional AX click. macOS
-    # may put up a separate administrator dialog that requires a human response.
-    run_with_timeout 8 open -a "System Settings" || true
-    if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
-        start_runner_auth_helper
-        if ! grant_background_port_helper_permission "$APP_NAME" 60; then
-            log "could not confirm the background switch through Accessibility; enable Xe Launcher in System Settings and complete any password prompt"
+if [[ "$STANDARD_USER_MODE" != true ]]; then
+    log "checking whether the background port helper needs administrator approval"
+    if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+        log "port helper is already active"
+    elif press_ui_button "$BUNDLE_ID" "Open System Settings" "Port Helper Needs Attention" 30 >/dev/null 2>&1; then
+        log "enabling Xe Launcher under Allow in Background"
+        # Opening the pane is asynchronous. Activate the already-open Settings app
+        # without a blocking Apple Event, then bound the optional AX click. macOS
+        # may put up a separate administrator dialog that requires a human response.
+        run_with_timeout 8 open -a "System Settings" || true
+        if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+            start_runner_auth_helper
+            if ! grant_background_port_helper_permission "$APP_NAME" 60; then
+                log "could not confirm the background switch through Accessibility; enable Xe Launcher in System Settings and complete any password prompt"
+            fi
         fi
+
+        log "waiting for macOS to finish approving the port helper"
+        deadline=$((SECONDS + 120))
+        next_approval_update=$((SECONDS + 10))
+        while (( SECONDS < deadline )); do
+            if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+                break
+            fi
+            if (( SECONDS >= next_approval_update )); then
+                log "port helper is not active yet; complete any macOS password prompt while Xe Launcher retries registration"
+                next_approval_update=$((SECONDS + 10))
+            fi
+            sleep 1
+        done
+        if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
+            log "recent Service Management registration events:"
+            /usr/bin/log show --last 5m --style compact \
+                --predicate 'process == "smd" AND eventMessage CONTAINS "dev.xe.computer.ports"' \
+                2>/dev/null || true
+            fail "macOS did not register the port helper after approval; inspect the registration events above"
+        fi
+        stop_runner_auth_helper
+
+        log "Xe Launcher should activate ports 80/443 without restarting"
+    else
+        launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
+            || fail "port helper is not active and its approval dialog did not appear"
     fi
 
-    log "waiting for macOS to finish approving the port helper"
-    deadline=$((SECONDS + 120))
-    next_approval_update=$((SECONDS + 10))
-    while (( SECONDS < deadline )); do
-        if launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
-            break
-        fi
-        if (( SECONDS >= next_approval_update )); then
-            log "port helper is not active yet; complete any macOS password prompt while Xe Launcher retries registration"
-            next_approval_update=$((SECONDS + 10))
-        fi
-        sleep 1
+    # The background-item pane must not be reused for the next permission. The
+    # native Accessibility prompt opens its own System Settings destination.
+    # Ignore Settings processes belonging to other logged-in accounts.
+    settings_user_id="$(id -u)"
+    log "closing System Settings before Accessibility approval"
+    pkill -u "$settings_user_id" -x "System Settings" 2>/dev/null || true
+    for _ in {1..20}; do
+        pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1 || break
+        sleep 0.25
     done
-    if ! launchctl print system/dev.xe.computer.ports >/dev/null 2>&1; then
-        log "recent Service Management registration events:"
-        /usr/bin/log show --last 5m --style compact \
-            --predicate 'process == "smd" AND eventMessage CONTAINS "dev.xe.computer.ports"' \
-            2>/dev/null || true
-        fail "macOS did not register the port helper after approval; inspect the registration events above"
+    if pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1; then
+        pgrep -u "$settings_user_id" -l -x "System Settings" >&2 || true
+        fail "System Settings did not close before Accessibility approval"
     fi
-    stop_runner_auth_helper
-
-    log "Xe Launcher should activate ports 80/443 without restarting"
-else
-    launchctl print system/dev.xe.computer.ports >/dev/null 2>&1 \
-        || fail "port helper is not active and its approval dialog did not appear"
 fi
 
-# The background-item pane must not be reused for the next permission. The
-# native Accessibility prompt opens its own System Settings destination.
-# Ignore Settings processes belonging to other logged-in accounts.
-settings_user_id="$(id -u)"
-log "closing System Settings before Accessibility approval"
-pkill -u "$settings_user_id" -x "System Settings" 2>/dev/null || true
-for _ in {1..20}; do
-    pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1 || break
-    sleep 0.25
-done
-if pgrep -u "$settings_user_id" -x "System Settings" >/dev/null 2>&1; then
-    pgrep -u "$settings_user_id" -l -x "System Settings" >&2 || true
-    fail "System Settings did not close before Accessibility approval"
-fi
-
-log "accepting the native macOS Accessibility permission prompt"
-start_runner_auth_helper
-drain_accessibility_permission_prompts "$APP_NAME" 60
-
-log "granting Accessibility access to the installed app"
 start_runner_auth_helper certificate
-grant_accessibility_permission "$APP_NAME" 90
-stop_runner_auth_helper permission
+approve_app_accessibility
 
 log "approving the generated local HTTPS certificate in the macOS user Keychain"
 root_certificate="$APP_DATA/workerd/ui-https/root.crt"
@@ -943,35 +1039,31 @@ if [[ "$certificate_trusted" != true ]]; then
     fail "macOS did not trust Xe Launcher's generated local HTTPS certificate; inspect the Keychain installation above"
 fi
 
-log "waiting for Compose UI on ports 80 and 443"
-standard_ports_ready=false
+log "waiting for Compose UI on ports $HTTP_PORT and $HTTPS_PORT"
+app_ports_ready=false
 deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )); do
-    if /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
-        --resolve 'compose-ui.localhost:80:127.0.0.1' \
-        --output /dev/null 'http://compose-ui.localhost/' \
-        && [[ -f "$APP_DATA/workerd/ui-https/root.crt" ]] \
-        && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
-            --resolve 'compose-ui.localhost:443:127.0.0.1' \
-            --output /dev/null 'https://compose-ui.localhost/'; then
-        standard_ports_ready=true
+    if compose_ui_responds; then
+        app_ports_ready=true
         break
     fi
     sleep 1
 done
-if [[ "$standard_ports_ready" != true ]]; then
-    log "listeners on standard ports, if any:"
-    lsof -nP -iTCP:80 -iTCP:443 -sTCP:LISTEN || true
+if [[ "$app_ports_ready" != true ]]; then
+    log "listeners on the selected app ports, if any:"
+    lsof -nP -iTCP:"$HTTP_PORT" -iTCP:"$HTTPS_PORT" -sTCP:LISTEN || true
     log "Xe Launcher workerd processes and their parents:"
     /bin/ps -ww -eo pid=,ppid=,uid=,args= \
         | /usr/bin/grep '[C]ontents/Helpers/workerd serve --experimental' || true
-    log "port helper launchd state:"
-    launchctl print system/dev.xe.computer.ports || true
-    log "recent port helper startup messages:"
-    /usr/bin/log show --last 5m --style compact \
-        --predicate 'subsystem == "dev.xe.computer" AND category == "port-helper"' \
-        2>/dev/null || true
-    fail "Compose UI did not answer on both 80 and 443; inspect the port helper state and startup messages above"
+    if [[ "$STANDARD_USER_MODE" != true ]]; then
+        log "port helper launchd state:"
+        launchctl print system/dev.xe.computer.ports || true
+        log "recent port helper startup messages:"
+        /usr/bin/log show --last 5m --style compact \
+            --predicate 'subsystem == "dev.xe.computer" AND category == "port-helper"' \
+            2>/dev/null || true
+    fi
+    fail "Compose UI did not answer on both $HTTP_PORT and $HTTPS_PORT"
 fi
 
 /bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/stacks/compose.sock"
@@ -1102,9 +1194,15 @@ app_management_denials="$(
 [[ -z "$app_management_denials" ]] \
     || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
 
-log "verifying an approved port helper survives update bookkeeping migration"
-helper_pid_before="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
-[[ -n "$helper_pid_before" ]] || fail "approved port helper has no running process"
+if [[ "$STANDARD_USER_MODE" != true ]]; then
+    log "verifying an approved port helper survives update bookkeeping migration"
+    helper_pid_before="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
+    [[ -n "$helper_pid_before" ]] || fail "approved port helper has no running process"
+else
+    log "verifying the unprivileged installation resumes with its persistent permissions"
+    [[ ! -e "$APP_DATA/workerd/port-helper-registration.sha256" ]] \
+        || fail "unprivileged setup unexpectedly registered the port helper"
+fi
 # JXA invokes no-argument Objective-C methods on property access.
 run_with_timeout 10 osascript -l JavaScript -e \
     'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate;'
@@ -1113,21 +1211,21 @@ while installed_app_is_running && (( SECONDS < deadline )); do
     sleep 0.5
 done
 if installed_app_is_running; then
-    fail "launcher did not quit before the approved-helper relaunch check"
+    fail "launcher did not quit before the relaunch check"
 fi
 # Model an older release's whole-file hash changing after code signing. The
 # working, already-approved helper must be adopted without unregistering it.
 registration_marker="$APP_DATA/workerd/port-helper-registration.sha256"
-printf '%064d\n' 0 > "$registration_marker"
+if [[ "$STANDARD_USER_MODE" != true ]]; then
+    printf '%064d\n' 0 > "$registration_marker"
+fi
 open -a "$INSTALLED_APP"
 accept_startup_disclaimer
 relaunch_ready=false
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    if grep -q '^cdhash-v1:' "$registration_marker" \
-        && /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
-            --resolve 'compose-ui.localhost:443:127.0.0.1' \
-            --output /dev/null 'https://compose-ui.localhost/' \
+    if { [[ "$STANDARD_USER_MODE" == true ]] || grep -q '^cdhash-v1:' "$registration_marker"; } \
+        && compose_ui_responds \
         && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
         relaunch_ready=true
         break
@@ -1136,9 +1234,14 @@ while (( SECONDS < deadline )); do
 done
 [[ "$relaunch_ready" == true ]] \
     || fail "approved installation did not resume automatically after relaunch"
-helper_pid_after="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
-[[ "$helper_pid_after" == "$helper_pid_before" ]] \
-    || fail "update bookkeeping unnecessarily replaced the approved helper ($helper_pid_before -> $helper_pid_after)"
+verify_saved_ports || fail "relaunch changed the confirmed app ports $HTTP_PORT/$HTTPS_PORT"
+if [[ "$STANDARD_USER_MODE" == true ]]; then
+    [[ ! -e "$registration_marker" ]] || fail "relaunch unexpectedly registered the port helper"
+else
+    helper_pid_after="$(launchctl print system/dev.xe.computer.ports | awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
+    [[ "$helper_pid_after" == "$helper_pid_before" ]] \
+        || fail "update bookkeeping unnecessarily replaced the approved helper ($helper_pid_before -> $helper_pid_after)"
+fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
     printf 'INSTALLED_APP=%s\n' "$INSTALLED_APP" >> "$GITHUB_ENV"
