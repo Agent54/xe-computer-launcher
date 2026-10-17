@@ -153,10 +153,10 @@ jobs:
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
 
-      - name: Run full launcher integration test
+      - name: Run launcher integration test (Standard user)
         env:
           XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
-        run: macos/Tests/Integration/install-from-dmg.sh
+        run: macos/Tests/Integration/install-from-dmg.sh --standard-user
 
       - name: Verify version in About dialog
         run: macos/Tests/Integration/about-version.sh

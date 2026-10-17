@@ -4,10 +4,11 @@ set -euo pipefail
 
 APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
-INSTALLED_APP="/Applications/${APP_NAME}.app"
+INSTALLED_APPS=("/Applications/${APP_NAME}.app" "${HOME}/Applications/${APP_NAME}.app")
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
 PERMANENT_CLEANUP=0
 STOP_ONLY=0
+PRESERVE_PERMISSIONS=0
 
 log() {
     printf '[installer-cleanup] %s\n' "$*"
@@ -49,14 +50,47 @@ configure_cleanup_mode() {
         1:--ci-permanent)
             require_ci_context
             PERMANENT_CLEANUP=1
+            PRESERVE_PERMISSIONS=1
+            ;;
+        1:--preserve-permissions)
+            PRESERVE_PERMISSIONS=1
             ;;
         1:--stop-only)
             STOP_ONLY=1
             ;;
         *)
-            fail "usage: cleanup.sh [--ci-permanent|--stop-only]"
+            fail "usage: cleanup.sh [--ci-permanent|--preserve-permissions|--stop-only]"
             ;;
     esac
+}
+
+reset_app_permissions() {
+    if [[ "$PRESERVE_PERMISSIONS" == "1" ]]; then
+        log "preserving the app's one-time privacy grants"
+    else
+        log "resetting app privacy permissions"
+        if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
+            log "bundle is not registered yet; there are no registered app permissions to reset"
+        fi
+    fi
+}
+
+remove_installed_apps() {
+    if [[ "$PRESERVE_PERMISSIONS" == "1" ]]; then
+        log "retaining installed app bundles for an in-place signed CI refresh"
+        return 0
+    fi
+    local installed_app
+    for installed_app in "${INSTALLED_APPS[@]}"; do
+        if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+            if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+                log "permanently removing existing installed app at $installed_app"
+                permanently_remove_owned_path "$installed_app"
+            else
+                trash_owned_path "$installed_app" app
+            fi
+        fi
+    done
 }
 
 refuse_ancestor_symlinks() {
@@ -121,6 +155,7 @@ require_owned_cleanup_path() {
 
     case "$path" in
         "/Applications/Xe Launcher.app" | \
+        "${HOME}/Applications/Xe Launcher.app" | \
         "${HOME}/Library/Application Support/dev.xe.computer" | \
         "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" | \
         "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" | \
@@ -224,6 +259,10 @@ stop_matching_processes() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
+# Loading the cleanup functions for safety tests must not stop processes or
+# remove application files.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 configure_cleanup_mode "$@"
 
 log "stopping existing app processes"
@@ -276,7 +315,7 @@ fi
 # Validate every owned root before changing certificates, bundles or data. The
 # checks also run immediately before each deletion/rename below.
 for cleanup_path in \
-    "$INSTALLED_APP" "$APP_DATA" \
+    "${INSTALLED_APPS[@]}" "$APP_DATA" \
     "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" \
     "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" \
     "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app" \
@@ -297,11 +336,15 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         || fail "could not remove local HTTPS certificate trust before deleting its source"
 fi
 
-if [[ -x "$INSTALLED_APP/Contents/MacOS/bin" ]] \
-    && [[ "$(plutil -extract XePortHelperUnregisterCLI raw "$INSTALLED_APP/Contents/Info.plist" 2>/dev/null || true)" == "true" ]]; then
-    log "unregistering Xe Launcher's port helper"
-    "$INSTALLED_APP/Contents/MacOS/bin" --unregister-port-helper \
-        || fail "could not unregister the port helper before removing the installed app"
+if [[ "$PRESERVE_PERMISSIONS" != "1" ]]; then
+    for installed_app in "${INSTALLED_APPS[@]}"; do
+        if [[ -x "$installed_app/Contents/MacOS/bin" ]] \
+            && [[ "$(plutil -extract XePortHelperUnregisterCLI raw "$installed_app/Contents/Info.plist" 2>/dev/null || true)" == "true" ]]; then
+            log "unregistering Xe Launcher's port helper from $installed_app"
+            "$installed_app/Contents/MacOS/bin" --unregister-port-helper \
+                || fail "could not unregister the port helper before removing $installed_app"
+        fi
+    done
 fi
 
 log "removing stale generated app shims"
@@ -340,20 +383,8 @@ done < <(
     '
 )
 
-log "resetting app privacy permissions"
-if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
-    log "bundle is not registered yet; there are no registered app permissions to reset"
-fi
-
-log "removing existing installed app"
-if [[ -e "$INSTALLED_APP" ]]; then
-    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
-        log "permanently removing existing installed app at $INSTALLED_APP"
-        permanently_remove_owned_path "$INSTALLED_APP"
-    else
-        trash_owned_path "$INSTALLED_APP" app
-    fi
-fi
+reset_app_permissions
+remove_installed_apps
 
 log "removing existing app data"
 if [[ -e "$APP_DATA" ]]; then

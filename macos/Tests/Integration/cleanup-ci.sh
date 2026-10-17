@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-# Run destructive cleanup only at CI start. Preserve each finished run for
-# manual debugging until the next job starts, removing only allowlisted Xe paths.
+# Reset app data only at CI start. Keep the signed installation and its privacy
+# grants so the Standard runner never has to change an Accessibility switch.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="${GITHUB_WORKSPACE:-}"
 
