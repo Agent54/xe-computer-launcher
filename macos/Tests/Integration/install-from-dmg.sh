@@ -1125,10 +1125,31 @@ fi
 
 log "waiting for the managed Xe Computer app shim"
 deadline=$((SECONDS + 240))
+managed_shim_pattern="$(printf '%s' "$MANAGED_XE_COMPUTER_APP/Contents/MacOS/app_mode_loader" \
+    | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+managed_shim_user_id="$(id -u)"
+managed_shim_pid=""
+managed_shim_polls=0
+managed_shim_ready=false
 while (( SECONDS < deadline )); do
+    current_shim_pid="$(pgrep -u "$managed_shim_user_id" -f "^${managed_shim_pattern}( |$)" || true)"
     if [[ -d "$MANAGED_XE_COMPUTER_APP" ]] \
-        && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
-        break
+        && [[ -n "$current_shim_pid" ]]; then
+        # A shim can be replaced during startup. Do not accept a transient
+        # process, then fail on an immediate second query outside this wait.
+        if [[ "$current_shim_pid" == "$managed_shim_pid" ]]; then
+            ((managed_shim_polls += 1))
+        else
+            managed_shim_pid="$current_shim_pid"
+            managed_shim_polls=1
+        fi
+        if (( managed_shim_polls >= 3 )); then
+            managed_shim_ready=true
+            break
+        fi
+    else
+        managed_shim_pid=""
+        managed_shim_polls=0
     fi
     sleep 1
 done
@@ -1136,8 +1157,8 @@ done
     || fail "Xe Computer app shim was not provisioned at $MANAGED_XE_COMPUTER_APP"
 [[ -f "$darc_bundle" ]] \
     || fail "versioned Xe Computer bundle was not saved at $darc_bundle"
-pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null \
-    || fail "Xe Computer app shim did not launch from its managed location"
+[[ "$managed_shim_ready" == true ]] \
+    || fail "Xe Computer app shim did not remain running from its managed location"
 
 darc_profile_bundle=""
 while IFS= read -r candidate_bundle; do
@@ -1211,7 +1232,7 @@ deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     if { [[ "$STANDARD_USER_MODE" == true ]] || grep -q '^cdhash-v1:' "$registration_marker"; } \
         && compose_ui_responds \
-        && pgrep -f "${MANAGED_XE_COMPUTER_APP}/Contents/MacOS/app_mode_loader" >/dev/null; then
+        && pgrep -u "$managed_shim_user_id" -f "^${managed_shim_pattern}( |$)" >/dev/null; then
         relaunch_ready=true
         break
     fi

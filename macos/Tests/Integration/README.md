@@ -297,6 +297,11 @@ On success, the installer test writes its selected `INSTALLED_APP` path to
 personal installation when no system-wide copy exists; an explicit
 `INSTALLED_APP` still selects the intended bundle when both copies are present.
 
+The shim check waits for the same managed executable in the test user's account
+across three consecutive polls. A short-lived matching process does not
+establish that startup has finished; commands merely mentioning the shim's path
+do not count as the running app.
+
 The runtime test command also runs focused installation-target regression
 checks. They can be run independently without launching an app or cleaning a
 real installation:
