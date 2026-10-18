@@ -138,6 +138,8 @@ helper makes at most two submission attempts. CI logs its dialog detection,
 field-assignment path, and numeric Apple Event errors without logging field
 values or raw exceptions that could contain the password. The actual trust
 change and subsequent certificate verification still determine success.
+CI checks SSL trust while the helper runs and stops it after verification; a
+delayed UI reply after successful approval does not fail the test.
 
 After installation, hold Option while opening the Xe Launcher status menu to
 show **Local App Ports** (80/443 or 5196/5194) and **Compose Storage Folder**.
