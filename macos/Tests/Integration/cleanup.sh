@@ -19,6 +19,8 @@ fail() {
     exit 1
 }
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-https-cleanup.sh"
+
 require_ci_context() {
     [[ "${GITHUB_ACTIONS:-}" == "true" ]] \
         || fail "permanent cleanup requires GitHub Actions"
@@ -335,11 +337,12 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     if removal_output="$(security remove-trusted-cert "$root_certificate" 2>&1)"; then
         :
     elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
-        log "CA has no current-user trust setting; verifying that the old certificate is no longer trusted"
+        log "CA has no current-user trust setting; continuing certificate cleanup"
     else
         printf '%s\n' "$removal_output" >&2
         fail "could not remove local HTTPS certificate trust before deleting its source"
     fi
+    remove_local_https_certificate "$root_certificate"
     trust_removal_deadline=$((SECONDS + 10))
     while security verify-cert -q -L -p ssl -n compose-ui.localhost \
         -c "$leaf_certificate" >/dev/null 2>&1; do

@@ -7,10 +7,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="${GITHUB_WORKSPACE:-}"
 
+log() {
+    printf '[installer-cleanup] %s\n' "$*"
+}
+
 fail() {
     printf '[installer-cleanup] ERROR: %s\n' "$*" >&2
     exit 1
 }
+
+source "$SCRIPT_DIR/local-https-cleanup.sh"
 
 [[ "${GITHUB_ACTIONS:-}" == "true" ]] \
     || fail "cleanup-ci.sh may only run in GitHub Actions"
@@ -79,11 +85,12 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         security remove-trusted-cert "$root_certificate" 2>&1)"; then
         :
     elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
-        printf '[installer-cleanup] CA has no current-user trust setting; verifying that the old certificate is no longer trusted\n'
+        log "CA has no current-user trust setting; continuing certificate cleanup"
     else
         printf '%s\n' "$removal_output" >&2
         fail "could not remove the previous local HTTPS certificate trust"
     fi
+    remove_local_https_certificate "$root_certificate"
     stop_auth_helper
     # Security.framework can briefly retain the prior evaluation after a trust
     # change. Wait for it to become visible, then fail if trust remains.

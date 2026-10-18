@@ -58,9 +58,13 @@ leaf certificate against macOS's trust stores; supplying the root certificate
 would not prove it was trusted in the Keychain. Removal and verification remain
 required before deleting the old app data.
 If macOS reports that the CA has no current-user trust setting, cleanup treats
-the setting as already absent and still verifies that the old leaf no longer
-validates. All other removal errors remain fatal. If the leaf keeps validating,
-cleanup preserves app data and reports the remaining trust source as unresolved;
+the setting as already absent. It then removes the matching certificate item
+from the current user's default Keychain, using the SHA-256 fingerprint of
+`root.crt`, and still verifies that the old leaf no longer validates. Removing
+a trust setting alone does not remove the certificate installed by
+`add-trusted-cert`. Both operations use the current user's Keychain and require
+no administrator account. All other removal errors remain fatal. If the leaf
+keeps validating, cleanup preserves app data and reports the remaining trust source as unresolved;
 successful TLS validation alone does not identify a per-user CA trust record.
 
 After the About-dialog test, both workflows run `cleanup.sh --stop-only` even
