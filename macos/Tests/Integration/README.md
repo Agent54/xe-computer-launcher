@@ -286,7 +286,11 @@ newly installed copy if macOS shows it again, and verifies:
 - successful Gatekeeper assessment in distribution mode;
 - removal of the installed bundle's quarantine attribute;
 - provisioning and launch of the managed Xe Computer app shim; and
-- no macOS App Management request or "prevented from modifying apps" warning.
+- no macOS App Management request or "prevented from modifying apps" warning
+  in the full admin test. Standard-user mode explicitly skips this system-log
+  audit because macOS requires administrator access to read the local log store;
+  installation, signature, Gatekeeper, HTTPS, shim-launch, and relaunch checks
+  still run.
 
 On success, the installer test writes its selected `INSTALLED_APP` path to
 `GITHUB_ENV` for the separate About-dialog step. Manual About tests discover a

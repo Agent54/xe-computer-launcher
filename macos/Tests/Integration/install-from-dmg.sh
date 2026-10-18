@@ -1152,30 +1152,32 @@ done < <(
 [[ -n "$darc_profile_bundle" ]] \
     || fail "Chromium profile is not using the configured Xe Computer bundle"
 
-log "checking that setup did not request App Management permission"
-app_management_events="$(
-    /usr/bin/log show \
-        --start "$TEST_STARTED_AT" \
-        --style compact \
-        --predicate \
-        'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "identifier=dev.xe.computer"' \
-        2>/dev/null \
-        | tail -n +2
-)"
-[[ -z "$app_management_events" ]] \
-    || fail "Xe Launcher triggered macOS App Management protection:\n$app_management_events"
+if [[ "$STANDARD_USER_MODE" == true ]]; then
+    log "skipping the App Management system-log audit: macOS requires administrator access to read these logs; the full admin test retains this audit"
+else
+    log "checking that setup did not request App Management permission"
+    app_management_events="$(
+        /usr/bin/log show \
+            --start "$TEST_STARTED_AT" \
+            --style compact \
+            --predicate \
+            'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "identifier=dev.xe.computer"' \
+            | tail -n +2
+    )"
+    [[ -z "$app_management_events" ]] \
+        || fail "Xe Launcher triggered macOS App Management protection:\n$app_management_events"
 
-app_management_denials="$(
-    /usr/bin/log show \
-        --start "$TEST_STARTED_AT" \
-        --style compact \
-        --predicate \
-        'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "returning denied"' \
-        2>/dev/null \
-        | tail -n +2
-)"
-[[ -z "$app_management_denials" ]] \
-    || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
+    app_management_denials="$(
+        /usr/bin/log show \
+            --start "$TEST_STARTED_AT" \
+            --style compact \
+            --predicate \
+            'process == "tccd" AND eventMessage CONTAINS[c] "kTCCServiceSystemPolicyAppBundles" AND eventMessage CONTAINS[c] "returning denied"' \
+            | tail -n +2
+    )"
+    [[ -z "$app_management_denials" ]] \
+        || fail "macOS denied an App Management request during Xe Launcher setup:\n$app_management_denials"
+fi
 
 if [[ "$STANDARD_USER_MODE" != true ]]; then
     log "verifying an approved port helper survives update bookkeeping migration"
