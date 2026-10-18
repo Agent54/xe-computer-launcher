@@ -82,6 +82,13 @@ struct WorkerdPorts {
                 return "\(label) port \(port) could not be checked: \(String(cString: strerror(errno)))."
             }
             defer { close(descriptor) }
+            // Match Workerd's listener options so connections in TIME_WAIT
+            // after shutdown do not look like a port still in use.
+            var reuseAddress: Int32 = 1
+            guard setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuseAddress,
+                             socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                return "\(label) port \(port) could not be checked: \(String(cString: strerror(errno)))."
+            }
             var address = sockaddr_in()
             address.sin_family = sa_family_t(AF_INET)
             address.sin_port = port.bigEndian
@@ -109,6 +116,9 @@ struct WorkerdPorts {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else { return false }
         defer { close(descriptor) }
+        var reuseAddress: Int32 = 1
+        guard setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuseAddress,
+                         socklen_t(MemoryLayout<Int32>.size)) == 0 else { return false }
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = port.bigEndian

@@ -86,6 +86,9 @@ struct WorkerdPortsTests {
         #expect(descriptor >= 0)
         guard descriptor >= 0 else { return }
         defer { close(descriptor) }
+        var reuseAddress: Int32 = 1
+        try #require(setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuseAddress,
+                               socklen_t(MemoryLayout<Int32>.size)) == 0)
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = 0
@@ -105,9 +108,68 @@ struct WorkerdPortsTests {
         }
         #expect(named == 0)
         guard named == 0 else { return }
+        try #require(listen(descriptor, 1) == 0)
         let port = address.sin_port.bigEndian
         let configured = WorkerdPorts(settings: ["app_http_port": Int(port)])
         #expect(configured.bindingWarnings().contains("HTTP port \(port) is already in use."))
         #expect(!WorkerdPorts.portAvailable(port))
+    }
+
+    @Test func startupProbeAllowsRecentlyClosedConnection() throws {
+        var listener = socket(AF_INET, SOCK_STREAM, 0)
+        try #require(listener >= 0)
+        defer { if listener >= 0 { close(listener) } }
+        var reuseAddress: Int32 = 1
+        try #require(setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuseAddress,
+                               socklen_t(MemoryLayout<Int32>.size)) == 0)
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
+        try #require(withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        } == 0)
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        try #require(withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(listener, $0, &length)
+            }
+        } == 0)
+        try #require(listen(listener, 1) == 0)
+
+        let client = socket(AF_INET, SOCK_STREAM, 0)
+        try #require(client >= 0)
+        defer { close(client) }
+        try #require(withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        } == 0)
+        var accepted = accept(listener, nil, nil)
+        try #require(accepted >= 0)
+        defer { if accepted >= 0 { close(accepted) } }
+        var receiveTimeout = timeval(tv_sec: 2, tv_usec: 0)
+        for descriptor in [client, accepted] {
+            try #require(setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout,
+                                   socklen_t(MemoryLayout<timeval>.size)) == 0)
+        }
+
+        // Have the server close first, leaving its port in TCP TIME_WAIT as
+        // an HTTPS connection can during launcher shutdown.
+        var byte: UInt8 = 0
+        try #require(shutdown(accepted, SHUT_WR) == 0)
+        try #require(recv(client, &byte, 1, 0) == 0)
+        try #require(shutdown(client, SHUT_WR) == 0)
+        try #require(recv(accepted, &byte, 1, 0) == 0)
+        close(accepted)
+        accepted = -1
+        close(listener)
+        listener = -1
+
+        let port = address.sin_port.bigEndian
+        let configured = WorkerdPorts(settings: ["app_http_port": Int(port)])
+        #expect(!configured.bindingWarnings().contains("HTTP port \(port) is already in use."))
+        #expect(WorkerdPorts.portAvailable(port))
     }
 }

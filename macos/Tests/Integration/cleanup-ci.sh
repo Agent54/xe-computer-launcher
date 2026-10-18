@@ -84,11 +84,17 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
     if removal_output="$(perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 90 \
         security remove-trusted-cert "$root_certificate" 2>&1)"; then
         :
-    elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
-        log "CA has no current-user trust setting; continuing certificate cleanup"
     else
-        printf '%s\n' "$removal_output" >&2
-        fail "could not remove the previous local HTTPS certificate trust"
+        removal_status=$?
+        if [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
+            log "CA has no current-user trust setting; continuing certificate cleanup"
+        else
+            [[ -z "$removal_output" ]] || printf '%s\n' "$removal_output" >&2
+            if [[ "$removal_status" -eq 142 ]]; then
+                fail "certificate trust removal timed out after 90 seconds waiting for macOS authorization; inspect the pending password dialog. App data has been preserved"
+            fi
+            fail "could not remove the previous local HTTPS certificate trust (exit $removal_status)"
+        fi
     fi
     remove_local_https_certificate "$root_certificate"
     stop_auth_helper
