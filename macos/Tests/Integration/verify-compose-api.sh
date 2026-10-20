@@ -5,9 +5,17 @@ socket="${1:?usage: verify-compose-api.sh COMPOSE_SOCKET}"
 
 # This only gates the Docker-backed assertion. Packaging, signatures, the
 # installer, and host-only Compose lifecycle tests still run in VM CI.
-if [[ "${XE_TEST_SUB_VM_AVAILABLE:-auto}" == "0" ]] \
-    || [[ "$(/usr/sbin/sysctl -n kern.hv_support 2>/dev/null || true)" != "1" ]]; then
-    message="sub-VM not available; skipping the Docker-backed Compose integration check. Launcher installation checks will continue."
+if [[ "${XE_TEST_SUB_VM_AVAILABLE:-auto}" == "0" ]]; then
+    echo "[compose-integration] INFO: XE_TEST_SUB_VM_AVAILABLE=0; skipping the Docker-backed Compose integration check. Launcher installation checks will continue."
+    exit 0
+fi
+
+if [[ "${XE_TEST_SUB_VM_AVAILABLE:-auto}" == "auto" ]]; then
+    echo "[compose-integration] INFO: No sub-VM override configured; detecting availability with kern.hv_support."
+fi
+hypervisor_support="$(/usr/sbin/sysctl -n kern.hv_support 2>/dev/null || true)"
+if [[ "$hypervisor_support" != "1" ]]; then
+    message="sub-VM not available (kern.hv_support=${hypervisor_support:-unknown}); skipping the Docker-backed Compose integration check. Launcher installation checks will continue."
     if [[ "${CI:-}" == "true" ]]; then
         printf '::warning::%s\n' "$message"
     else
@@ -16,6 +24,7 @@ if [[ "${XE_TEST_SUB_VM_AVAILABLE:-auto}" == "0" ]] \
     exit 0
 fi
 
+echo "[compose-integration] INFO: kern.hv_support=1; sub-VM available."
 echo "[compose-integration] waiting for the Compose API backed by SmolVM"
 deadline=$((SECONDS + ${COMPOSE_READY_TIMEOUT_SECONDS:-120}))
 while (( SECONDS < deadline )); do
