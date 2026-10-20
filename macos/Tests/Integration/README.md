@@ -367,10 +367,14 @@ Docker-backed assertion with a warning, so it never waits for a socket that
 cannot appear. Installer, signature, updater, and host-only Compose lifecycle
 tests continue to run.
 
-Both CI workflows currently set `XE_TEST_SUB_VM_AVAILABLE=0` through the
-repository variable `XE_CI_SUB_VM_AVAILABLE` (default `0`). Set that variable
-to `1` when moving to hardware runners to restore the Docker-backed assertion.
-Local runs detect virtualization automatically unless explicitly disabled with
-`XE_TEST_SUB_VM_AVAILABLE=0`. A supported machine with testing enabled still
-fails the check if Docker/Compose cannot become ready; startup errors are not
-silently converted into test skips.
+Both CI workflows default `XE_TEST_SUB_VM_AVAILABLE` to `auto` when the
+repository variable `XE_CI_SUB_VM_AVAILABLE` is unset or empty. CI and local
+runs detect virtualization automatically using `kern.hv_support=1`, including
+inside a runner VM with nested virtualization enabled. The Compose integration
+check logs an info message when no override is configured and reports the
+detected support. An unavailable or unreadable signal skips the Docker-backed
+assertion with a warning. Set the repository variable to `0` (or locally set
+`XE_TEST_SUB_VM_AVAILABLE=0`) to explicitly skip it; `1` still requires kernel
+support. A supported machine with testing enabled still fails the check if
+Docker/Compose cannot become ready; startup errors are not silently converted
+into test skips.
