@@ -25,7 +25,7 @@ if [[ "$hypervisor_support" != "1" ]]; then
 fi
 
 echo "[compose-integration] INFO: kern.hv_support=1; sub-VM available."
-echo "[compose-integration] waiting for the Compose API backed by SmolVM"
+echo "[compose-integration] waiting for the Compose API backed by SmolVM at $socket"
 deadline=$((SECONDS + ${COMPOSE_READY_TIMEOUT_SECONDS:-120}))
 while (( SECONDS < deadline )); do
     if /usr/bin/curl --disable --silent --fail --max-time 2 --noproxy '*' \
@@ -36,4 +36,8 @@ while (( SECONDS < deadline )); do
     sleep 1
 done
 echo "[compose-integration] ERROR: Compose API did not become ready at $socket" >&2
+# Keep the last connection error or backend response visible in CI. A running
+# host listener alone does not prove that its Docker backend is ready.
+/usr/bin/curl --disable --silent --show-error --fail-with-body --max-time 2 --noproxy '*' \
+    --unix-socket "$socket" 'http://localhost/ls?all=true' >&2 || true
 exit 1

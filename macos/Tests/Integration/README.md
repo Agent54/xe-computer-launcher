@@ -367,6 +367,12 @@ Docker-backed assertion with a warning, so it never waits for a socket that
 cannot appear. Installer, signature, updater, and host-only Compose lifecycle
 tests continue to run.
 
+The installer checks `/ls?all=true` on the launcher's host socket at
+`~/Library/Application Support/dev.xe.computer/compose.sock`. The `stacks`
+directory stores projects; the API socket lives outside it. On timeout, CI
+prints the final connection error or backend response and the last 100 launcher
+log entries so Docker startup failures can be diagnosed.
+
 Both CI workflows default `XE_TEST_SUB_VM_AVAILABLE` to `auto` when the
 repository variable `XE_CI_SUB_VM_AVAILABLE` is unset or empty. CI and local
 runs detect virtualization automatically using `kern.hv_support=1`, including
