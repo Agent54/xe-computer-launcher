@@ -123,6 +123,7 @@ final class WorkerdServer {
     private let portHelperURL: URL
     private let assetsURL: URL
     private let stateURL: URL
+    private let socketDirectoryURL: URL
     private let runtimeStatusURL: URL
     private let maintenanceSocketURL: URL
     private let dockerSocketURL: URL
@@ -157,6 +158,8 @@ final class WorkerdServer {
         self.portHelperURL = portHelperURL
         self.assetsURL = assetsURL
         self.stateURL = stateURL
+        self.socketDirectoryURL = stateURL == WorkerdPaths.stateURL
+            ? RuntimeSocketPaths.shared.workerdDirectoryURL : stateURL
         self.runtimeStatusURL = runtimeStatusURL
         self.maintenanceSocketURL = maintenanceSocketURL
         self.dockerSocketURL = dockerSocketURL
@@ -174,9 +177,20 @@ final class WorkerdServer {
         if process != nil { await stop() }
         if let stopTask { await stopTask.value; self.stopTask = nil }
         stopping = false
+        try RuntimeSocketPaths.validateWorkerdPaths(directoryURL: socketDirectoryURL)
         for url in [executableURL, configURL, assetsURL.appendingPathComponent("index.html")] {
             guard FileManager.default.fileExists(atPath: url.path) else { throw WorkerdError.missingResource(url.path) }
         }
+        let privilegedSockets: PrivilegedPortSockets?
+        if usesStandardPorts {
+            guard FileManager.default.isExecutableFile(atPath: portHelperURL.path) else {
+                throw WorkerdError.missingResource(portHelperURL.path)
+            }
+            privilegedSockets = try await acquirePrivilegedSockets()
+        } else {
+            privilegedSockets = nil
+        }
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.createDirectory(at: runtimeStatusURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateURL.path)
@@ -208,8 +222,8 @@ final class WorkerdServer {
         if prepared.createdCertificate {
             log("Local Compose UI certificate authority created at \(prepared.certificateURL.path).")
         }
-        let uiSocketURL = stateURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
-        let startupSocketURL = stateURL.appendingPathComponent("s-\(UUID().uuidString.prefix(8)).sock")
+        let uiSocketURL = socketDirectoryURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
+        let startupSocketURL = socketDirectoryURL.appendingPathComponent("s-\(UUID().uuidString.prefix(8)).sock")
         self.startupSocketURL = startupSocketURL
         let startupStateURL = stateURL.appendingPathComponent("startup", isDirectory: true)
         try FileManager.default.createDirectory(at: startupStateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -218,26 +232,9 @@ final class WorkerdServer {
         let startupServices = ExternalState.shared.settings.rawData?["compose_startup_services"] ?? []
         let startupData = try JSONSerialization.data(withJSONObject: startupServices, options: [.fragmentsAllowed])
         try startupData.write(to: runtimeStatusURL.appendingPathComponent("startup-services.json"), options: .atomic)
-        let needsPrivilegedPorts = usesStandardPorts
-        var privilegedSockets: PrivilegedPortSockets?
-        if needsPrivilegedPorts {
-            do { privilegedSockets = try await acquirePrivilegedSockets() }
-            catch { log("Warning: \(error.localizedDescription) Ports 80/443 remain selected but are unavailable; Xe Launcher will retry automatically.") }
-        }
-        if privilegedSockets != nil && !FileManager.default.isExecutableFile(atPath: portHelperURL.path) {
-            log("Warning: Missing port-helper executable at \(portHelperURL.path); standard app ports are unavailable.")
-            privilegedSockets = nil
-        }
-        let inactiveHTTPURL = stateURL.appendingPathComponent("inactive-http.sock")
-        let inactiveHTTPSURL = stateURL.appendingPathComponent("inactive-https.sock")
-        if needsPrivilegedPorts && privilegedSockets == nil {
-            for url in [inactiveHTTPURL, inactiveHTTPSURL] where FileManager.default.fileExists(atPath: url.path) {
-                try FileManager.default.removeItem(at: url)
-            }
-        }
         let appPorts = try JSONSerialization.data(withJSONObject: [
             "http": Int(routingPort), "https": Int(tlsPort),
-            "publicHttpReady": !needsPrivilegedPorts || privilegedSockets != nil,
+            "publicHttpReady": true,
         ], options: [.sortedKeys])
         try appPorts.write(to: runtimeStatusURL.appendingPathComponent("app-ports.json"), options: .atomic)
         if stopping { await stop(); throw CancellationError() }
@@ -261,18 +258,10 @@ final class WorkerdServer {
             "--external-addr", "router=unix:\(routerSocketURL.path)",
             "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
         if privilegedSockets != nil {
-            workerArguments += ["--socket-fd", "ingest=3"]
-        } else if needsPrivilegedPorts {
-            workerArguments += ["--socket-addr", "ingest=unix:\(inactiveHTTPURL.path)"]
+            workerArguments += ["--socket-fd", "ingest=3", "--socket-fd", "tls=4"]
         } else {
-            workerArguments += ["--socket-addr", "ingest=127.0.0.1:\(routingPort)"]
-        }
-        if privilegedSockets != nil {
-            workerArguments += ["--socket-fd", "tls=4"]
-        } else if needsPrivilegedPorts {
-            workerArguments += ["--socket-addr", "tls=unix:\(inactiveHTTPSURL.path)"]
-        } else {
-            workerArguments += ["--socket-addr", "tls=127.0.0.1:\(tlsPort)"]
+            workerArguments += ["--socket-addr", "ingest=127.0.0.1:\(routingPort)",
+                                "--socket-addr", "tls=127.0.0.1:\(tlsPort)"]
         }
         child.arguments = privilegedSockets == nil ? workerArguments : ["--exec-workerd", executableURL.path] + workerArguments
         // No inherited inspector flags, npm paths, or proxy settings.
@@ -319,15 +308,11 @@ final class WorkerdServer {
                    (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
                     try Task.checkCancellation()
                     guard child.isRunning else { throw WorkerdError.exited(child.terminationStatus) }
-                    if routingPort != 80 || privilegedSockets != nil {
-                        let httpPort = routingPort == 80 ? "" : ":\(routingPort)"
-                        log("Compose UI ready at http://compose-ui.localhost\(httpPort)/")
-                    }
-                    if tlsPort != 443 || privilegedSockets != nil {
-                        let httpsPort = tlsPort == 443 ? "" : ":\(tlsPort)"
-                        log("Compose UI HTTPS ready at https://compose-ui.localhost\(httpsPort)/")
-                    }
-                    servingStandardPorts = needsPrivilegedPorts && privilegedSockets != nil
+                    let httpPort = routingPort == 80 ? "" : ":\(routingPort)"
+                    log("Compose UI ready at http://compose-ui.localhost\(httpPort)/")
+                    let httpsPort = tlsPort == 443 ? "" : ":\(tlsPort)"
+                    log("Compose UI HTTPS ready at https://compose-ui.localhost\(httpsPort)/")
+                    servingStandardPorts = usesStandardPorts
                     started = true
                     return
                 }

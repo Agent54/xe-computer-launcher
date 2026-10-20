@@ -285,6 +285,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !didFinishNormalStartup else { return }
         didFinishNormalStartup = true
 
+        do {
+            try RuntimeSocketPaths.shared.prepare()
+        } catch {
+            let detail = error.localizedDescription
+            fputs("Xe Launcher startup failed: \(detail)\n", stderr)
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Xe Launcher Could Not Start"
+            alert.informativeText = detail
+            alert.addButton(withTitle: "Quit")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            exit(EXIT_FAILURE)
+        }
+
         // The DMG installer runs as an accessory app. Only normal launcher
         // startup owns a Dock icon, according to the user's saved preference.
         let state = ExternalState.shared
@@ -687,24 +702,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         hostServicesTask = Task {
             var activeComposeSocket: URL?
-            var lastPortHelperRetry = Date.distantPast
             while !Task.isCancelled {
                 if activeComposeSocket != composeSocketURL {
                     await workerdServer.stop()
                     activeComposeSocket = composeSocketURL
                 }
-                if workerdServer.usesStandardPorts && workerdServer.isRunning &&
-                    !workerdServer.servingStandardPorts && PrivilegedPortService.status == .enabled &&
-                    Date().timeIntervalSince(lastPortHelperRetry) >= 10 {
-                    lastPortHelperRetry = Date()
-                    ExternalState.shared.appendLog("launcher", "Port helper approved; restarting local app routing on 80/443")
-                    await workerdServer.stop()
-                }
                 do {
                     try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
                     try maintenanceServer.start()
                 } catch is CancellationError { break }
-                catch { ExternalState.shared.appendLog("workerd", error.localizedDescription) }
+                catch { ExternalState.shared.appendLog("workerd", "Host services failed to start: \(error.localizedDescription)") }
                 renderMenuLabels()
                 // Compose's listener does not need Docker. Start it before any
                 // guest commands, diagnostics or maintenance can occupy this loop.

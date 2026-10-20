@@ -218,7 +218,8 @@ struct WorkerdServerTests {
         await server.stop()
     }
 
-    @Test func managementRemainsAvailableWhilePortHelperNeedsApproval() async throws {
+    @Test(arguments: [PrivilegedPortError.approvalRequired, .unavailable, .denied, .invalidSocket])
+    func helperFailureStopsStartupBeforeCreatingState(failure: PrivilegedPortError) async throws {
         let root = URL(fileURLWithPath: "/tmp/xe-workerd-pending-\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: root) }
         let binary = macosRoot.appendingPathComponent(".build/workerd/workerd")
@@ -226,34 +227,52 @@ struct WorkerdServerTests {
         let assets = macosRoot.appendingPathComponent(".build/compose-ui")
         try #require(FileManager.default.isExecutableFile(atPath: binary.path))
         try #require(FileManager.default.fileExists(atPath: config.path))
-        let logs = LogCollector()
         let server = WorkerdServer(executableURL: binary, configURL: config,
+                                   portHelperURL: macosRoot.appendingPathComponent(".build/debug/port-helper"),
                                    assetsURL: assets,
                                    stateURL: root, runtimeStatusURL: root.appendingPathComponent("status"),
                                    managementPort: try freePort(), routingPort: 80, tlsPort: 443,
-                                   acquirePrivilegedSockets: { throw PrivilegedPortError.approvalRequired },
-                                   log: { logs.lines.append($0) })
+                                   acquirePrivilegedSockets: { throw failure }, log: { _ in })
         let absent = root.appendingPathComponent("missing.sock")
-        try await server.start(composeSocketURL: absent, routerSocketURL: absent)
         do {
-            #expect(server.isRunning)
-            #expect(logs.lines.contains { $0.contains("port helper") })
-            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("inactive-http.sock").path))
-            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("inactive-https.sock").path))
-            let savedPorts = try Data(contentsOf: root.appendingPathComponent("status/app-ports.json"))
-            #expect(String(decoding: savedPorts, as: UTF8.self).contains("\"publicHttpReady\":false"))
-            let session = URLSession(configuration: .ephemeral)
-            defer { session.invalidateAndCancel() }
-            var request = URLRequest(url: server.uiURL)
-            request.setValue("127.0.0.1:8094", forHTTPHeaderField: "Host")
-            let (html, response) = try await session.data(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 200)
-            #expect(!html.isEmpty)
-        } catch {
+            try await server.start(composeSocketURL: absent, routerSocketURL: absent)
             await server.stop()
-            throw error
+            Issue.record("Workerd must not start when the required port helper fails")
+        } catch let error as PrivilegedPortError {
+            #expect(error.localizedDescription == failure.localizedDescription)
         }
-        await server.stop()
+        #expect(!server.isRunning)
+        #expect(!server.servingStandardPorts)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    @Test func missingPortHelperFailsBeforeRequestingSockets() async throws {
+        let root = URL(fileURLWithPath: "/tmp/xe-workerd-missing-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missingHelper = root.appendingPathComponent("missing-port-helper")
+        let requested = Mutex(false)
+        let server = WorkerdServer(
+            executableURL: macosRoot.appendingPathComponent(".build/workerd/workerd"),
+            configURL: macosRoot.deletingLastPathComponent().appendingPathComponent("workerd/config.capnp"),
+            portHelperURL: missingHelper, assetsURL: macosRoot.appendingPathComponent(".build/compose-ui"),
+            stateURL: root, runtimeStatusURL: root.appendingPathComponent("status"),
+            routingPort: 80, tlsPort: 443,
+            acquirePrivilegedSockets: {
+                requested.withLock { $0 = true }
+                throw PrivilegedPortError.unavailable
+            }, log: { _ in }
+        )
+        let absent = root.appendingPathComponent("missing.sock")
+        do {
+            try await server.start(composeSocketURL: absent, routerSocketURL: absent)
+            await server.stop()
+            Issue.record("Workerd must not start without its required port-helper executable")
+        } catch WorkerdError.missingResource(let path) {
+            #expect(path == missingHelper.path)
+        }
+        #expect(!requested.withLock { $0 })
+        #expect(!server.isRunning)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
     private func freePort() throws -> UInt16 {

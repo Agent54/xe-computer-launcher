@@ -131,7 +131,7 @@ enum SmolVMPaths {
     }
 
     static var socketsURL: URL {
-        dataURL.appendingPathComponent("sockets", isDirectory: true)
+        RuntimeSocketPaths.shared.socketsURL
     }
 
     static var runtimeHomeURL: URL {
@@ -145,7 +145,6 @@ enum SmolVMPaths {
 
 enum SmolVMError: LocalizedError, Sendable {
     case runtimeMissing(String)
-    case statePathTooLong(String)
     case commandLaunchFailed(String)
     case commandFailed(arguments: [String], exitCode: Int32, detail: String)
     case invalidMachineList(String)
@@ -154,8 +153,6 @@ enum SmolVMError: LocalizedError, Sendable {
         switch self {
         case .runtimeMissing(let path):
             return "The embedded SmolVM runtime is missing at \(path)."
-        case .statePathTooLong(let path):
-            return "The SmolVM state path is too long for Unix sockets: \(path)"
         case .commandLaunchFailed(let detail):
             return "SmolVM could not be launched: \(detail)"
         case .commandFailed(let arguments, let exitCode, let detail):
@@ -180,7 +177,7 @@ actor SmolVMClient {
 
     init(
         runtimeURL: URL = SmolVMPaths.runtimeURL,
-        dataURL: URL = SmolVMPaths.dataURL,
+        dataURL: URL = RuntimeSocketPaths.shared.smolDataURL,
         guestRuntimeURL: URL = SmolVMPaths.guestRuntimeURL
     ) {
         self.runtimeURL = runtimeURL
@@ -383,10 +380,9 @@ actor SmolVMClient {
     }
 
     private func prepareStateDirectories() throws {
-        // SmolVM adds internal socket suffixes below this directory. Keep a
-        // conservative margin under macOS's approximately 104-byte limit.
-        guard dataURL.path.utf8.count <= 72 else {
-            throw SmolVMError.statePathTooLong(dataURL.path)
+        try RuntimeSocketPaths.validateSmolPaths(dataURL: dataURL)
+        if dataURL == RuntimeSocketPaths.shared.smolDataURL {
+            try RuntimeSocketPaths.shared.prepare()
         }
 
         let templateNames = ["storage-template.ext4.zst", "overlay-template.ext4.zst"]

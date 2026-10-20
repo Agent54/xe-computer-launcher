@@ -3,7 +3,7 @@ import Darwin
 
 enum ComposeServerPaths {
     static var socketURL: URL {
-        ExternalState.appDataURL.appendingPathComponent("compose.sock")
+        RuntimeSocketPaths.shared.composeSocketURL
     }
     static var executableURL: URL {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/docker-compose")

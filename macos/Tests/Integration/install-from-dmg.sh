@@ -1049,7 +1049,7 @@ if [[ "$app_ports_ready" != true ]]; then
     fail "Compose UI did not answer on both $HTTP_PORT and $HTTPS_PORT"
 fi
 
-if ! /bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$APP_DATA/compose.sock"; then
+if ! /bin/bash "$SCRIPT_DIR/verify-compose-api.sh" "$HOME/.xe/run/compose.sock"; then
     log "recent launcher and container runtime logs:"
     tail -n 100 "$APP_DATA/logs/system.jsonl" 2>/dev/null || true
     fail "Docker-backed Compose integration check failed; inspect the runtime logs above"

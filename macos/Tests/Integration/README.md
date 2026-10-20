@@ -350,6 +350,11 @@ remain enabled. If a hosted runner cannot grant
 those UI permissions, use a preconfigured self-hosted runner; do not create a
 second CI-specific test implementation.
 
+When ports 80/443 are selected, Workerd starts only after the port helper hands
+over both listeners. A missing helper or failed handoff fails startup with the
+underlying error; the normal host-service loop can retry. There is no partial
+management-only mode or inactive listener fallback.
+
 ## Runners without nested virtualization
 
 Both workflows run host runtime tests with `bash macos/Scripts/test-runtime.sh`
@@ -368,8 +373,18 @@ cannot appear. Installer, signature, updater, and host-only Compose lifecycle
 tests continue to run.
 
 The installer checks `/ls?all=true` on the launcher's host socket at
-`~/Library/Application Support/dev.xe.computer/compose.sock`. The `stacks`
-directory stores projects; the API socket lives outside it. On timeout, CI
+`~/.xe/run/compose.sock`. At startup, the launcher validates every runtime socket
+path against macOS's 103-byte UTF-8 pathname budget, including SmolVM's internal
+agent/control sockets, and displays an error and quits if a path is too long.
+It creates the owned, private `~/.xe` directory with mode `0700` and makes
+`~/.xe/run` a symlink to `~/Library/Application Support/dev.xe.computer`.
+SmolVM receives `~/.xe/run/smol` as its data path; Docker, guest Workerd, and
+maintenance sockets use `~/.xe/run/smol/sockets`. All socket addresses retain
+the short alias, including private host Workerd sockets under `~/.xe/run/workerd`
+and the browser debug socket under `~/.xe/run/sockets`. Existing disks, VM configurations, and old socket locations
+remain valid without moving data. An unexpected item or symlink at the runtime
+location causes a startup error and is never replaced. The `stacks` directory
+stores projects; the API socket lives outside it. On timeout, CI
 prints the final connection error or backend response and the last 100 launcher
 log entries so Docker startup failures can be diagnosed.
 

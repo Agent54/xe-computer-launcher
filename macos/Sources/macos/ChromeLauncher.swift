@@ -50,9 +50,9 @@ extension ExternalState {
     //   --remote-allow-origins=https://localhost:5194 \
 
     /// Path to the Unix domain socket used for Chrome DevTools debugging.
-    /// Lives under sockets/ in the user app data directory.
+    /// Uses the short runtime alias to the existing user app-data socket directory.
     static var debugSocketPath: String {
-        appDataURL.appendingPathComponent("sockets/chrome-debug.sock").path
+        RuntimeSocketPaths.shared.browserSocketsURL.appendingPathComponent("chrome-debug.sock").path
     }
 
     func startChrome(openingURL: String? = nil, forceHeaded: Bool = false) -> String? {
@@ -81,7 +81,7 @@ extension ExternalState {
         }
 
         // Ensure sockets directory exists for the debug pipe
-        let socketsDir = Self.appDataURL.appendingPathComponent("sockets", isDirectory: true)
+        let socketsDir = RuntimeSocketPaths.shared.browserSocketsURL
         try? FileManager.default.createDirectory(at: socketsDir, withIntermediateDirectories: true)
 
         guard let chrome = preferredChrome() else { return "No supported Chrome installation found" }
