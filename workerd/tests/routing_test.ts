@@ -1074,6 +1074,94 @@ Deno.test('failed service discovery retries instead of caching a missing app', a
   assert.equal(queries, 2);
 });
 
+Deno.test('project-scoped ps rows use only their owning checkout configuration', async () => {
+  const owner = '/stacks/darc/compose.yaml';
+  const other = '/stacks/darc-code/compose.yaml';
+  const env = { COMPOSE: { fetch: async (input: string) => {
+    const url = new URL(input);
+    if (url.pathname === '/v1.24/ls') return Response.json([
+      { Name: 'darc', ConfigFiles: `${other},${owner}` },
+    ]);
+    const owning = url.searchParams.get('path') === owner;
+    if (url.pathname.startsWith('/v1.24/config/')) return Response.json({ services: {
+      darc: { ports: [{ target: owning ? 5194 : 8080, published: owning ? '5194' : '8080' }] },
+    } });
+    return Response.json([{ ID: 'same-container', Service: 'darc', State: 'running',
+      Labels: { 'com.docker.compose.project.config_files': owner },
+      Publishers: [{ TargetPort: 5194, PublishedPort: 5194, Protocol: 'tcp' }],
+    }]);
+  } } };
+  const service = await resolveApplicationService('darc_darc', env);
+  assert(!(service instanceof Response));
+  assert.equal(service.id, 'same-container');
+  assert.equal(service.configFiles, owner);
+  assert.deepEqual(service.ports, [{ target: 5194, published: '5194' }]);
+});
+
+Deno.test('abandoned discovery expires even when its request timer never runs', async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  let release: (response: Response) => void = () => {};
+  let queries = 0;
+  const env = { COMPOSE: { fetch: (input: string) => {
+    const url = new URL(input);
+    if (url.pathname === '/v1.24/ls') {
+      if (++queries === 1) return new Promise<Response>(resolve => { release = resolve; });
+      return Promise.resolve(Response.json([{ Name: 'recovered', ConfigFiles: '' }]));
+    }
+    if (url.pathname.startsWith('/v1.24/config/')) return Promise.resolve(Response.json({ services: { app: {} } }));
+    return Promise.resolve(Response.json([{ ID: 'ready', Service: 'app', State: 'running' }]));
+  } } };
+  const abandoned = resolveApplicationService('app_recovered', env);
+  try {
+    now += 5000;
+    const recovered = await resolveApplicationService('app_recovered', env);
+    assert(!(recovered instanceof Response));
+    assert.equal(recovered.id, 'ready');
+    assert.equal(queries, 2);
+  } finally {
+    release(Response.json([]));
+    await abandoned;
+    Date.now = originalNow;
+  }
+});
+
+Deno.test('stalled discovery cancels upstream I/O, releases all waiters and retries', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const [handler, delay, ...rest] = args;
+    return originalSetTimeout(handler, delay === 5000 ? 5 : delay, ...rest);
+  }) as typeof setTimeout;
+  let stalled = true;
+  const signals: AbortSignal[] = [];
+  const env = { COMPOSE: { fetch: async (input: string, options: { signal: AbortSignal }) => {
+    const url = new URL(input);
+    if (url.pathname === '/v1.24/ls') return Response.json([{ Name: 'retry', ConfigFiles: '' }]);
+    if (stalled) {
+      signals.push(options.signal);
+      // Even a backend/body that ignores cancellation cannot retain waiters.
+      return new Promise<Response>(() => {});
+    }
+    return Response.json(url.pathname.startsWith('/v1.24/config/') ? { services: { app: {} } }
+      : [{ ID: 'ready', Service: 'app', State: 'running' }]);
+  } } };
+  try {
+    await Promise.all([
+      assert.rejects(() => resolveApplicationService('app_retry', env), /discovery timed out/),
+      assert.rejects(() => resolveApplicationService('missing', env), /discovery timed out/),
+    ]);
+    assert.equal(signals.length, 2, 'concurrent visitors share ps and config requests');
+    assert(signals.every(signal => signal.aborted));
+    stalled = false;
+    const recovered = await resolveApplicationService('app_retry', env);
+    assert(!(recovered instanceof Response));
+    assert.equal(recovered.id, 'ready');
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 Deno.test('Compose state reuse expires at 100 ms without being extended by slow fetches', async () => {
   const originalNow = Date.now;
   let now = originalNow();

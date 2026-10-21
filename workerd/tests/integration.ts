@@ -59,8 +59,10 @@ const sleepingId = 'b'.repeat(64);
 let sleepingState = 'uncreated';
 let releaseContainerStart: (() => void) | undefined;
 let securePort = 0;
+let discoveryEntered: (() => void) | undefined;
+let releaseDiscovery: (() => void) | undefined;
 
-interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean }
+interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean; timeoutMs?: number }
 function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     let host = options.host || '127.0.0.1:8094';
@@ -70,7 +72,7 @@ function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
       headers: { Host: host, ...options.headers },
     }, resolve);
     req.on('error', reject);
-    req.setTimeout(3000, () => req.destroy(new Error(`Request timed out: ${path}`)));
+    req.setTimeout(options.timeoutMs ?? 3000, () => req.destroy(new Error(`Request timed out: ${path}`)));
     req.end(options.body);
   });
 }
@@ -93,15 +95,26 @@ async function startUnix(path: string) {
     seen.push({ path: requestPath, method: req.method, headers: Object.fromEntries(req.headers), body });
     const headers = { 'Connection': 'close', 'Content-Type': 'application/json' };
     if (url.pathname === '/v1.24/config/demo' && url.searchParams.get('format') === 'json') {
+      if (url.searchParams.get('path') === '/stacks/other/compose.yaml') return Response.json({ services: {} });
       return Response.json({ services: { web: { ports: [
         { name: 'web', target: appPort, published: '32000', protocol: 'tcp' },
         { name: 'secure', target: securePort, published: '32001', protocol: 'tcp', app_protocol: 'https' },
       ] }, sleeping: { ports: [{ name: 'web', target: appPort, published: '32002', protocol: 'tcp' }] } } });
     } else if (requestPath === '/v1.24/ls?all=true') {
-      return Response.json([{ Name: 'demo', ConfigFiles: '/stacks/demo/compose.yaml' }]);
+      if (discoveryEntered) {
+        const entered = discoveryEntered;
+        discoveryEntered = undefined;
+        await new Promise<void>(resolve => { releaseDiscovery = resolve; entered(); });
+      }
+      return Response.json([{ Name: 'demo', ConfigFiles: '/stacks/other/compose.yaml,/stacks/demo/compose.yaml' }]);
     } else if (url.pathname === '/v1.24/ps/demo') {
+      if (url.searchParams.get('path') === '/stacks/other/compose.yaml') return Response.json([{
+        ID: containerId, Service: 'web', State: 'running',
+        Labels: { 'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml' },
+      }]);
       return Response.json([{
         ID: containerId, Name: 'demo-web-1', Service: 'web', State: 'running',
+        Labels: { 'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml' },
         Publishers: [
           { TargetPort: appPort, PublishedPort: 32000, Protocol: 'tcp' },
           { TargetPort: securePort, PublishedPort: 32001, Protocol: 'tcp' },
@@ -413,6 +426,39 @@ try {
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
+  // Workerd cancels request-owned I/O when a browser disconnects. A shared
+  // discovery promise from that request must not strand every later app visit.
+  await sleep(150);
+  const discoveryStarted = new Promise<void>(resolve => { discoveryEntered = resolve; });
+  const abandoned = httpRequest({ hostname: '127.0.0.1', port: routingPort,
+    headers: { Host: `missing.localhost:${routingPort}` }, agent: false });
+  abandoned.on('error', () => {});
+  abandoned.end();
+  await discoveryStarted;
+  const overlapping = request('/', { app: true, host: 'web.localhost' });
+  await sleep(50);
+  abandoned.destroy();
+  await sleep(100);
+  releaseDiscovery!();
+  releaseDiscovery = undefined;
+  assert.equal((await overlapping).body.toString(), 'upstream-ok');
+  await sleep(150);
+  assert.equal((await request('/', { app: true, host: 'missing.localhost' })).status, 404);
+  assert.equal((await request('/', appOptions)).body.toString(), 'upstream-ok');
+  assert.deepEqual(await tlsRequest('web--p32000.app.localhost', true), { status: 200, body: 'upstream-ok' });
+  console.log('PASS: cancelled app discovery does not strand later HTTP/HTTPS requests');
+
+  await sleep(150);
+  const stalledDiscovery = new Promise<void>(resolve => { discoveryEntered = resolve; });
+  const stalledResponse = request('/', { ...appOptions, timeoutMs: 7000 });
+  await stalledDiscovery;
+  assert.equal((await stalledResponse).status, 503, 'stalled discovery returns before the client deadline');
+  releaseDiscovery!();
+  releaseDiscovery = undefined;
+  assert.equal((await request('/', appOptions)).body.toString(), 'upstream-ok');
+  assert.deepEqual(await tlsRequest('web--p32000.app.localhost', true), { status: 200, body: 'upstream-ok' });
+  console.log('PASS: discovery deadline and retry, and duplicate project rows use their owning config');
+
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
     phase: 'starting', bootId: 'integration-boot', message: 'Starting container runtime…', reason: null,
   }));
@@ -537,6 +583,7 @@ try {
 } finally {
   releaseSSE?.();
   releaseContainerStart?.();
+  releaseDiscovery?.();
   for (const process of processes) await stopProcess(process);
   for (const server of servers) await server.shutdown();
   await app.shutdown();

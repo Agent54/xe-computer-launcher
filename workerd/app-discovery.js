@@ -2,6 +2,7 @@
 // validates the selected container and resolves its current network address.
 const catalogues = new WeakMap();
 const cacheLifetime = 100;
+const discoveryTimeout = 5000;
 
 function catalogue(env) {
   let cache = catalogues.get(env.COMPOSE);
@@ -17,16 +18,27 @@ async function cached(cache, key, read) {
   if (!entry || entry.expires <= Date.now()) {
     for (const [key, value] of cache) if (value.expires <= Date.now()) cache.delete(key);
     if (cache.size >= 128) cache.delete(cache.keys().next().value);
-    entry = { expires: Infinity, promise: null };
-    cache.set(key, entry);
     const requestedAt = Date.now();
-    entry.promise = read().then(value => {
+    // A cancelled Workerd request can abandon its I/O without settling the
+    // shared promise. Give pending entries a finite lease as well as a deadline.
+    entry = { expires: requestedAt + discoveryTimeout, promise: null };
+    cache.set(key, entry);
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error('Compose discovery timed out');
+        reject(error);
+        controller.abort(error);
+      }, discoveryTimeout);
+    });
+    entry.promise = Promise.race([read(controller.signal), timeout]).then(value => {
       entry.expires = requestedAt + cacheLifetime;
       return value;
     }).catch(error => {
       if (cache.get(key) === entry) cache.delete(key);
       throw error;
-    });
+    }).finally(() => clearTimeout(timer));
   }
   return entry.promise;
 }
@@ -46,6 +58,10 @@ function projectVariants(project) {
 
 function variantKey(service) {
   return JSON.stringify([service.project, service.configFiles]);
+}
+
+function configKey(files) {
+  return files.split(',').map(file => file.trim().replaceAll('\\', '/')).filter(Boolean).sort().join(',');
 }
 
 export function invalidateApplicationService(service, env) {
@@ -76,7 +92,7 @@ function serviceDetails(row, variant, config) {
 }
 
 async function discoverVariant(variant, env) {
-  return await cached(catalogue(env), variantKey(variant), async () => {
+  return await cached(catalogue(env), variantKey(variant), async signal => {
     const psURL = new URL(`http://compose/v1.24/ps/${encodeURIComponent(variant.project)}`);
     psURL.searchParams.set('all', 'true');
     const configURL = new URL(`http://compose/v1.24/config/${encodeURIComponent(variant.project)}`);
@@ -86,23 +102,27 @@ async function discoverVariant(variant, env) {
       configURL.searchParams.set('path', variant.configFiles);
     }
     const [rows, config] = await Promise.all([
-      env.COMPOSE.fetch(psURL.href).then(async response => {
+      env.COMPOSE.fetch(psURL.href, { signal }).then(async response => {
         if (!response.ok) throw new Error('Compose service discovery unavailable');
         const rows = await response.json();
         if (!Array.isArray(rows)) throw new Error('Invalid Compose service list');
         return rows;
       }),
       // Numeric routes can still use ps bindings when configuration is unavailable.
-      env.COMPOSE.fetch(configURL.href).then(response => response.ok ? response.json() : null).catch(() => null),
+      env.COMPOSE.fetch(configURL.href, { signal }).then(response => response.ok ? response.json() : null).catch(() => null),
     ]);
     return rows.filter(row => row.Service && row.Labels?.['com.docker.compose.oneoff']?.toLowerCase() !== 'true')
+      // Compose ps is project-scoped and can return a container belonging to a
+      // different checkout. Only its owning variant may supply its port config.
+      .filter(row => !row.ID || !variant.configFiles || !row.Labels?.['com.docker.compose.project.config_files'] ||
+        configKey(row.Labels['com.docker.compose.project.config_files']) === configKey(variant.configFiles))
       .map(row => serviceDetails(row, variant, config));
   });
 }
 
 export async function resolveApplicationService(name, env) {
-  const projects = await cached(catalogue(env), 'projects', async () => {
-    const response = await env.COMPOSE.fetch('http://compose/v1.24/ls?all=true');
+  const projects = await cached(catalogue(env), 'projects', async signal => {
+    const response = await env.COMPOSE.fetch('http://compose/v1.24/ls?all=true', { signal });
     if (!response.ok) throw new Error('Compose discovery unavailable');
     const projects = await response.json();
     if (!Array.isArray(projects)) throw new Error('Invalid Compose project list');

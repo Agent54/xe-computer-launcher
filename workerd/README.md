@@ -12,7 +12,11 @@ the launcher UI to Compose and running containers:
   variants share a 100 ms server cache across hostnames and port selectors;
   app-request startup completion invalidates the affected variant. Docker lookup has the
   same 100 ms limit. Cache expiry is measured from fetch start, so slow requests
-  cannot extend the reuse window. Pending requests share a fetch; these caches
+  cannot extend the reuse window. Pending Compose requests share a fetch with a
+  five-second deadline and a finite cache lease, so an abandoned request cannot
+  block future app discovery. Project-scoped container rows are matched to their
+  config-file labels before applying port configuration, avoiding duplicate
+  matches across checkouts that share a project name. These caches
   are held in Workerd memory and never stored in the browser.
 - **Guest:** `router.js` runs inside SmolVM. It validates the exact container ID
   and published/target port pair selected by the host against Docker, resolves
