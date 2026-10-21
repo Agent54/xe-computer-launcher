@@ -25,5 +25,6 @@ if [[ -d "$frameworks_dir/Testing.framework" ]]; then
 fi
 
 /bin/bash Tests/Integration/test-install-targets.sh
+/bin/bash Tests/Integration/settings-termination.sh
 
 exec /usr/bin/xcrun swift "${test_args[@]}" "$@"

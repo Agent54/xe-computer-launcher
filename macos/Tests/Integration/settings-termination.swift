@@ -23,11 +23,11 @@ final class TerminationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard taskReturned else {
-            fputs("FAIL: termination entered before the settings task returned\n", stderr)
-            _exit(1)
-        }
         Task { @MainActor in
+            guard taskReturned else {
+                fputs("FAIL: termination entered before the settings task returned\n", stderr)
+                _exit(1)
+            }
             try? await Task.sleep(for: .milliseconds(10))
             cleanupFinished = true
             sender.reply(toApplicationShouldTerminate: true)

@@ -1046,12 +1046,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(diskItem)
         containerDiskItem = diskItem
 
+        let runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
+        runAtStartupItem.isHidden = true
+        menu.addItem(runAtStartupItem)
+        self.runAtStartupItem = runAtStartupItem
+
         menu.addItem(.separator())
 
-        runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
         bindCapslockItem = NSMenuItem(title: "Bind to Caps Lock", action: #selector(bindCapslockAction), keyEquivalent: "")
         hideDockIconItem = NSMenuItem(title: "Hide Dock Icon", action: #selector(hideDockIconAction), keyEquivalent: "")
-        if let runAtStartupItem { menu.addItem(runAtStartupItem) }
         if let bindCapslockItem { menu.addItem(bindCapslockItem) }
         if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
@@ -1411,6 +1414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         containerMemoryItem?.isHidden = !optionHeld
         containerCPUItem?.isHidden = !optionHeld
         containerDiskItem?.isHidden = !optionHeld
+        runAtStartupItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
