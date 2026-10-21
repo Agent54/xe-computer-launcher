@@ -1,5 +1,11 @@
 # macOS installer integration test
 
+`bash macos/Tests/Integration/settings-termination.sh` is a standalone AppKit
+regression check for choosing **Quit Now** from async disk settings. It verifies
+that the settings task returns before termination and that main-actor shutdown
+work completes with `.terminateLater`. Run it in a logged-in macOS GUI session;
+it does not launch Xe services or change the installed app, settings, or VM.
+
 `cleanup.sh` resets the test machine, `install-from-dmg.sh` performs the real
 interactive DMG installation, and `about-version.sh` then verifies that the
 About dialog opens in front and displays the installed release version. The

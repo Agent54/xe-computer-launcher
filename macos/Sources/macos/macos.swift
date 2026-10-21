@@ -1607,7 +1607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         alert.addButton(withTitle: "Quit Now")
         alert.addButton(withTitle: "Later")
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
+        if alert.runModal() == .alertFirstButtonReturn { ApplicationTermination.request() }
     }
 
     @objc private func darcOverrideURLAction() {
