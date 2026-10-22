@@ -145,7 +145,7 @@ struct DockerDaemonConfigurationTests {
                 "history": {"maxEntries": 100},
                 "entitlements": {"network-host": false},
                 "gc": {
-                  "enabled": false,
+                  "enabled": true,
                   "defaultKeepStorage": "20GB",
                   "defaultReservedSpace": "20GB",
                   "defaultMaxUsedSpace": "100GB",
@@ -166,10 +166,10 @@ struct DockerDaemonConfigurationTests {
         #expect(builder["history"] as? [String: Int] == ["maxEntries": 100])
         #expect(builder["entitlements"] as? [String: Bool] == ["network-host": false])
         let gc = try #require(builder["gc"] as? [String: Any])
-        #expect(gc["enabled"] as? Bool == true)
-        #expect(gc["defaultMaxUsedSpace"] as? String == "5GB")
-        #expect(gc["defaultReservedSpace"] as? String == "0B")
-        #expect(gc["defaultMinFreeSpace"] as? String == "1073741824")
+        #expect(gc["enabled"] as? Bool == false)
+        #expect(gc["defaultMaxUsedSpace"] == nil)
+        #expect(gc["defaultReservedSpace"] == nil)
+        #expect(gc["defaultMinFreeSpace"] == nil)
         #expect(gc["defaultKeepStorage"] == nil)
         #expect(gc["policy"] == nil)
         #expect(try DockerDaemonConfiguration.updatedConfiguration(updated, diskGiB: 20) == nil)
@@ -190,10 +190,10 @@ struct DockerDaemonConfigurationTests {
         #expect(parsed["log-opts"] as? [String: String] == ["max-size": "10m", "max-file": "3"])
         let builder = try #require(parsed["builder"] as? [String: Any])
         let gc = try #require(builder["gc"] as? [String: Any])
-        #expect(gc["enabled"] as? Bool == true)
-        #expect(gc["defaultMaxUsedSpace"] as? String == "5GB")
-        #expect(gc["defaultReservedSpace"] as? String == "0B")
-        #expect(gc["defaultMinFreeSpace"] as? String == "1073741824")
+        #expect(gc["enabled"] as? Bool == false)
+        #expect(gc["defaultMaxUsedSpace"] == nil)
+        #expect(gc["defaultReservedSpace"] == nil)
+        #expect(gc["defaultMinFreeSpace"] == nil)
         let fileAttributes = try FileManager.default.attributesOfItem(atPath: file.path)
         let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
         #expect(fileAttributes[.posixPermissions] as? Int == 0o600)
@@ -256,7 +256,7 @@ struct DockerDaemonConfigurationTests {
         #expect(try Data(contentsOf: blocked) == Data("blocked".utf8))
     }
 
-    @Test func freeDiskTargetUpdatesWhenDiskCapacityChanges() throws {
+    @Test func resizingDoesNotReenableAutonomousSpaceBudgetGC() throws {
         let directory = workspaceDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         _ = try DockerDaemonConfiguration.prepare(in: directory, diskGiB: 20)
@@ -264,8 +264,9 @@ struct DockerDaemonConfigurationTests {
         let parsed = try configuration(Data(contentsOf: directory.appendingPathComponent("daemon.json")))
         let builder = try #require(parsed["builder"] as? [String: Any])
         let gc = try #require(builder["gc"] as? [String: Any])
-        #expect(gc["defaultMinFreeSpace"] as? String == "2147483648")
-        #expect(gc["defaultMaxUsedSpace"] as? String == "5GB")
+        #expect(gc["enabled"] as? Bool == false)
+        #expect(gc["defaultMinFreeSpace"] == nil)
+        #expect(gc["defaultMaxUsedSpace"] == nil)
     }
 
     @Test(arguments: [0, UInt64.max] as [UInt64])

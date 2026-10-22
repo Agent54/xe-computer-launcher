@@ -277,6 +277,7 @@ Deno.test('runtime failures are enriched only while the supervisor reports an ou
     phase,
     message: phase === 'healthy' ? 'Container runtime ready' : 'Container VM ran out of memory; restarting…',
     reason: phase === 'healthy' ? null : 'oom',
+    lastIncident: { id: 'past-oom', reason: 'oom', message: 'VM ran out of memory', occurredAt: '2026-10-22T00:00:00Z' },
   })) } };
   const applicationFailure = Response.json({ error: 'build_failed' }, { status: 500 });
   const healthyFailure = await surfaceRuntimeFailure(applicationFailure, env);
@@ -287,7 +288,9 @@ Deno.test('runtime failures are enriched only while the supervisor reports an ou
   phase = 'restarting';
   const runtimeFailure = await surfaceRuntimeFailure(Response.json({ error: 'backend EOF' }, { status: 500 }), env);
   assert.equal(runtimeFailure.status, 503);
-  assert.equal((await runtimeFailure.json()).error, 'container_runtime_oom');
+  const payload = await runtimeFailure.json();
+  assert.equal(payload.error, 'container_runtime_oom');
+  assert.equal(payload.runtime.lastIncident.id, 'past-oom');
   const browserFailure = await surfaceRuntimeFailure(new Response('backend EOF', { status: 500 }), env, navigation);
   assert.match(browserFailure.headers.get('content-type')!, /text\/html/);
   assert.match(await browserFailure.text(), /Container VM ran out of memory; restarting…/);

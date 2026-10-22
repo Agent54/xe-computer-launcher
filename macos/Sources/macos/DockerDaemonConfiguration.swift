@@ -58,7 +58,7 @@ enum DockerDaemonConfiguration {
     }
 
     static func updatedConfiguration(_ data: Data, diskGiB: UInt64) throws -> Data? {
-        let (diskTotalBytes, overflow) = diskGiB.multipliedReportingOverflow(by: 1 << 30)
+        let (_, overflow) = diskGiB.multipliedReportingOverflow(by: 1 << 30)
         guard diskGiB > 0, !overflow else { throw DockerDaemonConfigurationError.invalidCapacity }
         guard let current = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw DockerDaemonConfigurationError.invalidConfiguration
@@ -76,17 +76,13 @@ enum DockerDaemonConfiguration {
 
         var builder = updated["builder"] as? [String: Any] ?? [:]
         var gc = builder["gc"] as? [String: Any] ?? [:]
-        gc["enabled"] = true
-        gc["defaultMaxUsedSpace"] = ContainerRuntimeMaintenance.buildCacheMaximum
-        gc["defaultReservedSpace"] = ContainerRuntimeMaintenance.buildCacheReserve
-        // Docker 28 validates percentages but its BuildKit startup parser only accepts byte sizes.
-        gc["defaultMinFreeSpace"] = String(
-            ContainerRuntimeMaintenance.buildCacheMinimumFreeBytes(diskTotalBytes: diskTotalBytes)
-        )
-        // Use Docker's standard GC policies with this budget. Custom policies
-        // and the legacy reserve setting can override the configured maximum.
-        gc.removeValue(forKey: "policy")
-        gc.removeValue(forKey: "defaultKeepStorage")
+        // Docker's space-budget GC sizes all unknown cache records in parallel,
+        // which can exhaust VM memory on overlay2. Use launcher age-based passes.
+        gc["enabled"] = false
+        for key in ["policy", "defaultKeepStorage", "defaultMaxUsedSpace",
+                    "defaultReservedSpace", "defaultMinFreeSpace"] {
+            gc.removeValue(forKey: key)
+        }
         builder["gc"] = gc
         updated["builder"] = builder
 

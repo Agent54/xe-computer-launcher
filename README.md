@@ -164,22 +164,41 @@ their normal behavior. SmolVM socket forwarding connects inside the workload's
 filesystem without sharing the VM's `/run` directory. This requires a runtime
 built with the socket mount fix; the launcher wrapper also limits cleanup on
 older runtimes. Existing containers adopt the logging defaults
-when recreated; explicit Compose logging settings take precedence. BuildKit automatically collects unused
-build cache with a 5 GB maximum and a 1 GB reserve, using Docker's standard GC
-policies. Collection is periodic; cache in use by active builds can exceed the
-target.
+when recreated; explicit Compose logging settings take precedence. Docker's automatic
+build-cache GC is disabled. Its space-budget scan sizes cache records in parallel
+and can exhaust VM memory with overlay2; launcher cleanup uses age-only pruning
+without a cache-size budget.
 
 Runtime maintenance is centralized in `ContainerRuntimeMaintenance.swift`:
-logging limits, the build-cache budget, and image cleanup. While Docker is
+logging limits, build-cache cleanup, and image cleanup. While Docker is
 healthy, the launcher runs `docker image prune --all --force --filter until=32h`
 every four hours, removing both dangling and tagged unused images older than
 32 hours. The cutoff uses image creation time. Images referenced by running or stopped
-containers are preserved, as are containers and volumes. The first healthy
+containers are preserved, as are containers and volumes. The same run removes
+unused build cache last used more than 32 hours ago. If filesystem counters still
+show less than 5% free space, separate passes remove unused cache older than
+8 hours, then 1 hour, then any age, stopping as soon as 5% is free. Active build
+cache remains protected by Docker. If space remains low, the cleanup result
+explains that more disk space or manual image/volume cleanup is needed. The existing
+one-minute filesystem samples trigger earlier cleanup below 5% free, with at
+most one attempt per minute while space stays low. The first healthy
 startup runs cleanup; subsequent attempts are
 recorded in `smol/maintenance.json`, so restarting the app does not reset the
 interval. Missed runs resume when Docker is healthy, without waking a stopped
 VM. Shutdown and VM recovery cancel an active cleanup. Results are logged under
 `maintenance`.
+
+When the 5% reserve triggers cleanup of younger cache, Compose UI shows a separate
+warning that builds may need to rebuild those layers. The warning is recorded
+before the first younger-cache pass, survives later cleanup and launcher relaunch,
+and stays visible until dismissed. A new pressure-cleanup event appears again.
+
+The launcher's normal menu also exposes **Warnings**, with a menu-bar warning
+indicator for unignored events. Memory pressure and OOM restart dialogs offer
+**Increase Memory…**; younger-cache cleanup offers **Increase Disk Size…**.
+These open the existing validated VM settings dialogs and the Quit Now/Later
+restart prompt after saving. **Ignore** clears the launcher's indicator for that
+event while keeping its details available in the menu. New events warn again.
 
 Build with `COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte`
 to include this page until a new Compose UI release is published and pinned.
@@ -187,6 +206,9 @@ to include this page until a new Compose UI release is published and pinned.
 The launcher monitors Docker after startup and performs
 a bounded VM restart if the daemon becomes unavailable; the menu status and
 Compose API expose whether recovery was caused by an out-of-memory event.
+The latest OOM incident survives recovery and launcher relaunch. Compose UI shows
+it until dismissed and warns when available VM memory falls to 10% or less,
+independently of build log messages.
 
 ## Building from source
 

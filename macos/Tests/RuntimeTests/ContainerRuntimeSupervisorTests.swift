@@ -31,7 +31,8 @@ private actor RuntimeFixture {
 
 @Suite(.serialized)
 struct ContainerRuntimeSupervisorTests {
-    private func machine(oomKillCount: UInt64, workloadOOM: Bool = false, workloadExited: Bool = false) -> SmolVMMachine {
+    private func machine(oomKillCount: UInt64, workloadOOM: Bool = false, workloadExited: Bool = false,
+                         pid: Int32 = 123) -> SmolVMMachine {
         SmolVMMachine(
             name: "test",
             state: "running",
@@ -49,7 +50,8 @@ struct ContainerRuntimeSupervisorTests {
                 lastExitCode: workloadOOM ? 137 : nil,
                 lastExitReason: workloadOOM ? "oom_killed" : nil,
                 oomKilled: workloadOOM
-            )
+            ),
+            pid: pid
         )
     }
 
@@ -58,7 +60,9 @@ struct ContainerRuntimeSupervisorTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = RuntimeFixture(
             probes: [false, false, false],
-            diagnostics: [machine(oomKillCount: 0), machine(oomKillCount: 1, workloadOOM: true), machine(oomKillCount: 0)]
+            diagnostics: [machine(oomKillCount: 0)]
+                + Array(repeating: machine(oomKillCount: 1, workloadOOM: true), count: 3)
+                + [machine(oomKillCount: 0)]
         )
         let supervisor = ContainerRuntimeSupervisor(
             configuration: .init(
@@ -112,6 +116,9 @@ struct ContainerRuntimeSupervisorTests {
         let snapshot = await supervisor.snapshot()
         #expect(snapshot.phase == .healthy)
         #expect(snapshot.reason == "oom_recovered")
+        #expect(snapshot.lastIncident?.reason == "oom")
+        #expect(snapshot.lastIncident?.restartedAt != nil)
+        #expect(snapshot.lastIncident?.memoryLimitBytes == UInt64(4) * 1024 * 1024 * 1024)
         #expect(snapshot.bootId != initialBootId)
         #expect(await fixture.starts == 2)
         #expect(await fixture.routerResets == 1)
@@ -122,6 +129,7 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.phase == snapshot.phase)
         #expect(persisted.bootId == snapshot.bootId)
         #expect(persisted.reason == snapshot.reason)
+        #expect(persisted.lastIncident?.id == snapshot.lastIncident?.id)
         #expect(persisted.oomKillCount == snapshot.oomKillCount)
         #expect(persisted.hostResources?.cpuPercent == 12.5)
         #expect(persisted.hostResources?.memoryTotalBytes == UInt64(16) * 1024 * 1024 * 1024)
@@ -136,6 +144,145 @@ struct ContainerRuntimeSupervisorTests {
 
         try await supervisor.stop()
         #expect((await supervisor.snapshot()).vmResources == nil)
+    }
+
+    private func incidentTestRoot() -> URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/runtime-incidents/\(UUID().uuidString)")
+    }
+
+    private func incidentSupervisor(
+        fixture: RuntimeFixture, root: URL,
+        configuration: ContainerRuntimeSupervisor.Configuration = .init(diagnosticInterval: 0)
+    ) -> ContainerRuntimeSupervisor {
+        ContainerRuntimeSupervisor(
+            configuration: configuration,
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { await fixture.start() },
+            stopMachine: { await fixture.stop() },
+            probeDocker: { await fixture.probe() },
+            readDiagnostics: { await fixture.diagnostic() },
+            resetRouter: { await fixture.resetRouter() },
+            reconcileRouter: { await fixture.reconcileRouter() },
+            readHostResources: { nil }, readVMResources: { _ in nil },
+            sleep: { _ in }, onStatusChanged: { _ in }, log: { _ in }
+        )
+    }
+
+    @Test func firstMissedProbePublishesOOMBeforeTheRestartThreshold() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(probes: [false],
+                                     diagnostics: [machine(oomKillCount: 0), machine(oomKillCount: 1)])
+        let supervisor = incidentSupervisor(fixture: fixture, root: root)
+        _ = try await supervisor.start()
+        await supervisor.reconcile()
+        let snapshot = await supervisor.snapshot()
+        #expect(snapshot.phase == .degraded)
+        #expect(snapshot.reason == "oom")
+        #expect(snapshot.message.contains("out of memory"))
+        #expect(snapshot.lastIncident?.reason == "oom")
+        #expect(await fixture.starts == 1)
+    }
+
+    @Test func startupOOMIsRecordedEvenWhenDockerNeverBecomesReady() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { throw SmolVMSetupError.dockerSocketUnavailable("test.sock") },
+            stopMachine: {}, probeDocker: { false },
+            readDiagnostics: { machine(oomKillCount: 1, workloadOOM: true) },
+            resetRouter: {}, reconcileRouter: {}, readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        do {
+            _ = try await supervisor.start()
+            Issue.record("Startup should fail")
+        } catch {}
+        let snapshot = await supervisor.snapshot()
+        #expect(snapshot.phase == .failed)
+        #expect(snapshot.reason == "oom")
+        #expect(snapshot.lastIncident?.reason == "oom")
+        #expect(snapshot.message.contains("out of memory while starting"))
+    }
+
+    @Test func healthySamplesRetainOOMWithoutRestartingRunningContainers() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(probes: [true, true],
+                                     diagnostics: [machine(oomKillCount: 0), machine(oomKillCount: 1)])
+        let supervisor = incidentSupervisor(fixture: fixture, root: root)
+        _ = try await supervisor.start()
+        await supervisor.reconcile()
+        let first = await supervisor.snapshot()
+        #expect(first.phase == .healthy)
+        let incident = try #require(first.lastIncident)
+        await supervisor.reconcile()
+        let next = await supervisor.snapshot()
+        #expect(next.lastIncident?.id == incident.id)
+        #expect(next.lastIncident?.restartedAt == nil)
+        #expect(next.menuDescription.contains("out of memory"))
+        #expect(await fixture.starts == 1)
+        #expect(await fixture.stops == 0)
+    }
+
+    @Test func launcherRelaunchPreservesTheIncidentButClearsStaleReadiness() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(probes: [true],
+                                     diagnostics: [machine(oomKillCount: 0), machine(oomKillCount: 1)])
+        let supervisor = incidentSupervisor(fixture: fixture, root: root)
+        _ = try await supervisor.start()
+        await supervisor.reconcile()
+        let incident = try #require((await supervisor.snapshot()).lastIncident)
+
+        let relaunched = incidentSupervisor(fixture: RuntimeFixture(probes: [],
+                                              diagnostics: [machine(oomKillCount: 0)]), root: root)
+        await relaunched.prepareForLaunch()
+        #expect((await relaunched.snapshot()).phase == .starting)
+        #expect((await relaunched.snapshot()).lastIncident?.id == incident.id)
+        _ = try await relaunched.start()
+        let recovered = await relaunched.snapshot()
+        #expect(recovered.phase == .healthy)
+        #expect(recovered.oomKillCount == 0)
+        #expect(recovered.lastIncident?.id == incident.id)
+    }
+
+    @Test func exhaustedOOMRecoveryKeepsTheActionableCause() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = RuntimeFixture(probes: [false, false], diagnostics: [
+            machine(oomKillCount: 0), machine(oomKillCount: 1, workloadOOM: true),
+            machine(oomKillCount: 0), machine(oomKillCount: 1, workloadOOM: true),
+        ])
+        let supervisor = incidentSupervisor(fixture: fixture, root: root,
+            configuration: .init(failureThreshold: 1, maximumRecoveries: 1, recoveryBackoff: .zero))
+        _ = try await supervisor.start()
+        await supervisor.reconcile()
+        await supervisor.reconcile()
+        let snapshot = await supervisor.snapshot()
+        #expect(snapshot.phase == .failed)
+        #expect(snapshot.reason == "oom")
+        #expect(snapshot.message.contains("Increase VM memory"))
+        #expect(snapshot.lastIncident?.reason == "oom")
+        #expect(await fixture.starts == 2)
+    }
+
+    @Test func relaunchDoesNotCreateANewIncidentForAnAlreadyReportedKernelCounter() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = incidentSupervisor(fixture: RuntimeFixture(probes: [],
+            diagnostics: [machine(oomKillCount: 1)]), root: root)
+        _ = try await original.start()
+        let incident = try #require((await original.snapshot()).lastIncident)
+        let relaunched = incidentSupervisor(fixture: RuntimeFixture(probes: [true],
+            diagnostics: [machine(oomKillCount: 1), machine(oomKillCount: 2)]), root: root)
+        _ = try await relaunched.start()
+        #expect((await relaunched.snapshot()).lastIncident?.id == incident.id)
+        await relaunched.reconcile()
+        #expect((await relaunched.snapshot()).lastIncident?.id != incident.id)
     }
 
     @Test func transientProbeFailureDoesNotRestartTheVM() async throws {

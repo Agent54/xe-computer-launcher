@@ -21,7 +21,7 @@ struct ContainerRuntimeMaintenanceTests {
         let execute: ContainerRuntimeMaintenance.Execute = { command in
             commands.withLock { $0.append(command) }
             if command == VMResourceSampler.guestDiskStatusCommand {
-                return SmolVMCommandResult(standardOutput: "4096 5242880 40000 1310720 631351", standardError: "", exitCode: 0)
+                return SmolVMCommandResult(standardOutput: "4096 5242880 500000 1310720 631351", standardError: "", exitCode: 0)
             }
             return SmolVMCommandResult(
                 standardOutput: command.contains("buildx")
@@ -38,9 +38,9 @@ struct ContainerRuntimeMaintenanceTests {
         await first.value
         #expect(commands.withLock { $0 } == [
             ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"],
-            ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
             ["docker", "buildx", "prune", "--builder", "default", "--all", "--force",
-             "--max-used-space", "5GB", "--reserved-space", "0B", "--min-free-space", "1073741824"],
+             "--filter", "until=32h"],
+            ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
         ])
         #expect(logs.withLock { $0.last } == "Build cache cleanup completed: Total:\t10MB")
         let completed = await maintenance.snapshot()
@@ -48,6 +48,8 @@ struct ContainerRuntimeMaintenanceTests {
         #expect(completed.completedAt == clock.withLock { $0 })
         #expect(completed.results.map(\.reclaimedBytes) == [10_000_000, 10_000_000])
         #expect(completed.buildCacheMinimumFreeDiskPercent == 5)
+        #expect(completed.buildCacheMinimumAgeHours == 32)
+        #expect(completed.cachePressureWarning == nil)
         #expect(await maintenance.reconcile() == nil)
 
         let restarted = ContainerRuntimeMaintenance(
@@ -89,6 +91,28 @@ struct ContainerRuntimeMaintenanceTests {
         #expect(attempts.withLock { $0 } == 4)
     }
 
+    @Test func lowDiskSamplesTriggerEarlyCleanupWithABoundedRetryRate() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 500000 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, now: { clock.withLock { $0 } }, log: { _ in })
+        let lowDisk = VMResourceSnapshot(memoryResidentBytes: nil, memoryLimitBytes: nil,
+            diskAllocatedBytes: nil, diskLogicalBytes: nil, diskTotalBytes: 100,
+            diskAvailableBytes: 4, diskTotalInodes: nil, diskFreeInodes: nil)
+        let first = try #require(await maintenance.reconcile())
+        await first.value
+        clock.withLock { $0.addTimeInterval(59) }
+        #expect(await maintenance.reconcile(resources: lowDisk) == nil)
+        clock.withLock { $0.addTimeInterval(1) }
+        #expect(await maintenance.reconcile() == nil)
+        let pressureRun = try #require(await maintenance.reconcile(resources: lowDisk))
+        await pressureRun.value
+        #expect(await maintenance.reconcile(resources: lowDisk) == nil)
+    }
+
     @Test func manualCleanupBypassesScheduleAndPersistsResults() async throws {
         let stateURL = try workspaceStateURL()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
@@ -99,7 +123,7 @@ struct ContainerRuntimeMaintenanceTests {
         let execute: ContainerRuntimeMaintenance.Execute = { command in
             commands.withLock { $0.append(command) }
             if command == VMResourceSampler.guestDiskStatusCommand {
-                return SmolVMCommandResult(standardOutput: "4096 5242880 40000 1310720 631351", standardError: "", exitCode: 0)
+                return SmolVMCommandResult(standardOutput: "4096 5242880 500000 1310720 631351", standardError: "", exitCode: 0)
             }
             return SmolVMCommandResult(
                 standardOutput: command.contains("buildx") ? "Total:\t1.25GB\n" : "Total reclaimed space: 1.25GB\n",
@@ -125,37 +149,98 @@ struct ContainerRuntimeMaintenanceTests {
         (UInt64.max, 922_337_203_685_477_581),
     ] as [(UInt64, UInt64)])
     func freeDiskTargetRoundsUpAndHandlesLargeDisks(capacity: UInt64, expected: UInt64) {
-        let command = ContainerRuntimeMaintenance.buildCachePruneCommand(diskTotalBytes: capacity)
-        #expect(command.suffix(6) == ["--max-used-space", "5GB", "--reserved-space", "0B", "--min-free-space", String(expected)])
+        #expect(ContainerRuntimeMaintenance.buildCacheMinimumFreeBytes(diskTotalBytes: capacity) == expected)
     }
 
-    @Test func freeDiskTargetUsesCurrentFilesystemCapacityAfterResize() async throws {
+    @Test func youngerCachePassesStopWhenCurrentFilesystemReachesFivePercentFree() async throws {
         let stateURL = try workspaceStateURL()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
-        let blocks = Mutex(UInt64(5_242_880))
+        let freeBlocks = Mutex([40_000, 200_000, 262_144])
         let commands = Mutex<[[String]]>([])
         let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
             commands.withLock { $0.append(command) }
             if command == VMResourceSampler.guestDiskStatusCommand {
-                return SmolVMCommandResult(standardOutput: "4096 \(blocks.withLock { $0 }) 0 0 0", standardError: "", exitCode: 0)
+                let available = freeBlocks.withLock { $0.removeFirst() }
+                return SmolVMCommandResult(standardOutput: "4096 5242880 \(available) 0 0", standardError: "", exitCode: 0)
             }
             return SmolVMCommandResult(standardOutput: "Total:\t0B", standardError: "", exitCode: 0)
         }, log: { _ in })
         let first = try #require(await maintenance.reconcile())
         await first.value
+        let cacheCommands = commands.withLock { $0.filter { $0.contains("buildx") } }
+        #expect(cacheCommands.map(\.last) == ["until=32h", "until=8h", "until=1h"])
+        let snapshot = await maintenance.snapshot()
+        #expect(snapshot.results.allSatisfy { $0.error == nil })
+        #expect(snapshot.cachePressureWarning?.message.contains("younger than 32 hours") == true)
+    }
+
+    @Test func pressureWarningIsPublishedBeforePruningAndSurvivesCancellationRelaunchAndNormalCleanup() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let started = AsyncStream<Void>.makeStream()
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            if command.last == "until=8h" {
+                started.continuation.yield(())
+                started.continuation.finish()
+                try await Task.sleep(for: .seconds(30))
+            }
+            return SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 0 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, log: { _ in })
+        let run = try #require(await maintenance.reconcile())
+        for await _ in started.stream { break }
+        let warning = try #require((await maintenance.snapshot()).cachePressureWarning)
+        #expect(warning.message.contains("below 5%"))
+        await maintenance.pause()
+        await run.value
+        let restored = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 500000 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, log: { _ in })
+        #expect((await restored.snapshot()).cachePressureWarning?.id == warning.id)
+        let normalRun = try #require(await restored.reconcile(force: true))
+        await normalRun.value
+        #expect((await restored.snapshot()).cachePressureWarning?.id == warning.id)
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: stateURL.deletingLastPathComponent()),
+            maintenance: restored, readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        await supervisor.prepareForLaunch()
+        #expect((await supervisor.snapshot()).cachePressureWarning?.id == warning.id)
+    }
+
+    @Test func freeDiskTargetUsesCurrentCapacityAfterResizeAndReportsUnreclaimablePressure() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let blocks = Mutex(5_242_880)
+        let commands = Mutex<[[String]]>([])
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            commands.withLock { $0.append(command) }
+            if command == VMResourceSampler.guestDiskStatusCommand {
+                return SmolVMCommandResult(standardOutput: "4096 \(blocks.withLock { $0 }) 300000 0 0", standardError: "", exitCode: 0)
+            }
+            return SmolVMCommandResult(standardOutput: "Total:\t0B", standardError: "", exitCode: 0)
+        }, log: { _ in })
+        let first = try #require(await maintenance.reconcile())
+        await first.value
+        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.count } == 1)
+        commands.withLock { $0 = [] }
         blocks.withLock { $0 *= 2 }
         let resized = try #require(await maintenance.reconcile(force: true))
         await resized.value
-        let cacheCommands = commands.withLock { $0.filter { $0.contains("buildx") } }
-        #expect(cacheCommands.map(\.last) == ["1073741824", "2147483648"])
-        #expect(commands.withLock { $0.count } == 6)
+        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) }
+                == ["until=32h", "until=8h", "until=1h", "until=0h"])
+        let snapshot = await maintenance.snapshot()
+        #expect(snapshot.results.last?.error?.hasPrefix("Less than 5% disk space remains") == true)
+        #expect(Set(snapshot.results.map(\.name)).count == snapshot.results.count)
     }
 
     @Test(arguments: [
         ("invalid", 0), ("4096 0 0 0 0", 0),
         ("18446744073709551615 2 0 0 0", 0), ("4096 5242880 0 0 0", 1),
     ] as [(String, Int32)])
-    func invalidFilesystemCapacitySkipsCachePruning(output: String, exitCode: Int32) async throws {
+    func invalidFilesystemCapacityPreservesYoungerCache(output: String, exitCode: Int32) async throws {
         let stateURL = try workspaceStateURL()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
         let commands = Mutex<[[String]]>([])
@@ -168,10 +253,10 @@ struct ContainerRuntimeMaintenanceTests {
         }, log: { _ in })
         let running = try #require(await maintenance.reconcile())
         await running.value
-        #expect(commands.withLock { !$0.contains { $0.contains("buildx") } })
+        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) } == ["until=32h"])
         let snapshot = await maintenance.snapshot()
         #expect(snapshot.results.first?.reclaimedBytes == 0)
-        #expect(snapshot.results.last?.error == "Could not read Docker filesystem capacity for cache cleanup.")
+        #expect(snapshot.results.last?.error == "Could not read Docker filesystem capacity; skipped cleanup of younger cache.")
     }
 
     @Test(arguments: ["Total:\t0B", "Total reclaimed space: 0B", "  Total:\t0B\r\n"])

@@ -183,8 +183,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 },
                 log: { ExternalState.shared.appendLog("maintenance", $0) }
             ),
-            onStatusChanged: { snapshot in
-                await MainActor.run { ContainerRuntimePresentation.shared.update(snapshot) }
+            onStatusChanged: { [weak self] snapshot in
+                await MainActor.run {
+                    ContainerRuntimePresentation.shared.update(snapshot)
+                    self?.renderRuntimeWarnings(snapshot)
+                }
                 await workerd.notifyRuntimeChanged()
             }
         )
@@ -217,6 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var didReplyToTermination = false
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
+    private var runtimeWarningsItem: NSMenuItem?
+    private let runtimeWarnings = ContainerRuntimeWarnings()
     private var shutdownProgressIndicator: NSProgressIndicator?
     private var pendingShutdownComponents = Set<ShutdownComponent>()
     private let updateChannel = LauncherUpdateChannel.configured()
@@ -898,6 +903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard shutdownProgressIndicator == nil, let button = statusItem?.button else { return }
         statusItem?.length = NSStatusItem.squareLength
         button.image = nil
+        button.title = ""
         button.toolTip = "Xe Launcher is shutting down"
 
         let indicator = NSProgressIndicator(frame: NSRect(x: 4, y: 4, width: 14, height: 14))
@@ -985,6 +991,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let statusMessageItem = NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: "")
         menu.addItem(statusMessageItem)
         self.statusMessageItem = statusMessageItem
+        let warningsItem = NSMenuItem(title: "Warnings: None", action: nil, keyEquivalent: "")
+        warningsItem.isEnabled = false
+        menu.addItem(warningsItem)
+        runtimeWarningsItem = warningsItem
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -1437,6 +1447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         let state = ExternalState.shared
+        renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
         let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
         if settingsRestartRequired {
             statusMessageItem?.title = "Status: Restart needed for settings"
@@ -1571,36 +1582,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func changeContainerMemoryAction() {
-        guard ContainerVMSettings.change(.memory) else { return }
-        settingsRestartRequired = true
-        renderMenuLabels()
-        showSettingsRestartAlert()
+        changeContainerVMResource(.memory)
     }
 
     @objc private func changeContainerCPUAction() {
-        guard ContainerVMSettings.change(.cpus) else { return }
-        settingsRestartRequired = true
-        renderMenuLabels()
-        showSettingsRestartAlert()
+        changeContainerVMResource(.cpus)
     }
 
     @objc private func changeContainerDiskAction() {
+        changeContainerVMResource(.disk)
+    }
+
+    private func changeContainerVMResource(
+        _ resource: ContainerVMSettings.Resource, acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
+    ) {
+        guard resource == .disk else {
+            applyContainerVMSetting(resource, acknowledging: warning)
+            return
+        }
+        // The warning must remain actionable when the guest is unresponsive.
+        if let diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB {
+            applyContainerVMSetting(.disk, currentDiskGiB: diskGiB, acknowledging: warning)
+            return
+        }
         Task { @MainActor in
             do {
                 let machines = try await SmolVMClient.shared.listMachines()
                 let diskGiB = machines.contains { $0.name == SmolVMSetup.machineName }
                     ? try await SmolVMClient.shared.machineStatus(named: SmolVMSetup.machineName).storageGiB
                     : nil
-                guard ContainerVMSettings.change(.disk, currentDiskGiB: diskGiB) else { return }
-                settingsRestartRequired = true
-                renderMenuLabels()
-                showSettingsRestartAlert()
+                applyContainerVMSetting(.disk, currentDiskGiB: diskGiB, acknowledging: warning)
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "Could Not Read VM Disk Size"
                 alert.informativeText = error.localizedDescription
                 alert.runModal()
             }
+        }
+    }
+
+    private func applyContainerVMSetting(
+        _ resource: ContainerVMSettings.Resource, currentDiskGiB: UInt64? = nil,
+        acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
+    ) {
+        guard !isPreparingForTermination,
+              ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB) else { return }
+        if let warning { runtimeWarnings.ignore(warning) }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    private func renderRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
+        guard !isPreparingForTermination else { return }
+        runtimeWarnings.update(snapshot)
+        let count = runtimeWarnings.unignoredCount
+        runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
+        runtimeWarningsItem?.isEnabled = !runtimeWarnings.warnings.isEmpty
+        if runtimeWarnings.warnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for warning in runtimeWarnings.warnings {
+            let ignored = runtimeWarnings.isIgnored(warning)
+            let item = NSMenuItem(
+                title: warning.title + (ignored ? " (ignored)…" : "…"),
+                action: #selector(showRuntimeWarningAction(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = warning
+            submenu.addItem(item)
+        }
+        runtimeWarningsItem?.submenu = runtimeWarnings.warnings.isEmpty ? nil : submenu
+        if let button = statusItem?.button {
+            button.imagePosition = .imageLeft
+            button.title = count > 0 ? " ⚠︎" : ""
+            button.toolTip = count > 0 ? "Xe Launcher — \(count) runtime warning(s)" : "Xe Launcher"
+            button.setAccessibilityLabel(count > 0 ? "Xe Launcher, \(count) runtime warnings" : "Xe Launcher status menu")
+        }
+    }
+
+    @objc private func showRuntimeWarningAction(_ sender: NSMenuItem) {
+        guard !isPreparingForTermination,
+              let warning = sender.representedObject as? ContainerRuntimeWarnings.Warning else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        switch ContainerRuntimeWarnings.alert(for: warning).runModal() {
+        case .alertFirstButtonReturn:
+            changeContainerVMResource(warning.resource, acknowledging: warning)
+        case .alertSecondButtonReturn:
+            runtimeWarnings.ignore(warning)
+            renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
+        default:
+            break
         }
     }
 

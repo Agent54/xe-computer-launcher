@@ -64,7 +64,7 @@ struct ContainerVMResources {
 
 @MainActor
 enum ContainerVMSettings {
-    enum Resource { case memory, cpus, disk }
+    enum Resource: Sendable { case memory, cpus, disk }
 
     static func change(_ resource: Resource, currentDiskGiB: UInt64? = nil) -> Bool {
         let state = ExternalState.shared

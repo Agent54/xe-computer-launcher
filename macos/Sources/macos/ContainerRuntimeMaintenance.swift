@@ -1,12 +1,18 @@
 import Foundation
 
 /// Runtime maintenance policy and the launcher-managed cleanup schedule.
-/// Docker itself performs log rotation and build-cache garbage collection.
+/// Docker performs log rotation; the launcher owns build-cache collection.
 actor ContainerRuntimeMaintenance {
     struct StepResult: Codable, Equatable, Sendable {
         let name: String
         let reclaimedBytes: UInt64?
         let error: String?
+    }
+
+    struct CachePressureWarning: Codable, Equatable, Sendable {
+        let id: String
+        let message: String
+        let occurredAt: Date
     }
 
     struct Snapshot: Encodable, Sendable {
@@ -15,19 +21,21 @@ actor ContainerRuntimeMaintenance {
         let completedAt: Date?
         let nextRunAt: Date?
         let results: [StepResult]
+        let cachePressureWarning: CachePressureWarning?
         let imageMinimumAgeHours = 32
         let intervalHours = 4
-        let buildCacheLimit = ContainerRuntimeMaintenance.buildCacheMaximum
+        let buildCacheMinimumAgeHours = ContainerRuntimeMaintenance.buildCacheMinimumAgeHours
         let buildCacheMinimumFreeDiskPercent = ContainerRuntimeMaintenance.buildCacheMinimumFreeDiskPercent
     }
 
     static let loggingDriver = "local"
     static let loggingOptions = ["max-size": "10m", "max-file": "3"]
-    static let buildCacheMaximum = "5GB"
-    // A retained cache floor must not override the free-disk target.
-    static let buildCacheReserve = "0B"
+    static let buildCacheMinimumAgeHours = 32
+    // Try older unused cache first, checking cheap filesystem counters between passes.
+    static let buildCachePressureAgeHours = [8, 1, 0]
     static let buildCacheMinimumFreeDiskPercent = 5
     static let cleanupInterval: TimeInterval = 4 * 60 * 60
+    static let pressureRetryInterval: TimeInterval = 60
 
     private enum CleanupStep: CaseIterable {
         case images, buildCache
@@ -47,12 +55,12 @@ actor ContainerRuntimeMaintenance {
             + (diskTotalBytes % 100 * percent + 99) / 100
     }
 
-    static func buildCachePruneCommand(diskTotalBytes: UInt64) -> [String] {
-        let minimumFreeBytes = buildCacheMinimumFreeBytes(diskTotalBytes: diskTotalBytes)
+    static func buildCachePruneCommand(minimumAgeHours: Int = buildCacheMinimumAgeHours) -> [String] {
+        // Any nonzero space budget makes Docker 28 size *all* cache records in
+        // parallel before filtering. Age-only pruning sizes deletions sequentially.
         return [
             "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
-            "--max-used-space", buildCacheMaximum, "--reserved-space", buildCacheReserve,
-            "--min-free-space", String(minimumFreeBytes),
+            "--filter", "until=\(minimumAgeHours)h",
         ]
     }
 
@@ -63,6 +71,7 @@ actor ContainerRuntimeMaintenance {
         let lastImagePruneAttemptAt: Date
         var completedAt: Date?
         var results: [StepResult]?
+        var cachePressureWarning: CachePressureWarning?
     }
 
     private let stateURL: URL
@@ -73,6 +82,7 @@ actor ContainerRuntimeMaintenance {
     private var lastImagePruneAttemptAt: Date?
     private var completedAt: Date?
     private var results: [StepResult] = []
+    private var cachePressureWarning: CachePressureWarning?
     private var cleanupTask: Task<Void, Never>?
     private var isPausing = false
 
@@ -90,13 +100,20 @@ actor ContainerRuntimeMaintenance {
 
     /// Called only while Docker is healthy. Scheduling does not block its health checks.
     @discardableResult
-    func reconcile(force: Bool = false) -> Task<Void, Never>? {
+    func reconcile(force: Bool = false, resources: VMResourceSnapshot? = nil) -> Task<Void, Never>? {
         guard !isPausing, !Task.isCancelled else { return nil }
         if let cleanupTask { return force ? cleanupTask : nil }
         loadRecordIfNeeded()
-        if !force, let lastImagePruneAttemptAt,
-           now().timeIntervalSince(lastImagePruneAttemptAt) < Self.cleanupInterval {
-            return nil
+        if !force, let lastImagePruneAttemptAt {
+            let underPressure: Bool
+            if let total = resources?.diskTotalBytes, total > 0,
+               let available = resources?.diskAvailableBytes, available <= total {
+                underPressure = available < Self.buildCacheMinimumFreeBytes(diskTotalBytes: total)
+            } else {
+                underPressure = false
+            }
+            let interval = underPressure ? Self.pressureRetryInterval : Self.cleanupInterval
+            if now().timeIntervalSince(lastImagePruneAttemptAt) < interval { return nil }
         }
         completedAt = nil
         results = []
@@ -113,7 +130,7 @@ actor ContainerRuntimeMaintenance {
             running: cleanupTask != nil, lastAttemptAt: lastImagePruneAttemptAt,
             completedAt: completedAt,
             nextRunAt: lastImagePruneAttemptAt?.addingTimeInterval(Self.cleanupInterval),
-            results: results
+            results: results, cachePressureWarning: cachePressureWarning
         )
     }
 
@@ -136,6 +153,7 @@ actor ContainerRuntimeMaintenance {
             lastImagePruneAttemptAt = record.lastImagePruneAttemptAt
             completedAt = record.completedAt
             results = record.results ?? []
+            cachePressureWarning = record.cachePressureWarning
         } catch CocoaError.fileReadNoSuchFile {
             // The first healthy startup is the first cleanup attempt.
         } catch {
@@ -155,7 +173,7 @@ actor ContainerRuntimeMaintenance {
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(Record(
                 lastImagePruneAttemptAt: lastImagePruneAttemptAt,
-                completedAt: completedAt, results: results
+                completedAt: completedAt, results: results, cachePressureWarning: cachePressureWarning
             ))
             try data.write(to: stateURL, options: .atomic)
         } catch {
@@ -167,6 +185,7 @@ actor ContainerRuntimeMaintenance {
         defer { cleanupTask = nil }
         guard !Task.isCancelled else { return }
         for step in CleanupStep.allCases {
+            var resultName = step.name
             do {
                 try Task.checkCancellation()
                 let command: [String]
@@ -174,43 +193,82 @@ actor ContainerRuntimeMaintenance {
                 case .images:
                     command = ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"]
                 case .buildCache:
-                    let status = try await execute(VMResourceSampler.guestDiskStatusCommand)
-                    try Task.checkCancellation()
-                    guard status.exitCode == 0,
-                          let disk = VMResourceSampler.parseGuestDiskStatus(status.standardOutput) else {
-                        throw NSError(domain: "RuntimeMaintenance", code: 1, userInfo: [
-                            NSLocalizedDescriptionKey: "Could not read Docker filesystem capacity for cache cleanup.",
-                        ])
-                    }
-                    command = Self.buildCachePruneCommand(diskTotalBytes: disk.totalBytes)
+                    command = Self.buildCachePruneCommand()
                 }
-                let result = try await execute(command)
-                try Task.checkCancellation()
-                guard result.exitCode == 0 else {
-                    throw NSError(domain: "RuntimeMaintenance", code: Int(result.exitCode), userInfo: [
-                        NSLocalizedDescriptionKey: result.standardError.isEmpty
-                            ? "Docker exited with code \(result.exitCode)" : result.standardError,
-                    ])
+                try await runPrune(name: step.name, command: command)
+                if step == .buildCache {
+                    resultName = "Low disk space cleanup"
+                    try await cleanUnderDiskPressure()
                 }
-                let reclaimed = result.standardOutput.split(separator: "\n")
-                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .last { $0.hasPrefix("Total reclaimed space:") || $0.hasPrefix("Total:") }
-                results.append(StepResult(name: step.name,
-                                          reclaimedBytes: reclaimed.flatMap { Self.reclaimedBytes($0) },
-                                          error: nil))
-                log(step.name + " completed" + (reclaimed.map { ": \($0)" } ?? ""))
             } catch is CancellationError {
                 // Runtime shutdown or recovery owns cancellation.
                 return
             } catch {
-                results.append(StepResult(name: step.name, reclaimedBytes: nil, error: error.localizedDescription))
-                log(step.name + " failed: " + error.localizedDescription)
+                results.append(StepResult(name: resultName, reclaimedBytes: nil, error: error.localizedDescription))
+                log(resultName + " failed: " + error.localizedDescription)
             }
             saveRecord()
         }
         completedAt = now()
         saveRecord()
         await VMResourceSampler.invalidateDiskSamples()
+    }
+
+    private func runPrune(name: String, command: [String]) async throws {
+        try Task.checkCancellation()
+        let result = try await execute(command)
+        try Task.checkCancellation()
+        guard result.exitCode == 0 else {
+            throw NSError(domain: "RuntimeMaintenance", code: Int(result.exitCode), userInfo: [
+                NSLocalizedDescriptionKey: result.standardError.isEmpty
+                    ? "Docker exited with code \(result.exitCode)" : result.standardError,
+            ])
+        }
+        let reclaimed = result.standardOutput.split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { $0.hasPrefix("Total reclaimed space:") || $0.hasPrefix("Total:") }
+        results.append(StepResult(name: name,
+                                  reclaimedBytes: reclaimed.flatMap { Self.reclaimedBytes($0) }, error: nil))
+        log(name + " completed" + (reclaimed.map { ": \($0)" } ?? ""))
+        saveRecord()
+    }
+
+    private func diskIsUnderPressure() async throws -> Bool {
+        try Task.checkCancellation()
+        let status = try await execute(VMResourceSampler.guestDiskStatusCommand)
+        try Task.checkCancellation()
+        guard status.exitCode == 0,
+              let disk = VMResourceSampler.parseGuestDiskStatus(status.standardOutput) else {
+            throw NSError(domain: "RuntimeMaintenance", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Could not read Docker filesystem capacity; skipped cleanup of younger cache.",
+            ])
+        }
+        return disk.availableBytes < Self.buildCacheMinimumFreeBytes(diskTotalBytes: disk.totalBytes)
+    }
+
+    private func cleanUnderDiskPressure() async throws {
+        for (index, age) in Self.buildCachePressureAgeHours.enumerated() {
+            guard try await diskIsUnderPressure() else { return }
+            if index == 0 {
+                let warning = CachePressureWarning(
+                    id: UUID().uuidString,
+                    message: "VM free disk space fell below 5%, forcing cleanup to include unused build cache younger than 32 hours. Future builds may need to rebuild those layers. Increase the VM disk size in Xe Launcher to avoid this.",
+                    occurredAt: now()
+                )
+                cachePressureWarning = warning
+                // Persist before deleting younger cache, including if shutdown interrupts the pass.
+                saveRecord()
+                log("Warning: " + warning.message)
+            }
+            let name = age == 0 ? "Unused build cache cleanup (low disk space)"
+                : "Build cache older than \(age) hours cleanup (low disk space)"
+            try await runPrune(name: name, command: Self.buildCachePruneCommand(minimumAgeHours: age))
+        }
+        if try await diskIsUnderPressure() {
+            throw NSError(domain: "RuntimeMaintenance", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Less than 5% disk space remains after unused cache cleanup. Increase the VM disk size or remove unneeded images and volumes.",
+            ])
+        }
     }
 
     static func reclaimedBytes(_ line: String) -> UInt64? {

@@ -1,5 +1,16 @@
 import Foundation
 
+struct ContainerRuntimeIncident: Codable, Equatable, Sendable {
+    let id: String
+    let reason: String
+    let message: String
+    let occurredAt: Date
+    let memoryLimitBytes: UInt64?
+    var guestPID: Int32? = nil
+    var oomKillCount: UInt64? = nil
+    var restartedAt: Date? = nil
+}
+
 struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     enum Phase: String, Codable, Sendable {
         case starting
@@ -22,8 +33,14 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     let hostResources: HostResourceSnapshot?
     var vmResources: VMResourceSnapshot? = nil
     var bootId: String? = nil
+    var lastIncident: ContainerRuntimeIncident? = nil
+    var cachePressureWarning: ContainerRuntimeMaintenance.CachePressureWarning? = nil
 
-    var menuDescription: String { message }
+    var menuDescription: String {
+        phase == .healthy && lastIncident?.reason == "oom"
+            ? "\(message) · Last VM failure: out of memory"
+            : message
+    }
 }
 
 @MainActor
@@ -67,6 +84,13 @@ actor ContainerRuntimeStatusStore {
             oomKillCount: nil,
             hostResources: nil
         )
+        // Restore the diagnosis, never the previous process's readiness.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let data = try? Data(contentsOf: directoryURL.appendingPathComponent("status.json")),
+           let previous = try? decoder.decode(ContainerRuntimeSnapshot.self, from: data) {
+            self.current.lastIncident = previous.lastIncident
+        }
     }
 
     func publish(_ snapshot: ContainerRuntimeSnapshot) throws {
@@ -140,6 +164,9 @@ actor ContainerRuntimeSupervisor {
     private var lastDiagnosticsAt = Date.distantPast
     private var lastDiagnostics: SmolVMMachine?
     private var bootId: String?
+    private var lastIncident: ContainerRuntimeIncident?
+    private var didLoadIncident = false
+    private var outageWasOOM = false
 
     init(
         configuration: Configuration = Configuration(),
@@ -183,14 +210,15 @@ actor ContainerRuntimeSupervisor {
 
     @discardableResult
     func start() async throws -> SmolVMStartupResult {
+        await loadIncidentIfNeeded()
         state = .starting
+        outageWasOOM = false
         bootId = UUID().uuidString
         await publish(phase: .starting, message: "Starting container runtime…")
         do {
             let result = try await startMachine()
             consecutiveFailures = 0
-            lastDiagnostics = try? await readDiagnostics()
-            lastDiagnosticsAt = now()
+            if let diagnostics = try? await readDiagnostics() { observeDiagnostics(diagnostics) }
             state = .healthy
             let memory = lastDiagnostics?.memory
             await publish(
@@ -201,13 +229,17 @@ actor ContainerRuntimeSupervisor {
             log("Container runtime ready with " + String(SmolVMSetup.memoryMiB) + " MiB memory")
             return result
         } catch {
+            if let diagnostics = try? await readDiagnostics() {
+                outageWasOOM = observeDiagnostics(diagnostics)
+            }
             state = .failed
             let detail = error.localizedDescription
             log("Container runtime failed to start: \(detail)")
             await publish(
                 phase: .failed,
-                message: detail,
-                reason: "startup_failure"
+                message: outageWasOOM ? "Container VM ran out of memory while starting. \(detail)" : detail,
+                reason: outageWasOOM ? "oom" : "startup_failure",
+                memory: lastDiagnostics?.memory
             )
             throw error
         }
@@ -216,6 +248,7 @@ actor ContainerRuntimeSupervisor {
     /// Clear a previous launch's healthy snapshot before starting host listeners.
     func prepareForLaunch() async {
         guard state == .idle else { return }
+        await loadIncidentIfNeeded()
         await publish(phase: .starting, message: "Starting container runtime…")
     }
 
@@ -231,12 +264,15 @@ actor ContainerRuntimeSupervisor {
                 await publish(
                     phase: .healthy,
                     message: "Container runtime ready",
+                    reason: outageWasOOM ? "oom_recovered" : nil,
                     memory: lastDiagnostics?.memory
                 )
                 log("Container runtime recovered without a restart")
             }
+            outageWasOOM = false
             await refreshDiagnosticsIfNeeded()
-            if state == .healthy { await maintenance?.reconcile() }
+            let resources = await statusStore.snapshot().vmResources
+            if state == .healthy { await maintenance?.reconcile(resources: resources) }
             return
         }
 
@@ -248,15 +284,25 @@ actor ContainerRuntimeSupervisor {
               state != .starting else { return }
 
         consecutiveFailures += 1
+        // Read the cause on the first missed probe. Waiting for the restart
+        // threshold can lose an OOM to a later healthy sample or VM reboot.
+        let diagnosed = try? await readDiagnostics()
+        guard state != .stopped, state != .starting, state != .recovering else { return }
+        if let diagnosed {
+            let newOOM = observeDiagnostics(diagnosed)
+            if newOOM || diagnosed.workload?.oomKilled == true { outageWasOOM = true }
+        }
         state = .degraded
         await publish(
             phase: .degraded,
-            message: "Container runtime is not responding (\(consecutiveFailures)/\(configuration.failureThreshold))",
-            reason: "docker_unavailable",
+            message: outageWasOOM
+                ? "Container VM ran out of memory; Docker is not responding (\(consecutiveFailures)/\(configuration.failureThreshold))"
+                : "Container runtime is not responding (\(consecutiveFailures)/\(configuration.failureThreshold))",
+            reason: outageWasOOM ? "oom" : "docker_unavailable",
             memory: lastDiagnostics?.memory
         )
         guard consecutiveFailures >= configuration.failureThreshold else { return }
-        await recover()
+        await recover(diagnosed: diagnosed)
     }
 
     func stop() async throws {
@@ -283,8 +329,8 @@ actor ContainerRuntimeSupervisor {
     private func refreshDiagnosticsIfNeeded() async {
         guard now().timeIntervalSince(lastDiagnosticsAt) >= configuration.diagnosticInterval else { return }
         if let diagnostics = try? await readDiagnostics() {
-            lastDiagnostics = diagnostics
-            lastDiagnosticsAt = now()
+            guard state == .healthy else { return }
+            observeDiagnostics(diagnostics)
             await publish(
                 phase: .healthy,
                 message: "Container runtime ready",
@@ -293,21 +339,48 @@ actor ContainerRuntimeSupervisor {
         }
     }
 
-    private func recover() async {
+    private func loadIncidentIfNeeded() async {
+        guard !didLoadIncident else { return }
+        didLoadIncident = true
+        lastIncident = await statusStore.snapshot().lastIncident
+    }
+
+    /// Observe every diagnostic sample, including samples taken while Docker
+    /// answers probes. The kernel may kill a build process without killing Docker.
+    @discardableResult
+    private func observeDiagnostics(_ diagnostics: SmolVMMachine) -> Bool {
+        let sameGuest = lastDiagnostics?.pid == diagnostics.pid
+        let resumingGuest = lastDiagnostics == nil && diagnostics.pid != nil
+            && diagnostics.pid == lastIncident?.guestPID
+        let previousCount = sameGuest ? lastDiagnostics?.memory?.oomKillCount ?? 0
+            : resumingGuest ? lastIncident?.oomKillCount ?? 0 : 0
+        let currentCount = diagnostics.memory?.oomKillCount ?? 0
+        let workloadOOM = diagnostics.workload?.oomKilled == true
+            && !resumingGuest && (!sameGuest || lastDiagnostics?.workload?.oomKilled != true)
+        let newOOM = currentCount > previousCount || workloadOOM
+        lastDiagnostics = diagnostics
+        lastDiagnosticsAt = now()
+        if newOOM {
+            let incident = ContainerRuntimeIncident(
+                id: UUID().uuidString,
+                reason: "oom",
+                message: "The container VM ran out of memory and Linux killed a process. Increase VM memory in Xe Launcher or run fewer builds at once.",
+                occurredAt: now(),
+                memoryLimitBytes: diagnostics.memory?.totalBytes,
+                guestPID: diagnostics.pid,
+                oomKillCount: diagnostics.memory?.oomKillCount
+            )
+            lastIncident = incident
+            log(incident.message)
+        }
+        return newOOM
+    }
+
+    private func recover(diagnosed: SmolVMMachine?) async {
         state = .recovering
         await maintenance?.pause()
-        let diagnosed = try? await readDiagnostics()
-        let previousOOMCount = lastDiagnostics?.memory?.oomKillCount
-        let currentOOMCount = diagnosed?.memory?.oomKillCount
-        let workloadOOM = diagnosed?.workload?.oomKilled == true
-        let oomCountAdvanced: Bool
-        if let previousOOMCount, let currentOOMCount {
-            oomCountAdvanced = currentOOMCount > previousOOMCount
-        } else {
-            oomCountAdvanced = false
-        }
-        let wasOOM = workloadOOM || oomCountAdvanced
-        if let diagnosed { lastDiagnostics = diagnosed }
+        let wasOOM = outageWasOOM
+        let incidentID = lastIncident?.id
 
         // Docker's short health probe can time out during a heavy build.
         // Only restart after diagnostics confirm the VM or daemon exited.
@@ -330,11 +403,13 @@ actor ContainerRuntimeSupervisor {
         recoveryDates.removeAll { $0 < cutoff }
         guard recoveryDates.count < configuration.maximumRecoveries else {
             state = .failed
-            let message = "Container runtime recovery stopped after repeated failures"
+            let message = wasOOM
+                ? "Container VM repeatedly ran out of memory; automatic recovery stopped. Increase VM memory in Xe Launcher or run fewer builds at once."
+                : "Container runtime recovery stopped after repeated failures"
             await publish(
                 phase: .failed,
                 message: message,
-                reason: "recovery_exhausted",
+                reason: wasOOM ? "oom" : "recovery_exhausted",
                 memory: diagnosed.memory
             )
             log(message)
@@ -369,8 +444,8 @@ actor ContainerRuntimeSupervisor {
             try await sleep(configuration.recoveryBackoff)
             _ = try await startMachine()
             try await reconcileRouter()
-            lastDiagnostics = try? await readDiagnostics()
-            lastDiagnosticsAt = now()
+            if let diagnostics = try? await readDiagnostics() { observeDiagnostics(diagnostics) }
+            if wasOOM, lastIncident?.id == incidentID { lastIncident?.restartedAt = now() }
             consecutiveFailures = 0
             state = .healthy
             await publish(
@@ -381,6 +456,7 @@ actor ContainerRuntimeSupervisor {
                 memory: lastDiagnostics?.memory
             )
             log("Container runtime recovered after automatic VM restart")
+            outageWasOOM = false
         } catch is CancellationError {
             // App shutdown cancels the host-services task while recovery may be
             // sleeping or restarting SmolVM. The shutdown path publishes the
@@ -393,8 +469,10 @@ actor ContainerRuntimeSupervisor {
             let detail = error.localizedDescription
             await publish(
                 phase: .degraded,
-                message: "Container runtime restart failed; retrying…",
-                reason: "restart_failed",
+                message: wasOOM
+                    ? "Container VM ran out of memory; restart failed, retrying…"
+                    : "Container runtime restart failed; retrying…",
+                reason: wasOOM ? "oom" : "restart_failed",
                 recoveryAttempt: attempt,
                 memory: lastDiagnostics?.memory
             )
@@ -412,6 +490,7 @@ actor ContainerRuntimeSupervisor {
         let hostResources = await readHostResources()
         let machine = [.starting, .restarting, .stopped].contains(phase) ? nil : lastDiagnostics
         let vmResources = await readVMResources(machine)
+        let cachePressureWarning = await maintenance?.snapshot().cachePressureWarning
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,
@@ -423,7 +502,9 @@ actor ContainerRuntimeSupervisor {
             oomKillCount: memory?.oomKillCount,
             hostResources: hostResources,
             vmResources: vmResources,
-            bootId: bootId
+            bootId: bootId,
+            lastIncident: lastIncident,
+            cachePressureWarning: cachePressureWarning
         )
         do {
             try await statusStore.publish(snapshot)
