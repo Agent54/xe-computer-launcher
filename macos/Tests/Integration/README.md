@@ -61,8 +61,12 @@ require one-time runner maintenance.
 At CI start, existing launcher and certificate-approval processes are stopped
 before removing the old certificate's trust. Cleanup then terminates only the
 dedicated runner account's existing `SecurityAgent` process and waits up to five
-seconds for it to exit. This clears leftover authorization panels and an agent
-that has stopped responding to UI inspection; macOS starts a fresh agent when
+seconds for it to exit. If it survives `SIGTERM`, cleanup sends `SIGKILL` to that
+same process and waits up to five more seconds. Each signal rechecks the process
+owner and executable; replacement agents are left alone and zombie processes
+count as exited. If a live agent still remains, cleanup logs its PID, owner,
+state and executable before failing. This clears leftover authorization panels
+and an agent that has stopped responding to UI inspection; macOS starts a fresh agent when
 the next trust request needs one. It can dismiss any pending authorization in
 that account, so do not share the CI account with interactive work or concurrent
 GUI jobs. Other accounts' agents and the runner's TCC grants are preserved.
@@ -74,6 +78,11 @@ GUI session or revoked permission. The trust checks evaluate only the
 leaf certificate against macOS's trust stores; supplying the root certificate
 would not prove it was trusted in the Keychain. Removal and verification remain
 required before deleting the old app data.
+
+Run `bash macos/Tests/Integration/test-ci-security-agent-cleanup.sh` to verify
+signal escalation, process scoping and timeout handling with simulated processes;
+this test does not signal any real authorization agents.
+
 If macOS reports that the CA has no current-user trust setting, cleanup treats
 the setting as already absent. It then removes the matching certificate item
 from the current user's default Keychain, using the SHA-256 fingerprint of

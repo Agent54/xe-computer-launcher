@@ -1,5 +1,19 @@
 #!/bin/bash
 
+ci_security_agent_is_running() {
+    local process_info
+    local process_user_id
+    local process_state
+    local process_command
+
+    process_info="$(ps -p "$1" -o uid= -o stat= -o comm= 2>/dev/null)" || return 1
+    read -r process_user_id process_state process_command <<<"$process_info"
+    # A zombie cannot own a dialog. Recheck identity before every signal so a
+    # reused PID cannot target another executable or another user's process.
+    [[ "$process_user_id" == "$2" && "$process_state" != Z* \
+        && "${process_command##*/}" == SecurityAgent ]]
+}
+
 # Called only by the guarded CI cleanup, after Xe's approval clients stop and
 # before a new trust request starts. SecurityAgent can retain a password panel
 # (or stop answering AX queries) after its security client has exited. Reset
@@ -10,28 +24,42 @@ reset_ci_security_agent() {
     local security_agent_pid
     local still_running
     local attempt
+    local signal
 
     runner_user_id="$(id -u)" || return 1
     security_agent_pids="$(pgrep -u "$runner_user_id" -x SecurityAgent 2>/dev/null || true)"
     [[ -n "$security_agent_pids" ]] || return 0
 
     log "closing the runner's previous SecurityAgent authorization UI"
-    for security_agent_pid in $security_agent_pids; do
-        kill -TERM "$security_agent_pid" 2>/dev/null || true
-    done
-    for ((attempt = 0; attempt < 20; attempt++)); do
-        still_running=0
+    for signal in TERM KILL; do
+        if [[ "$signal" == KILL ]]; then
+            log "previous SecurityAgent survived SIGTERM; forcing it to exit with SIGKILL"
+        fi
         for security_agent_pid in $security_agent_pids; do
-            if kill -0 "$security_agent_pid" 2>/dev/null; then
-                still_running=1
+            if ci_security_agent_is_running "$security_agent_pid" "$runner_user_id"; then
+                kill "-$signal" "$security_agent_pid" 2>/dev/null \
+                    || log "could not send SIG$signal to SecurityAgent PID $security_agent_pid"
             fi
         done
-        [[ "$still_running" == 1 ]] || return 0
-        sleep 0.25
+        for ((attempt = 0; attempt < 20; attempt++)); do
+            still_running=0
+            for security_agent_pid in $security_agent_pids; do
+                if ci_security_agent_is_running "$security_agent_pid" "$runner_user_id"; then
+                    still_running=1
+                fi
+            done
+            [[ "$still_running" == 1 ]] || return 0
+            sleep 0.25
+        done
     done
     # Wait only for the original PIDs: macOS may already have started a fresh
     # agent. A replacement must not be mistaken for the stale UI or stopped.
-    log "previous SecurityAgent did not exit within 5 seconds"
+    log "previous SecurityAgent is still running after SIGTERM and SIGKILL"
+    for security_agent_pid in $security_agent_pids; do
+        if ci_security_agent_is_running "$security_agent_pid" "$runner_user_id"; then
+            ps -p "$security_agent_pid" -o pid= -o uid= -o stat= -o comm= >&2 || true
+        fi
+    done
     return 1
 }
 
