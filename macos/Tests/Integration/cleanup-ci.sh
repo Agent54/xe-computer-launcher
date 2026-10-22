@@ -52,6 +52,8 @@ printf '[installer-cleanup] macOS version and installed Apple update history\n'
 # dialog or recreate its trust setting while removal is running. Stop it first,
 # preserving the certificates and app data until removal has been verified.
 bash "${SCRIPT_DIR}/cleanup.sh" --stop-only
+reset_ci_security_agent \
+    || fail "could not close the runner's stale authorization UI. App data has been preserved"
 
 root_certificate="$HOME/Library/Application Support/dev.xe.computer/workerd/ui-https/root.crt"
 leaf_certificate="$HOME/Library/Application Support/dev.xe.computer/workerd/ui-https/ui.crt"
@@ -91,7 +93,12 @@ if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
         else
             [[ -z "$removal_output" ]] || printf '%s\n' "$removal_output" >&2
             if [[ "$removal_status" -eq 142 ]]; then
-                fail "certificate trust removal timed out after 90 seconds waiting for macOS authorization; inspect the pending password dialog. App data has been preserved"
+                # The timed-out security client has exited. Stop its password
+                # helper before dismissing the UI so it cannot submit again.
+                stop_auth_helper
+                reset_ci_security_agent \
+                    || log "could not close the timed-out authorization UI; inspect the runner's desktop"
+                fail "certificate trust removal timed out after 90 seconds waiting for macOS authorization; attempted to close the stale password dialog. App data has been preserved"
             fi
             fail "could not remove the previous local HTTPS certificate trust (exit $removal_status)"
         fi

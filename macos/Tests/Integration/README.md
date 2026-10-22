@@ -59,7 +59,18 @@ Timestamped entries created by older workflow versions are not touched and
 require one-time runner maintenance.
 
 At CI start, existing launcher and certificate-approval processes are stopped
-before removing the old certificate's trust. The trust checks evaluate only the
+before removing the old certificate's trust. Cleanup then terminates only the
+dedicated runner account's existing `SecurityAgent` process and waits up to five
+seconds for it to exit. This clears leftover authorization panels and an agent
+that has stopped responding to UI inspection; macOS starts a fresh agent when
+the next trust request needs one. It can dismiss any pending authorization in
+that account, so do not share the CI account with interactive work or concurrent
+GUI jobs. Other accounts' agents and the runner's TCC grants are preserved.
+If certificate removal reaches its 90-second timeout, cleanup stops the password
+helper and attempts the same UI cleanup before failing with app data preserved.
+The existing password-entry helper and installer automation are unchanged.
+This recovers stale UI; it cannot unlock a locked desktop or restore a missing
+GUI session or revoked permission. The trust checks evaluate only the
 leaf certificate against macOS's trust stores; supplying the root certificate
 would not prove it was trusted in the Keychain. Removal and verification remain
 required before deleting the old app data.
