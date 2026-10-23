@@ -5,11 +5,11 @@ import Testing
 
 @MainActor
 struct ContainerRuntimeWarningsTests {
-    private func snapshot(available: UInt64 = 50, bootID: String = "boot-1") -> ContainerRuntimeSnapshot {
+    private func snapshot(available: UInt64 = 50, bootID: String = "boot-1", host: HostResourceSnapshot? = nil) -> ContainerRuntimeSnapshot {
         ContainerRuntimeSnapshot(
             phase: .healthy, message: "Container runtime ready", reason: nil, updatedAt: Date(),
             recoveryAttempt: nil, memoryTotalBytes: 100, memoryAvailableBytes: available,
-            oomKillCount: 0, hostResources: nil, bootId: bootID
+            oomKillCount: 0, hostResources: host, bootId: bootID
         )
     }
 
@@ -101,5 +101,53 @@ struct ContainerRuntimeWarningsTests {
         #expect(oom.title.contains("Restarted"))
         #expect(oom.message.contains("Automatic VM restart:"))
         #expect(oom.message.contains("Container runtime ready"))
+    }
+
+    @Test func hostReserveWarningsStayRedUntilResourcesRecoverEvenWhenIgnored() throws {
+        _ = NSApplication.shared
+        let gib: UInt64 = 1 << 30
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        let low = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 13 * gib,
+            memoryTotalBytes: 16 * gib, diskUsedBytes: 91 * gib, diskTotalBytes: 100 * gib)
+        warnings.update(snapshot(host: low))
+        #expect(warnings.warnings.count == 2)
+        for warning in warnings.warnings {
+            #expect(warning.isHostWarning)
+            #expect(warning.resource == nil)
+            let alert = ContainerRuntimeWarnings.alert(for: warning)
+            #expect(alert.alertStyle == .critical)
+            #expect((alert.accessoryView as? NSTextField)?.textColor == NSColor.systemRed)
+            #expect(alert.buttons[0].title == "OK")
+            warnings.ignore(warning)
+        }
+        #expect(warnings.unignoredCount == 0)
+        #expect(warnings.hasHostWarning)
+        let oldIDs = warnings.warnings.map(\.id)
+        let recovered = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 12 * gib,
+            memoryTotalBytes: 16 * gib, diskUsedBytes: 90 * gib, diskTotalBytes: 100 * gib)
+        warnings.update(snapshot(host: recovered))
+        #expect(!warnings.hasHostWarning)
+        warnings.update(snapshot(host: low))
+        #expect(warnings.unignoredCount == 2)
+        #expect(warnings.warnings.map(\.id) != oldIDs)
+    }
+
+    @Test func increaseDialogShowsItsNextStepAndDisablesUnsafeIncreasesWithARedReason() throws {
+        _ = NSApplication.shared
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in })
+        warnings.update(history())
+        let warning = try #require(warnings.warnings.first { $0.kind == .outOfMemory })
+        let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: "Increase Memory to 8 GiB",
+            blockedReason: "This increase would leave less than 4 GiB RAM available on the host.")
+        #expect(alert.buttons[0].title == "Increase Memory to 8 GiB")
+        #expect(!alert.buttons[0].isEnabled)
+        #expect(alert.buttons[1].title == "Ignore")
+        #expect(alert.buttons[1].isEnabled)
+        let label = try #require(alert.accessoryView as? NSTextField)
+        #expect(label.textColor == NSColor.systemRed)
+        #expect(label.stringValue.contains("4 GiB"))
+        let allowed = ContainerRuntimeWarnings.alert(for: warning, actionTitle: "Increase Memory to 8 GiB")
+        #expect(allowed.buttons[0].isEnabled)
     }
 }

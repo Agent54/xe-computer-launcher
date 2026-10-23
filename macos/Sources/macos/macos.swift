@@ -130,7 +130,7 @@ private final class LauncherStartupDelegate: NSObject, NSApplicationDelegate {
         let disclaimer = NSAlert()
         disclaimer.alertStyle = .warning
         disclaimer.messageText = "Xe Computer Is Experimental Software"
-        disclaimer.informativeText = "Only use Xe Computer with fresh folders that contain no important data. Do not use it on websites with real accounts.\n\nContinue to start Xe Launcher, or cancel to quit."
+        disclaimer.informativeText = "Only use Xe Computer with fresh folders that contain no important data. Do not connect folders containing sensitive data. Do not visit untrusted websites or use websites with real accounts.\n\nContinue to start Xe Launcher, or cancel to quit."
         disclaimer.addButton(withTitle: "Continue")
         disclaimer.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         app.activate(ignoringOtherApps: true)
@@ -222,6 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var statusMessageItem: NSMenuItem?
     private var runtimeWarningsItem: NSMenuItem?
     private let runtimeWarnings = ContainerRuntimeWarnings()
+    private var isChangingContainerVMResource = false
+    private var isShowingRuntimeWarning = false
     private var shutdownProgressIndicator: NSProgressIndicator?
     private var pendingShutdownComponents = Set<ShutdownComponent>()
     private let updateChannel = LauncherUpdateChannel.configured()
@@ -1596,22 +1598,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func changeContainerVMResource(
         _ resource: ContainerVMSettings.Resource, acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
     ) {
-        guard resource == .disk else {
-            applyContainerVMSetting(resource, acknowledging: warning)
-            return
-        }
-        // The warning must remain actionable when the guest is unresponsive.
-        if let diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB {
-            applyContainerVMSetting(.disk, currentDiskGiB: diskGiB, acknowledging: warning)
-            return
-        }
+        guard !isChangingContainerVMResource, !isPreparingForTermination else { return }
+        isChangingContainerVMResource = true
         Task { @MainActor in
+            defer { isChangingContainerVMResource = false }
             do {
-                let machines = try await SmolVMClient.shared.listMachines()
-                let diskGiB = machines.contains { $0.name == SmolVMSetup.machineName }
-                    ? try await SmolVMClient.shared.machineStatus(named: SmolVMSetup.machineName).storageGiB
-                    : nil
-                applyContainerVMSetting(.disk, currentDiskGiB: diskGiB, acknowledging: warning)
+                var diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB
+                if resource == .disk, diskGiB == nil {
+                    let machines = try await SmolVMClient.shared.listMachines()
+                    if machines.contains(where: { $0.name == SmolVMSetup.machineName }) {
+                        diskGiB = try await SmolVMClient.shared.machineStatus(named: SmolVMSetup.machineName).storageGiB
+                    }
+                }
+                await applyContainerVMSetting(resource, currentDiskGiB: diskGiB, acknowledging: warning)
             } catch {
                 let alert = NSAlert()
                 alert.messageText = "Could Not Read VM Disk Size"
@@ -1624,9 +1623,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func applyContainerVMSetting(
         _ resource: ContainerVMSettings.Resource, currentDiskGiB: UInt64? = nil,
         acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
-    ) {
-        guard !isPreparingForTermination,
-              ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB) else { return }
+    ) async {
+        guard !isPreparingForTermination else { return }
+        let changed = warning == nil
+            ? await ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB)
+            : await ContainerVMSettings.increase(resource, currentDiskGiB: currentDiskGiB)
+        guard changed, !isPreparingForTermination else { return }
         if let warning { runtimeWarnings.ignore(warning) }
         settingsRestartRequired = true
         renderMenuLabels()
@@ -1637,9 +1639,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !isPreparingForTermination else { return }
         runtimeWarnings.update(snapshot)
         let count = runtimeWarnings.unignoredCount
+        let critical = runtimeWarnings.hasHostWarning
         runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
         runtimeWarningsItem?.isEnabled = !runtimeWarnings.warnings.isEmpty
         if runtimeWarnings.warnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
+        if let item = runtimeWarningsItem {
+            item.attributedTitle = NSAttributedString(string: item.title, attributes: [
+                .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
+            ])
+        }
         let submenu = NSMenu()
         submenu.autoenablesItems = false
         for warning in runtimeWarnings.warnings {
@@ -1650,29 +1658,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             )
             item.target = self
             item.representedObject = warning
+            if warning.isHostWarning {
+                item.attributedTitle = NSAttributedString(string: item.title, attributes: [.foregroundColor: NSColor.systemRed])
+            }
             submenu.addItem(item)
         }
         runtimeWarningsItem?.submenu = runtimeWarnings.warnings.isEmpty ? nil : submenu
         if let button = statusItem?.button {
             button.imagePosition = .imageLeft
-            button.title = count > 0 ? " ⚠︎" : ""
-            button.toolTip = count > 0 ? "Xe Launcher — \(count) runtime warning(s)" : "Xe Launcher"
-            button.setAccessibilityLabel(count > 0 ? "Xe Launcher, \(count) runtime warnings" : "Xe Launcher status menu")
+            button.attributedTitle = NSAttributedString(string: count > 0 || critical ? " ⚠︎" : "", attributes: [
+                .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
+            ])
+            button.toolTip = critical ? "Xe Launcher — host resources below reserve"
+                : count > 0 ? "Xe Launcher — \(count) runtime warning(s)" : "Xe Launcher"
+            button.setAccessibilityLabel(critical ? "Xe Launcher, host resource warning"
+                : count > 0 ? "Xe Launcher, \(count) runtime warnings" : "Xe Launcher status menu")
         }
     }
 
     @objc private func showRuntimeWarningAction(_ sender: NSMenuItem) {
-        guard !isPreparingForTermination,
+        guard !isPreparingForTermination, !isShowingRuntimeWarning,
               let warning = sender.representedObject as? ContainerRuntimeWarnings.Warning else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        switch ContainerRuntimeWarnings.alert(for: warning).runModal() {
-        case .alertFirstButtonReturn:
-            changeContainerVMResource(warning.resource, acknowledging: warning)
-        case .alertSecondButtonReturn:
-            runtimeWarnings.ignore(warning)
-            renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
-        default:
-            break
+        isShowingRuntimeWarning = true
+        Task { @MainActor in
+            defer { isShowingRuntimeWarning = false }
+            let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
+            guard !isPreparingForTermination else { return }
+            let vm = ContainerRuntimePresentation.shared.snapshot.vmResources
+            let limits = ContainerVMResources(settings: ExternalState.shared.settings.rawData)
+            var title: String?
+            var blocked: String?
+            if let resource = warning.resource,
+               resource == .memory || vm?.diskCapacityGiB != nil {
+                let next = resource == .memory ? HostResourcePolicy.nextMemoryMiB(after: limits.memoryMiB)
+                    : HostResourcePolicy.nextDiskGiB(after: limits.diskGiB(preserving: vm?.diskCapacityGiB))
+                if let next {
+                    let size = resource == .memory ? String(format: "%g", Double(next) / 1024) : String(next)
+                    title = resource == .memory ? "Increase Memory to \(size) GiB" : "Increase Disk to \(size) GiB"
+                    let resident = vm?.processID.flatMap(VMResourceSampler.residentMemoryBytes) ?? 0
+                    let storage = VMResourceSampler.storageAllocatedBytes(in: VMResourceSampler.machineDirectory(
+                        named: SmolVMSetup.machineName, dataURL: SmolVMPaths.dataURL
+                    )) ?? 0
+                    do {
+                        try HostResourcePolicy.validate(memoryMiB: resource == .memory ? next : nil,
+                            diskGiB: resource == .disk ? UInt64(next) : nil, host: host,
+                            vmResidentBytes: min(resident, vm?.memoryLimitBytes ?? 0), storageAllocatedBytes: storage)
+                    } catch { blocked = error.localizedDescription }
+                } else {
+                    blocked = "The next increase exceeds the supported VM resource limit."
+                }
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: title, blockedReason: blocked,
+                hostWarnings: HostResourcePolicy.warnings(for: host))
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                if let resource = warning.resource { changeContainerVMResource(resource, acknowledging: warning) }
+            case .alertSecondButtonReturn:
+                runtimeWarnings.ignore(warning)
+                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
+            default:
+                break
+            }
         }
     }
 

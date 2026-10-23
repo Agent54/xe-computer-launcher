@@ -167,6 +167,7 @@ actor ContainerRuntimeSupervisor {
     private var lastIncident: ContainerRuntimeIncident?
     private var didLoadIncident = false
     private var outageWasOOM = false
+    private var lastPublishedAt = Date.distantPast
 
     init(
         configuration: Configuration = Configuration(),
@@ -255,6 +256,15 @@ actor ContainerRuntimeSupervisor {
     func reconcile() async {
         guard state != .idle, state != .starting, state != .recovering,
               state != .stopped else { return }
+
+        // Host reserve warnings must keep updating while VM startup/recovery is
+        // blocked. Preserve the failure and do not retry starting the machine.
+        if state == .failed, now().timeIntervalSince(lastPublishedAt) >= configuration.diagnosticInterval {
+            let previous = await statusStore.snapshot()
+            guard state == .failed else { return }
+            await publish(phase: previous.phase, message: previous.message, reason: previous.reason,
+                recoveryAttempt: previous.recoveryAttempt, memory: lastDiagnostics?.memory, expectedState: .failed)
+        }
 
         if await probeDocker() {
             guard state != .stopped, state != .recovering, state != .starting else { return }
@@ -485,12 +495,15 @@ actor ContainerRuntimeSupervisor {
         message: String,
         reason: String? = nil,
         recoveryAttempt: Int? = nil,
-        memory: SmolVMMemoryStatus? = nil
+        memory: SmolVMMemoryStatus? = nil,
+        expectedState: State? = nil
     ) async {
+        lastPublishedAt = now()
         let hostResources = await readHostResources()
         let machine = [.starting, .restarting, .stopped].contains(phase) ? nil : lastDiagnostics
         let vmResources = await readVMResources(machine)
         let cachePressureWarning = await maintenance?.snapshot().cachePressureWarning
+        guard expectedState == nil || state == expectedState else { return }
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,

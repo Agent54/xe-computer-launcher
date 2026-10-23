@@ -8,12 +8,22 @@ struct HostResourceSnapshot: Codable, Equatable, Sendable {
     let memoryTotalBytes: UInt64
     let diskUsedBytes: UInt64?
     let diskTotalBytes: UInt64?
+
+    var memoryAvailableBytes: UInt64? {
+        guard let memoryUsedBytes, memoryUsedBytes <= memoryTotalBytes else { return nil }
+        return memoryTotalBytes - memoryUsedBytes
+    }
+
+    var diskAvailableBytes: UInt64? {
+        guard let diskTotalBytes, let diskUsedBytes, diskUsedBytes <= diskTotalBytes else { return nil }
+        return diskTotalBytes - diskUsedBytes
+    }
 }
 
 actor HostResourceSampler {
     static let shared = HostResourceSampler()
 
-    private static let refreshInterval: Duration = .seconds(60)
+    private static let refreshInterval: Duration = .seconds(10)
 
     private struct CPUTicks {
         let busy: UInt64
@@ -24,10 +34,10 @@ actor HostResourceSampler {
     private var cachedSnapshot: HostResourceSnapshot?
     private var lastSampledAt: ContinuousClock.Instant?
 
-    func snapshot() async -> HostResourceSnapshot {
+    func snapshot(forceRefresh: Bool = false) async -> HostResourceSnapshot {
         // Status can be published frequently; keep host sampling demand-driven and infrequent.
         let now = ContinuousClock.now
-        if let cachedSnapshot, let lastSampledAt,
+        if !forceRefresh, let cachedSnapshot, let lastSampledAt,
            now - lastSampledAt < Self.refreshInterval {
             return cachedSnapshot
         }
@@ -117,15 +127,21 @@ actor HostResourceSampler {
     }
 
     private static func diskUsage() -> (used: UInt64, total: UInt64)? {
-        guard let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
+        // Measure the volume containing VM storage, including when app data
+        // lives on a different volume. Do not count purgeable space as free.
+        var volumeURL = SmolVMPaths.dataURL
+        while !FileManager.default.fileExists(atPath: volumeURL.path), volumeURL.path != "/" {
+            volumeURL.deleteLastPathComponent()
+        }
+        guard let values = try? volumeURL.resourceValues(forKeys: [
             .volumeTotalCapacityKey,
-            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey,
         ]),
         let totalValue = values.volumeTotalCapacity,
-        totalValue > 0 else { return nil }
+        totalValue > 0, let freeValue = values.volumeAvailableCapacity, freeValue >= 0 else { return nil }
 
         let total = UInt64(totalValue)
-        let available = UInt64(clamping: values.volumeAvailableCapacityForImportantUsage ?? 0)
+        let available = UInt64(freeValue)
         return (total - min(total, available), total)
     }
 }

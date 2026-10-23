@@ -5,7 +5,7 @@ import Foundation
 @MainActor
 final class ContainerRuntimeWarnings {
     enum Kind: String, Sendable {
-        case memoryPressure, outOfMemory, cacheCleanup
+        case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk
 
         var settingKey: String { "runtime_ignored_\(rawValue)_id" }
     }
@@ -17,14 +17,16 @@ final class ContainerRuntimeWarnings {
         let message: String
         let occurredAt: Date?
 
-        var resource: ContainerVMSettings.Resource { kind == .cacheCleanup ? .disk : .memory }
-        var actionTitle: String { kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…" }
+        var isHostWarning: Bool { kind == .hostMemory || kind == .hostDisk }
+        var resource: ContainerVMSettings.Resource? { isHostWarning ? nil : kind == .cacheCleanup ? .disk : .memory }
+        var actionTitle: String { isHostWarning ? "OK" : kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…" }
     }
 
     private let readIgnored: (Kind) -> String?
     private let saveIgnored: (Kind, String) -> Void
     private var pressureID: String?
     private var pressureBootID: String?
+    private var hostEpisodeIDs: [Kind: String] = [:]
     private(set) var warnings: [Warning] = []
 
     init(
@@ -36,6 +38,7 @@ final class ContainerRuntimeWarnings {
     }
 
     var unignoredCount: Int { warnings.filter { !isIgnored($0) }.count }
+    var hasHostWarning: Bool { warnings.contains { $0.isHostWarning } }
 
     func isIgnored(_ warning: Warning) -> Bool { readIgnored(warning.kind) == warning.id }
 
@@ -43,6 +46,17 @@ final class ContainerRuntimeWarnings {
 
     func update(_ snapshot: ContainerRuntimeSnapshot) {
         var current: [Warning] = []
+        var activeHostKinds: Set<Kind> = []
+        for warning in HostResourcePolicy.warnings(for: snapshot.hostResources) {
+            let kind: Kind = warning.resource == .memory ? .hostMemory : .hostDisk
+            activeHostKinds.insert(kind)
+            let id = hostEpisodeIDs[kind] ?? UUID().uuidString
+            hostEpisodeIDs[kind] = id
+            current.append(Warning(id: id, kind: kind,
+                title: kind == .hostMemory ? "Host RAM Below 4 GiB Reserve" : "Host Disk Below 10 GiB Reserve",
+                message: warning.message, occurredAt: nil))
+        }
+        hostEpisodeIDs = hostEpisodeIDs.filter { activeHostKinds.contains($0.key) }
         if snapshot.phase == .healthy, let total = snapshot.memoryTotalBytes, total > 0,
            let available = snapshot.memoryAvailableBytes, available <= total / 10 {
             if pressureID == nil || pressureBootID != snapshot.bootId {
@@ -81,16 +95,40 @@ final class ContainerRuntimeWarnings {
         warnings = current
     }
 
-    static func alert(for warning: Warning) -> NSAlert {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
+    static func alert(for warning: Warning, actionTitle: String? = nil, blockedReason: String? = nil,
+                      hostWarnings: [HostResourceReserveWarning] = []) -> NSAlert {
+        let alert = warning.isHostWarning ? hostResourceAlert(title: warning.title, message: warning.message) : NSAlert()
+        if !warning.isHostWarning { alert.alertStyle = .warning }
         alert.messageText = warning.title
-        alert.informativeText = warning.message
+        if !warning.isHostWarning { alert.informativeText = warning.message }
         if let occurredAt = warning.occurredAt {
             alert.informativeText += "\n\nOccurred: " + occurredAt.formatted(date: .abbreviated, time: .shortened)
         }
-        alert.addButton(withTitle: warning.actionTitle)
+        let increase = alert.addButton(withTitle: actionTitle ?? warning.actionTitle)
+        increase.isEnabled = blockedReason == nil
+        if !warning.isHostWarning {
+            let redMessages = hostWarnings.map(\.message) + (blockedReason.map { [$0] } ?? [])
+            if !redMessages.isEmpty { alert.accessoryView = redLabel(redMessages.joined(separator: "\n\n")) }
+        }
         alert.addButton(withTitle: "Ignore").keyEquivalent = "\u{1b}"
         return alert
+    }
+
+    static func hostResourceAlert(title: String, message: String) -> NSAlert {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = title
+        alert.icon = NSImage(systemSymbolName: "exclamationmark.octagon.fill", accessibilityDescription: "Host resource warning")?
+            .withSymbolConfiguration(.init(paletteColors: [.systemRed]))
+        alert.accessoryView = redLabel(message)
+        return alert
+    }
+
+    private static func redLabel(_ message: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.textColor = .systemRed
+        let height = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 360, height: 1000)).height ?? 100
+        label.frame = NSRect(x: 0, y: 0, width: 360, height: height)
+        return label
     }
 }

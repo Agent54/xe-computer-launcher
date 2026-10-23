@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import macos
 
@@ -206,6 +207,37 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.reason == "oom")
         #expect(snapshot.lastIncident?.reason == "oom")
         #expect(snapshot.message.contains("out of memory while starting"))
+    }
+
+    @Test func failedStartupKeepsHostReservesCurrentWithoutRetryingTheVM() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gib: UInt64 = 1 << 30
+        let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        let used = Mutex(13 * gib)
+        let starts = Mutex(0)
+        let failure = HostResourceReserveError(message: "Host RAM reserve prevents VM startup")
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { starts.withLock { $0 += 1 }; throw failure },
+            stopMachine: {}, probeDocker: { false }, readDiagnostics: { throw failure },
+            resetRouter: {}, reconcileRouter: {},
+            readHostResources: {
+                HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: used.withLock { $0 },
+                    memoryTotalBytes: 16 * gib, diskUsedBytes: nil, diskTotalBytes: nil)
+            }, readVMResources: { _ in nil }, now: { clock.withLock { $0 } },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        do { _ = try await supervisor.start() } catch {}
+        #expect(HostResourcePolicy.warnings(for: (await supervisor.snapshot()).hostResources).count == 1)
+        used.withLock { $0 = 10 * gib }
+        clock.withLock { $0.addTimeInterval(10) }
+        await supervisor.reconcile()
+        let refreshed = await supervisor.snapshot()
+        #expect(HostResourcePolicy.warnings(for: refreshed.hostResources).isEmpty)
+        #expect(refreshed.phase == .failed)
+        #expect(refreshed.message == failure.localizedDescription)
+        #expect(starts.withLock { $0 } == 1)
     }
 
     @Test func healthySamplesRetainOOMWithoutRestartingRunningContainers() async throws {

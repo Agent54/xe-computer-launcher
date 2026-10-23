@@ -196,9 +196,21 @@ and stays visible until dismissed. A new pressure-cleanup event appears again.
 The launcher's normal menu also exposes **Warnings**, with a menu-bar warning
 indicator for unignored events. Memory pressure and OOM restart dialogs offer
 **Increase Memory…**; younger-cache cleanup offers **Increase Disk Size…**.
-These open the existing validated VM settings dialogs and the Quit Now/Later
-restart prompt after saving. **Ignore** clears the launcher's indicator for that
+Resource changes use the Quit Now/Later restart prompt after saving.
+**Ignore** clears the launcher's indicator for that
 event while keeping its details available in the menu. New events warn again.
+
+VM defaults remain 4 GiB RAM and a 20 GiB data disk. The launcher's warning
+dialogs offer 4 → 8 GiB RAM, then increases of 2 GiB; disk increases start at
+20 → 30 GiB, then add 10 GiB. The next size is shown before confirmation.
+Increases must leave at least 4 GiB available host RAM and 10 GiB free on the
+volume containing VM storage. Checks fund the VM memory limit and remaining
+sparse disk growth, crediting only resident VM RAM and already allocated
+storage blocks. They run on save and VM startup, including settings-file edits.
+An unsafe Increase button is disabled with a red explanation in the launcher
+dialog. Live host reserve breaches also remain red in the launcher until the
+resources recover, even if acknowledged. Other apps can consume host resources
+after a check; the launcher samples host usage every 10 seconds.
 
 Build with `COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte`
 to include this page until a new Compose UI release is published and pinned.

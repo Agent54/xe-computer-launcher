@@ -66,7 +66,7 @@ struct ContainerVMResources {
 enum ContainerVMSettings {
     enum Resource: Sendable { case memory, cpus, disk }
 
-    static func change(_ resource: Resource, currentDiskGiB: UInt64? = nil) -> Bool {
+    static func change(_ resource: Resource, currentDiskGiB: UInt64? = nil) async -> Bool {
         let state = ExternalState.shared
         let current = ContainerVMResources(settings: state.settings.rawData)
         let hostCPUs = ProcessInfo.processInfo.processorCount
@@ -113,8 +113,68 @@ enum ContainerVMSettings {
                 continue
             }
             guard UInt64(value) != oldValue else { return false }
+            if resource != .cpus, UInt64(value) > oldValue,
+               !(await validateHostReserve(resource, value: value)) { continue }
             state.setIntegerSetting(key, Int(value))
             return true
+        }
+    }
+
+    /// Warning actions use fixed increases rather than the advanced free-form editor.
+    static func increase(_ resource: Resource, currentDiskGiB: UInt64? = nil) async -> Bool {
+        guard resource == .memory || resource == .disk else { return false }
+        let state = ExternalState.shared
+        let current = ContainerVMResources(settings: state.settings.rawData)
+        let isMemory = resource == .memory
+        let old = isMemory ? UInt64(current.memoryMiB) : current.diskGiB(preserving: currentDiskGiB)
+        let next = isMemory ? HostResourcePolicy.nextMemoryMiB(after: current.memoryMiB)
+            : HostResourcePolicy.nextDiskGiB(after: old)
+        guard let next else {
+            let alert = NSAlert()
+            alert.messageText = "VM Resource Limit Reached"
+            alert.informativeText = "The next increase exceeds the supported VM resource limit."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return false
+        }
+        guard await validateHostReserve(resource, value: next) else { return false }
+        let oldLabel = isMemory ? String(format: "%g", Double(old) / 1024) : String(old)
+        let nextLabel = isMemory ? String(format: "%g", Double(next) / 1024) : String(next)
+        let alert = NSAlert()
+        alert.messageText = isMemory ? "Increase VM Memory to \(nextLabel) GiB?" : "Increase VM Disk to \(nextLabel) GiB?"
+        alert.informativeText = "Current limit: \(oldLabel) GiB. The host must retain at least 4 GiB available RAM and 10 GiB free disk space. Changes apply after quitting and reopening Xe Launcher."
+        alert.addButton(withTitle: "Increase to \(nextLabel) GiB")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        // Resources may have changed while the confirmation was open.
+        guard await validateHostReserve(resource, value: next) else { return false }
+        state.setIntegerSetting(isMemory ? ContainerVMResources.memorySetting : ContainerVMResources.diskSetting, Int(next))
+        return true
+    }
+
+    private static func validateHostReserve(_ resource: Resource, value: UInt32) async -> Bool {
+        let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
+        let vm = ContainerRuntimePresentation.shared.snapshot.vmResources
+        let resident = vm?.processID.flatMap(VMResourceSampler.residentMemoryBytes) ?? 0
+        let storage = VMResourceSampler.storageAllocatedBytes(in: VMResourceSampler.machineDirectory(
+            named: SmolVMSetup.machineName, dataURL: SmolVMPaths.dataURL
+        )) ?? 0
+        do {
+            try HostResourcePolicy.validate(
+                memoryMiB: resource == .memory ? value : nil,
+                diskGiB: resource == .disk ? UInt64(value) : nil, host: host,
+                vmResidentBytes: min(resident, vm?.memoryLimitBytes ?? 0), storageAllocatedBytes: storage
+            )
+            return true
+        } catch {
+            let alert = ContainerRuntimeWarnings.hostResourceAlert(
+                title: "Host Resource Reserve — Increase Blocked", message: error.localizedDescription
+            )
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return false
         }
     }
 }

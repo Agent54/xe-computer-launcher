@@ -12,6 +12,7 @@ struct VMResourceSnapshot: Codable, Equatable, Sendable {
     let diskTotalInodes: UInt64?
     let diskFreeInodes: UInt64?
     var diskCapacityGiB: UInt64? = nil
+    var processID: Int32? = nil
 }
 
 struct VMGuestDiskSnapshot: Equatable, Sendable {
@@ -53,7 +54,8 @@ enum VMResourceSampler {
             diskAvailableBytes: guestDisk?.availableBytes,
             diskTotalInodes: guestDisk?.totalInodes,
             diskFreeInodes: guestDisk?.freeInodes,
-            diskCapacityGiB: machine?.storageGiB
+            diskCapacityGiB: machine?.storageGiB,
+            processID: running ? machine?.pid : nil
         )
     }
 
@@ -88,6 +90,15 @@ enum VMResourceSampler {
             logical += UInt64(info.st_size)
         }
         return (allocated, logical)
+    }
+
+    static func storageAllocatedBytes(in directory: URL) -> UInt64? {
+        let qcow = directory.appendingPathComponent("storage.qcow2")
+        let path = FileManager.default.fileExists(atPath: qcow.path)
+            ? qcow.path : directory.appendingPathComponent("storage.raw").path
+        var info = stat()
+        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_blocks >= 0 else { return nil }
+        return UInt64(info.st_blocks) * 512
     }
 
     static func parseGuestDiskStatus(_ response: String) -> VMGuestDiskSnapshot? {
