@@ -171,6 +171,152 @@ struct ContainerRuntimeSupervisorTests {
         )
     }
 
+    @Test func resourceRestartAppliesCurrentLimitsAndRestoresRoutingWithoutHostReserveGates() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gib: UInt64 = 1 << 30
+        let configuredMemory = Mutex<UInt64>(4096)
+        let appliedMemory = Mutex<[UInt64]>([])
+        let events = Mutex<[String]>([])
+        let phases = Mutex<[ContainerRuntimeSnapshot.Phase]>([])
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: {
+                let memory = configuredMemory.withLock { $0 }
+                appliedMemory.withLock { $0.append(memory) }
+                events.withLock { $0.append("start:\(memory)") }
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: { events.withLock { $0.append("stop") } },
+            probeDocker: { true },
+            readDiagnostics: {
+                let memory = appliedMemory.withLock { $0.last ?? 4096 }
+                return SmolVMMachine(name: "test", state: "running", labels: [:],
+                    memory: SmolVMMemoryStatus(totalBytes: memory * 1_048_576,
+                        availableBytes: gib, freeBytes: gib, buffersBytes: 0, cachedBytes: 0, oomKillCount: 0),
+                    workload: nil, pid: Int32(memory), memoryMiB: memory)
+            }, resetRouter: { events.withLock { $0.append("reset router") } },
+            reconcileRouter: { events.withLock { $0.append("restore router") } },
+            readHostResources: {
+                HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 15 * gib,
+                    memoryTotalBytes: 16 * gib, diskUsedBytes: 99 * gib, diskTotalBytes: 100 * gib)
+            }, readVMResources: { _ in nil },
+            onStatusChanged: { snapshot in phases.withLock { $0.append(snapshot.phase) } }, log: { _ in }
+        )
+        try await supervisor.start()
+        let initialBootId = (await supervisor.snapshot()).bootId
+        configuredMemory.withLock { $0 = 8192 }
+        try await supervisor.restart()
+        let snapshot = await supervisor.snapshot()
+        #expect(appliedMemory.withLock { $0 } == [4096, 8192])
+        #expect(events.withLock { $0 } == ["start:4096", "reset router", "start:8192", "restore router"])
+        #expect(phases.withLock { $0 } == [.starting, .healthy, .restarting, .healthy])
+        #expect(snapshot.memoryTotalBytes == 8 * gib)
+        #expect(snapshot.bootId != initialBootId)
+        #expect(snapshot.phase == .healthy)
+        #expect(HostResourcePolicy.warnings(for: snapshot.hostResources).count == 2)
+    }
+
+    @Test func resourceRestartWaitsForStartupAndCancelledRestartDoesNotRunDuringShutdown() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (entered, entry) = AsyncStream<Void>.makeStream()
+        let (released, release) = AsyncStream<Void>.makeStream()
+        let starts = Mutex(0)
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: {
+                let count = starts.withLock { $0 += 1; return $0 }
+                if count == 1 {
+                    entry.yield(())
+                    var iterator = released.makeAsyncIterator()
+                    await iterator.next()
+                }
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: {}, probeDocker: { true },
+            readDiagnostics: { self.machine(oomKillCount: 0) }, resetRouter: {}, reconcileRouter: {},
+            readHostResources: { nil }, readVMResources: { _ in nil }, onStatusChanged: { _ in }, log: { _ in }
+        )
+        let startup = Task { try await supervisor.start() }
+        var iterator = entered.makeAsyncIterator()
+        await iterator.next()
+        let restart = Task { try await supervisor.restart() }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(starts.withLock { $0 } == 1)
+        restart.cancel()
+        let shutdown = Task { try await supervisor.stop() }
+        release.yield(())
+        _ = try await startup.value
+        await #expect(throws: CancellationError.self) { try await restart.value }
+        try await shutdown.value
+        #expect(starts.withLock { $0 } == 1)
+        #expect((await supervisor.snapshot()).phase == .stopped)
+    }
+
+    @Test func resourceRestartCancelsCleanupBeforeRestartingTheMachine() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (entered, entry) = AsyncStream<Void>.makeStream()
+        let events = Mutex<[String]>([])
+        let maintenance = ContainerRuntimeMaintenance(stateURL: root.appendingPathComponent("maintenance.json"), execute: { _ in
+            entry.yield(())
+            do { try await Task.sleep(for: .seconds(60)) }
+            catch {
+                events.withLock { $0.append("cleanup cancelled") }
+                throw error
+            }
+            return SmolVMCommandResult(standardOutput: "", standardError: "", exitCode: 0)
+        }, log: { _ in })
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root), maintenance: maintenance,
+            startMachine: {
+                events.withLock { $0.append("start") }
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: {}, probeDocker: { true },
+            readDiagnostics: { self.machine(oomKillCount: 0) }, resetRouter: {}, reconcileRouter: {},
+            readHostResources: { nil }, readVMResources: { _ in nil }, onStatusChanged: { _ in }, log: { _ in }
+        )
+        try await supervisor.start()
+        _ = await supervisor.runMaintenance()
+        var iterator = entered.makeAsyncIterator()
+        await iterator.next()
+        try await supervisor.restart()
+        #expect(events.withLock { $0 } == ["start", "cleanup cancelled", "start"])
+        #expect(!(await maintenance.snapshot()).running)
+        #expect((await supervisor.snapshot()).phase == .healthy)
+    }
+
+    @Test func oldProbeCannotTriggerRecoveryAfterAResourceRestart() async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (entered, entry) = AsyncStream<Void>.makeStream()
+        let (released, release) = AsyncStream<Void>.makeStream()
+        let starts = Mutex(0)
+        let supervisor = ContainerRuntimeSupervisor(
+            configuration: .init(failureThreshold: 1, recoveryBackoff: .zero),
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: {
+                starts.withLock { $0 += 1 }
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: {}, probeDocker: {
+                entry.yield(())
+                var iterator = released.makeAsyncIterator()
+                await iterator.next()
+                return false
+            }, readDiagnostics: { self.machine(oomKillCount: 0, workloadExited: true) },
+            resetRouter: {}, reconcileRouter: {}, readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        try await supervisor.start()
+        let probe = Task { await supervisor.reconcile() }
+        var iterator = entered.makeAsyncIterator()
+        await iterator.next()
+        try await supervisor.restart()
+        release.yield(())
+        await probe.value
+        #expect(starts.withLock { $0 } == 2)
+        #expect((await supervisor.snapshot()).phase == .healthy)
+    }
+
     @Test func firstMissedProbePublishesOOMBeforeTheRestartThreshold() async throws {
         let root = incidentTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -216,7 +362,7 @@ struct ContainerRuntimeSupervisorTests {
         let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
         let used = Mutex(13 * gib)
         let starts = Mutex(0)
-        let failure = HostResourceReserveError(message: "Host RAM reserve prevents VM startup")
+        let failure = SmolVMSetupError.dockerStartupFailed("Docker workload exited")
         let supervisor = ContainerRuntimeSupervisor(
             statusStore: ContainerRuntimeStatusStore(directoryURL: root),
             startMachine: { starts.withLock { $0 += 1 }; throw failure },

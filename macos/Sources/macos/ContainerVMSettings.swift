@@ -88,9 +88,9 @@ enum ContainerVMSettings {
                 : isMemory
                 ? "Enter a memory limit from 4 to 32 GiB. This Mac has \(String(format: "%g", hostMemoryGiB)) GiB. Memory is committed as needed."
                 : "Enter a CPU limit from 1 to \(hostCPUs). This Mac has \(hostCPUs) logical CPUs.") +
-                "\n\nShared by Docker builds and all containers. Changes apply when you quit and reopen Xe Launcher."
+                "\n\nShared by Docker builds and all containers. Saving restarts the container VM and interrupts all containers in it."
             alert.accessoryView = input
-            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Save and Restart VM")
             alert.addButton(withTitle: "Cancel")
             alert.window.initialFirstResponder = input
             NSApp.activate(ignoringOtherApps: true)
@@ -142,8 +142,8 @@ enum ContainerVMSettings {
         let nextLabel = isMemory ? String(format: "%g", Double(next) / 1024) : String(next)
         let alert = NSAlert()
         alert.messageText = isMemory ? "Increase VM Memory to \(nextLabel) GiB?" : "Increase VM Disk to \(nextLabel) GiB?"
-        alert.informativeText = "Current limit: \(oldLabel) GiB. The host must retain at least 4 GiB available RAM and 10 GiB free disk space. Changes apply after quitting and reopening Xe Launcher."
-        alert.addButton(withTitle: "Increase to \(nextLabel) GiB")
+        alert.informativeText = "Current limit: \(oldLabel) GiB. The host must retain at least 4 GiB available RAM and 10 GiB free disk space. The container VM will restart automatically to apply this increase, interrupting all containers in it."
+        alert.addButton(withTitle: "Increase and Restart VM")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return false }

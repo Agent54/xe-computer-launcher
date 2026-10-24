@@ -37,7 +37,7 @@ enum ComposeServerError: LocalizedError {
 @MainActor
 final class ComposeServer {
     private let executableURL: URL
-    private let stacksURL: URL
+    let stacksURL: URL
     let socketURL: URL
     private let log: @MainActor @Sendable (String) -> Void
     private let probe: @MainActor @Sendable (URL) async -> Bool

@@ -115,8 +115,8 @@ both ports above 1023 to disable the helper.
 
 Hold Option while opening the launcher menu to change **Container VM Memory**,
 **Container VM CPUs**, or **Container VM Disk Size**. These limits are shared by Docker builds and all
-containers; changes take effect after quitting and reopening Xe Launcher, which
-restarts the VM. Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
+containers; **Save and Restart VM** applies changes by restarting SmolVM while
+the launcher stays open. Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
 defaults to 2 and accepts 1 up to the Mac's logical CPU count. Memory is elastic:
 only touched memory is committed. The equivalent settings are
 `container_vm_memory_mib` (4096–32768 MiB) and `container_vm_cpus` in
@@ -196,7 +196,11 @@ and stays visible until dismissed. A new pressure-cleanup event appears again.
 The launcher's normal menu also exposes **Warnings**, with a menu-bar warning
 indicator for unignored events. Memory pressure and OOM restart dialogs offer
 **Increase Memory…**; younger-cache cleanup offers **Increase Disk Size…**.
-Resource changes use the Quit Now/Later restart prompt after saving.
+Confirming **Increase and Restart VM** saves the new limit and restarts only
+SmolVM. Manual resource settings use **Save and Restart VM**. The supervisor
+cancels cache cleanup, reapplies the saved limits, and restores guest routing;
+the launcher, browser, and host UI stay running. VM operations are serialized
+with startup and automatic recovery. A failed resize restart offers a retry.
 **Ignore** clears the launcher's indicator for that
 event while keeping its details available in the menu. New events warn again.
 
@@ -206,7 +210,8 @@ dialogs offer 4 → 8 GiB RAM, then increases of 2 GiB; disk increases start at
 Increases must leave at least 4 GiB available host RAM and 10 GiB free on the
 volume containing VM storage. Checks fund the VM memory limit and remaining
 sparse disk growth, crediting only resident VM RAM and already allocated
-storage blocks. They run on save and VM startup, including settings-file edits.
+storage blocks. These checks run only when increasing resources in the launcher;
+normal startup and recovery never block on host reserve requirements.
 An unsafe Increase button is disabled with a red explanation in the launcher
 dialog. Live host reserve breaches also remain red in the launcher until the
 resources recover, even if acknowledged. Other apps can consume host resources

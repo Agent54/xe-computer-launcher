@@ -1,6 +1,6 @@
 import AppKit
 
-/// Exercise the Quit Now handoff after async disk-settings work without
+/// Exercise the Quit Now handoff after async settings work without
 /// starting the launcher's services or touching the user's VM and settings.
 @MainActor
 final class TerminationDelegate: NSObject, NSApplicationDelegate {
@@ -15,7 +15,7 @@ final class TerminationDelegate: NSObject, NSApplicationDelegate {
             _exit(1)
         }
         Task { @MainActor in
-            // Disk settings reaches Quit Now after awaiting the VM status.
+            // Settings can reach Quit Now after awaiting other work.
             await Task.yield()
             ApplicationTermination.request()
             taskReturned = true

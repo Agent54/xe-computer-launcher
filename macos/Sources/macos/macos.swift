@@ -183,6 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 },
                 log: { ExternalState.shared.appendLog("maintenance", $0) }
             ),
+            startMachine: { [weak self] in
+                // Pending storage-folder changes wait for a launcher restart;
+                // a VM-only restart keeps the mount used by the host Compose UI.
+                let stacksURL = await self?.composeServer?.stacksURL
+                return try await SmolVMSetup.start(stacksURL: stacksURL)
+            },
             onStatusChanged: { [weak self] snapshot in
                 await MainActor.run {
                     ContainerRuntimePresentation.shared.update(snapshot)
@@ -222,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var statusMessageItem: NSMenuItem?
     private var runtimeWarningsItem: NSMenuItem?
     private let runtimeWarnings = ContainerRuntimeWarnings()
-    private var isChangingContainerVMResource = false
+    private var containerVMSettingsTask: Task<Void, Never>?
     private var isShowingRuntimeWarning = false
     private var shutdownProgressIndicator: NSProgressIndicator?
     private var pendingShutdownComponents = Set<ShutdownComponent>()
@@ -885,6 +891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         isPreparingForTermination = true
         beginShutdownPresentation()
         runtimeStartupTask?.cancel()
+        containerVMSettingsTask?.cancel()
         browserStartupTask?.cancel()
         hostServicesTask?.cancel()
         maintenanceServer.stop()
@@ -1598,10 +1605,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func changeContainerVMResource(
         _ resource: ContainerVMSettings.Resource, acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
     ) {
-        guard !isChangingContainerVMResource, !isPreparingForTermination else { return }
-        isChangingContainerVMResource = true
-        Task { @MainActor in
-            defer { isChangingContainerVMResource = false }
+        guard containerVMSettingsTask == nil, !isPreparingForTermination else { return }
+        containerVMSettingsTask = Task { @MainActor in
+            defer { containerVMSettingsTask = nil }
             do {
                 var diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB
                 if resource == .disk, diskGiB == nil {
@@ -1629,10 +1635,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             ? await ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB)
             : await ContainerVMSettings.increase(resource, currentDiskGiB: currentDiskGiB)
         guard changed, !isPreparingForTermination else { return }
-        if let warning { runtimeWarnings.ignore(warning) }
-        settingsRestartRequired = true
-        renderMenuLabels()
-        showSettingsRestartAlert()
+        while !isPreparingForTermination {
+            do {
+                try await runtimeSupervisor.restart()
+                guard !isPreparingForTermination else { return }
+                if let warning { runtimeWarnings.ignore(warning) }
+                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
+                renderMenuLabels()
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !isPreparingForTermination else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Could Not Restart Container VM"
+                alert.informativeText = "Your resource settings are saved. The VM must restart to apply them.\n\n\(error.localizedDescription)"
+                alert.addButton(withTitle: "Retry VM Restart")
+                alert.addButton(withTitle: "Close")
+                if alert.runModal() != .alertFirstButtonReturn { return }
+            }
+        }
     }
 
     private func renderRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {

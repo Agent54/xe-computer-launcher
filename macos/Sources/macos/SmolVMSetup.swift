@@ -21,21 +21,20 @@ enum SmolVMSetup {
     static var resources: ContainerVMResources { ContainerVMResources(settings: ExternalState.shared.settings.rawData) }
     static var memoryMiB: UInt32 { resources.memoryMiB }
 
-    static func start(virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
+    static func start(stacksURL: URL? = nil, virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
         let startedAt = ContinuousClock.now
         try Task.checkCancellation()
         guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
         let configuredResources = resources
-        let stacksVolume = "\(stacksURL.path):\(guestStacksDirectory):rw"
+        let stacksVolume = "\((stacksURL ?? Self.stacksURL).path):\(guestStacksDirectory):rw"
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
         let existingStatus = existing != nil ? try await client.machineStatus(named: machineName) : nil
         let currentDiskGiB = existingStatus?.storageGiB
         let diskGiB = configuredResources.diskGiB(preserving: currentDiskGiB)
-        // Reject unsafe configured limits before interrupting a surviving VM.
-        try await validateHostResources(configuredResources, diskGiB: diskGiB, machine: existingStatus)
+        // Host reserves gate resize actions, never startup with saved limits.
         try await GuestRouter.shared.prepare()
 
         if existing != nil {
@@ -86,8 +85,6 @@ enum SmolVMSetup {
 
         try Task.checkCancellation()
         await RuntimeLogCollector.shared.beginAttempt()
-        // Recheck after creation/resizing, now without crediting the stopped VM's RAM.
-        try await validateHostResources(configuredResources, diskGiB: diskGiB, machine: nil)
         do { try await client.startMachine(named: machineName) }
         catch {
             await RuntimeLogCollector.shared.collect(flushPartial: true)
@@ -99,20 +96,6 @@ enum SmolVMSetup {
         ExternalState.shared.appendLog("runtime", "Docker API ready after \(dockerWaitStartedAt.duration(to: .now)) (total startup \(startedAt.duration(to: .now)))")
 
         return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
-    }
-
-    private static func validateHostResources(
-        _ resources: ContainerVMResources, diskGiB: UInt64, machine: SmolVMMachine?
-    ) async throws {
-        let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
-        let resident = machine?.isRunning == true
-            ? machine?.pid.flatMap(VMResourceSampler.residentMemoryBytes) ?? 0 : 0
-        let currentLimit = (machine?.memoryMiB ?? 0) * 1_048_576
-        let storage = VMResourceSampler.storageAllocatedBytes(in: VMResourceSampler.machineDirectory(
-            named: machineName, dataURL: SmolVMPaths.dataURL
-        )) ?? 0
-        try HostResourcePolicy.validate(memoryMiB: resources.memoryMiB, diskGiB: diskGiB, host: host,
-            vmResidentBytes: min(resident, currentLimit), storageAllocatedBytes: storage)
     }
 
     private static func waitForDocker() async throws {

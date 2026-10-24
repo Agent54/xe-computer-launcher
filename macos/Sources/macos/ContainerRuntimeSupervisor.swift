@@ -168,6 +168,8 @@ actor ContainerRuntimeSupervisor {
     private var didLoadIncident = false
     private var outageWasOOM = false
     private var lastPublishedAt = Date.distantPast
+    private var lifecycleBusy = false
+    private var lifecycleWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         configuration: Configuration = Configuration(),
@@ -211,14 +213,34 @@ actor ContainerRuntimeSupervisor {
 
     @discardableResult
     func start() async throws -> SmolVMStartupResult {
+        try await start(restarting: false)
+    }
+
+    /// Reuse VM startup to stop the old machine and apply current saved limits.
+    @discardableResult
+    func restart() async throws -> SmolVMStartupResult {
+        try await start(restarting: true)
+    }
+
+    private func start(restarting: Bool) async throws -> SmolVMStartupResult {
+        try await acquireLifecycle()
+        defer { releaseLifecycle() }
         await loadIncidentIfNeeded()
         state = .starting
         outageWasOOM = false
         bootId = UUID().uuidString
-        await publish(phase: .starting, message: "Starting container runtime…")
+        await publish(phase: restarting ? .restarting : .starting,
+            message: restarting ? "Applying container VM resource changes…" : "Starting container runtime…")
         do {
+            if restarting {
+                await maintenance?.pause()
+                await resetRouter()
+            }
+            try Task.checkCancellation()
             let result = try await startMachine()
+            if restarting { try await reconcileRouter() }
             consecutiveFailures = 0
+            if restarting { recoveryDates.removeAll() }
             if let diagnostics = try? await readDiagnostics() { observeDiagnostics(diagnostics) }
             state = .healthy
             let memory = lastDiagnostics?.memory
@@ -229,6 +251,8 @@ actor ContainerRuntimeSupervisor {
             )
             log("Container runtime ready with " + String(SmolVMSetup.memoryMiB) + " MiB memory")
             return result
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             if let diagnostics = try? await readDiagnostics() {
                 outageWasOOM = observeDiagnostics(diagnostics)
@@ -254,11 +278,11 @@ actor ContainerRuntimeSupervisor {
     }
 
     func reconcile() async {
-        guard state != .idle, state != .starting, state != .recovering,
+        guard !lifecycleBusy, state != .idle, state != .starting, state != .recovering,
               state != .stopped else { return }
+        let checkedBootId = bootId
 
-        // Host reserve warnings must keep updating while VM startup/recovery is
-        // blocked. Preserve the failure and do not retry starting the machine.
+        // Keep monitoring host usage after a failed VM start without retrying it.
         if state == .failed, now().timeIntervalSince(lastPublishedAt) >= configuration.diagnosticInterval {
             let previous = await statusStore.snapshot()
             guard state == .failed else { return }
@@ -267,7 +291,8 @@ actor ContainerRuntimeSupervisor {
         }
 
         if await probeDocker() {
-            guard state != .stopped, state != .recovering, state != .starting else { return }
+            guard bootId == checkedBootId, !lifecycleBusy,
+                  state != .stopped, state != .recovering, state != .starting else { return }
             consecutiveFailures = 0
             if state == .degraded || state == .failed {
                 state = .healthy
@@ -290,14 +315,16 @@ actor ContainerRuntimeSupervisor {
 
         // A timed-out startup or exhausted recovery can still finish later.
         // Observe it without scheduling another restart.
-        guard state != .failed, state != .stopped, state != .recovering,
+        guard bootId == checkedBootId, !lifecycleBusy,
+              state != .failed, state != .stopped, state != .recovering,
               state != .starting else { return }
 
         consecutiveFailures += 1
         // Read the cause on the first missed probe. Waiting for the restart
         // threshold can lose an OOM to a later healthy sample or VM reboot.
         let diagnosed = try? await readDiagnostics()
-        guard state != .stopped, state != .starting, state != .recovering else { return }
+        guard bootId == checkedBootId, !lifecycleBusy,
+              state != .stopped, state != .starting, state != .recovering else { return }
         if let diagnosed {
             let newOOM = observeDiagnostics(diagnosed)
             if newOOM || diagnosed.workload?.oomKilled == true { outageWasOOM = true }
@@ -311,11 +338,14 @@ actor ContainerRuntimeSupervisor {
             reason: outageWasOOM ? "oom" : "docker_unavailable",
             memory: lastDiagnostics?.memory
         )
-        guard consecutiveFailures >= configuration.failureThreshold else { return }
+        guard bootId == checkedBootId, !lifecycleBusy,
+              consecutiveFailures >= configuration.failureThreshold else { return }
         await recover(diagnosed: diagnosed)
     }
 
     func stop() async throws {
+        try await acquireLifecycle()
+        defer { releaseLifecycle() }
         state = .stopped
         await maintenance?.pause()
         await publish(phase: .stopped, message: "Container runtime stopped")
@@ -331,15 +361,16 @@ actor ContainerRuntimeSupervisor {
     }
 
     func runMaintenance() async -> ContainerRuntimeMaintenance.Snapshot? {
-        guard state == .healthy, let maintenance else { return nil }
+        guard !lifecycleBusy, state == .healthy, let maintenance else { return nil }
         guard await maintenance.reconcile(force: true) != nil else { return nil }
         return await maintenance.snapshot()
     }
 
     private func refreshDiagnosticsIfNeeded() async {
         guard now().timeIntervalSince(lastDiagnosticsAt) >= configuration.diagnosticInterval else { return }
+        let checkedBootId = bootId
         if let diagnostics = try? await readDiagnostics() {
-            guard state == .healthy else { return }
+            guard bootId == checkedBootId, !lifecycleBusy, state == .healthy else { return }
             observeDiagnostics(diagnostics)
             await publish(
                 phase: .healthy,
@@ -387,6 +418,9 @@ actor ContainerRuntimeSupervisor {
     }
 
     private func recover(diagnosed: SmolVMMachine?) async {
+        guard !lifecycleBusy, !Task.isCancelled else { return }
+        lifecycleBusy = true
+        defer { releaseLifecycle() }
         state = .recovering
         await maintenance?.pause()
         let wasOOM = outageWasOOM
@@ -490,6 +524,23 @@ actor ContainerRuntimeSupervisor {
         }
     }
 
+    /// Actors can accept another lifecycle call while a VM command is suspended.
+    /// Queue explicit restarts and shutdown behind the current start/recovery.
+    private func acquireLifecycle() async throws {
+        while lifecycleBusy {
+            await withCheckedContinuation { lifecycleWaiters.append($0) }
+        }
+        try Task.checkCancellation()
+        lifecycleBusy = true
+    }
+
+    private func releaseLifecycle() {
+        lifecycleBusy = false
+        let waiters = lifecycleWaiters
+        lifecycleWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     private func publish(
         phase: ContainerRuntimeSnapshot.Phase,
         message: String,
@@ -498,12 +549,13 @@ actor ContainerRuntimeSupervisor {
         memory: SmolVMMemoryStatus? = nil,
         expectedState: State? = nil
     ) async {
+        let publishingBootId = bootId
         lastPublishedAt = now()
         let hostResources = await readHostResources()
         let machine = [.starting, .restarting, .stopped].contains(phase) ? nil : lastDiagnostics
         let vmResources = await readVMResources(machine)
         let cachePressureWarning = await maintenance?.snapshot().cachePressureWarning
-        guard expectedState == nil || state == expectedState else { return }
+        guard bootId == publishingBootId, expectedState == nil || state == expectedState else { return }
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,
