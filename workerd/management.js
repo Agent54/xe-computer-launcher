@@ -28,6 +28,30 @@ export default {
         ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
         : new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
+    if (url.pathname === '/v1.24/file-descriptors') {
+      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const container = url.searchParams.get('container');
+      if ([...url.searchParams.keys()].some(key => key !== 'container') ||
+          url.searchParams.getAll('container').length > 1 ||
+          (container !== null && !/^[a-f0-9]{12,64}$/.test(container))) {
+        return Response.json({ message: 'Invalid container ID' }, { status: 400 });
+      }
+      const runtime = await readRuntimeStatus(env);
+      if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      try {
+        const target = new URL('http://maintenance/file-descriptors');
+        if (container !== null) target.searchParams.set('container', container);
+        const response = await env.MAINTENANCE.fetch(target.href, { method: 'GET' });
+        return new Response(response.body, { status: response.status,
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      } catch {
+        return Response.json({ message: 'Descriptor telemetry unavailable' }, { status: 503 });
+      }
+    }
     if (url.pathname === '/v1.24/disk-usage/cleanup') {
       if (!['GET', 'POST'].includes(request.method)) {
         return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });

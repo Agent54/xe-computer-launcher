@@ -218,14 +218,15 @@ actor ContainerRuntimeSupervisor {
 
     /// Reuse VM startup to stop the old machine and apply current saved limits.
     @discardableResult
-    func restart() async throws -> SmolVMStartupResult {
-        try await start(restarting: true)
+    func restart(afterMemoryIncreaseTo memoryMiB: UInt32? = nil) async throws -> SmolVMStartupResult {
+        try await start(restarting: true, increasedMemoryMiB: memoryMiB)
     }
 
-    private func start(restarting: Bool) async throws -> SmolVMStartupResult {
+    private func start(restarting: Bool, increasedMemoryMiB: UInt32? = nil) async throws -> SmolVMStartupResult {
         try await acquireLifecycle()
         defer { releaseLifecycle() }
         await loadIncidentIfNeeded()
+        let previousIncidentID = lastIncident?.id
         state = .starting
         outageWasOOM = false
         bootId = UUID().uuidString
@@ -241,7 +242,19 @@ actor ContainerRuntimeSupervisor {
             if restarting { try await reconcileRouter() }
             consecutiveFailures = 0
             if restarting { recoveryDates.removeAll() }
-            if let diagnostics = try? await readDiagnostics() { observeDiagnostics(diagnostics) }
+            if let diagnostics = try? await readDiagnostics() {
+                observeDiagnostics(diagnostics)
+                // Retire the warning only after the requested memory increase
+                // is applied. A new OOM during startup must remain actionable.
+                if let increasedMemoryMiB, let incident = lastIncident,
+                   incident.id == previousIncidentID, incident.reason == "oom",
+                   let appliedMemoryMiB = diagnostics.memoryMiB,
+                   appliedMemoryMiB >= UInt64(increasedMemoryMiB),
+                   diagnostics.memory?.oomKillCount == 0, diagnostics.workload?.oomKilled != true {
+                    log("OOM incident \(incident.id) resolved after VM restart with \(appliedMemoryMiB) MiB memory")
+                    lastIncident = nil
+                }
+            }
             state = .healthy
             let memory = lastDiagnostics?.memory
             await publish(

@@ -55,4 +55,23 @@ struct ContainerMaintenanceServerTests {
         #expect(throws: CocoaError.self) { try server.start() }
         #expect(try Data(contentsOf: socket) == data)
     }
+
+    @Test func descriptorsOnlyAcceptOneValidatedContainerID() async throws {
+        let socket = socketURL
+        let selections = Mutex<[String?]>([])
+        let id = String(repeating: "a", count: 64)
+        let server = ContainerMaintenanceServer(socketURL: socket, descriptorHandler: { selection in
+            selections.withLock { $0.append(selection) }
+            return ContainerMaintenanceServer.Reply(status: 200, body: Data("{}".utf8))
+        }) { _ in ContainerMaintenanceServer.Reply(status: 200, body: Data()) }
+        try server.start()
+        defer { server.stop() }
+        #expect(try await request("GET", "/file-descriptors", socket: socket).hasSuffix("200"))
+        #expect(try await request("GET", "/file-descriptors?container=\(id)", socket: socket).hasSuffix("200"))
+        for query in ["container=bad", "container=", "pid=1", "container=\(id)&container=\(id)", "container=%24%28bad%29"] {
+            #expect(try await request("GET", "/file-descriptors?\(query)", socket: socket).hasSuffix("400"))
+        }
+        #expect(try await request("POST", "/file-descriptors", socket: socket).hasSuffix("404"))
+        #expect(selections.withLock { $0 } == [nil, id])
+    }
 }

@@ -202,7 +202,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func makeMaintenanceServer() -> ContainerMaintenanceServer {
         let runtimeSupervisor = self.runtimeSupervisor
-        return ContainerMaintenanceServer { @Sendable run in
+        let descriptorSampler = VMFileDescriptorSampler()
+        return ContainerMaintenanceServer(descriptorHandler: { containerID in
+            let runtime = await runtimeSupervisor.snapshot()
+            guard runtime.phase == .healthy, let bootID = runtime.bootId,
+                  let snapshot = await descriptorSampler.sample(containerID: containerID, bootID: bootID) else {
+                return ContainerMaintenanceServer.Reply(status: 503, body: Data("{\"message\":\"Descriptor telemetry unavailable\"}".utf8))
+            }
+            let current = await runtimeSupervisor.snapshot()
+            guard current.phase == .healthy, current.bootId == bootID else {
+                return ContainerMaintenanceServer.Reply(status: 503, body: Data("{\"message\":\"VM restarted during sampling\"}".utf8))
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let body = try? encoder.encode(snapshot) else {
+                return ContainerMaintenanceServer.Reply(status: 500, body: Data("{}".utf8))
+            }
+            return ContainerMaintenanceServer.Reply(status: 200, body: body)
+        }) { @Sendable run in
             let snapshot = run
                 ? await runtimeSupervisor.runMaintenance()
                 : await runtimeSupervisor.maintenanceSnapshot()
@@ -1631,13 +1648,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
     ) async {
         guard !isPreparingForTermination else { return }
+        let previousMemoryMiB = ContainerVMResources(settings: ExternalState.shared.settings.rawData).memoryMiB
         let changed = warning == nil
             ? await ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB)
             : await ContainerVMSettings.increase(resource, currentDiskGiB: currentDiskGiB)
         guard changed, !isPreparingForTermination else { return }
+        let savedMemoryMiB = ContainerVMResources(settings: ExternalState.shared.settings.rawData).memoryMiB
+        let increasedMemoryMiB = resource == .memory && savedMemoryMiB > previousMemoryMiB ? savedMemoryMiB : nil
         while !isPreparingForTermination {
             do {
-                try await runtimeSupervisor.restart()
+                try await runtimeSupervisor.restart(afterMemoryIncreaseTo: increasedMemoryMiB)
                 guard !isPreparingForTermination else { return }
                 if let warning { runtimeWarnings.ignore(warning) }
                 renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)

@@ -224,8 +224,23 @@ The launcher monitors Docker after startup and performs
 a bounded VM restart if the daemon becomes unavailable; the menu status and
 Compose API expose whether recovery was caused by an out-of-memory event.
 The latest OOM incident survives recovery and launcher relaunch. Compose UI shows
-it until dismissed and warns when available VM memory falls to 10% or less,
+it until dismissed or a successful memory increase and VM restart resolves it.
+The launcher verifies the applied memory limit and that no new OOM occurred before
+clearing the active incident; the event and resolution remain in runtime logs.
+Compose UI also warns when available VM memory falls to 10% or less,
 independently of build log messages.
+
+The VM resource strip shows **HANDLES FREE**, from Linux's shared file-handle
+counter. Opening a service adds **FD FREE**, showing the process closest to its
+own open-file soft limit; the tooltip includes its PID, open count, and limits.
+Descriptor markers turn orange at 10% remaining and red at 5% remaining.
+Only the selected container's processes are enumerated. Samples and failures
+are cached for 10 seconds, concurrent requests share a scan, and hidden tabs or
+paused auto-refresh do not poll. A new VM boot invalidates previous samples.
+Each probe has a three-second deadline and reads at most 256 processes and
+131,072 FD entries per process, without following descriptor symlinks.
+Incomplete samples carry an asterisk; unavailable or capped readings never
+invent zero free descriptors or a healthy percentage.
 
 ## Building from source
 

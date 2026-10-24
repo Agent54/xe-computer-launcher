@@ -10,14 +10,18 @@ final class ContainerMaintenanceServer {
         let body: Data
     }
     typealias Handler = @Sendable (Bool) async -> Reply
+    typealias DescriptorHandler = @Sendable (String?) async -> Reply
 
     private let socketURL: URL
     private let handler: Handler
+    private let descriptorHandler: DescriptorHandler?
     private var source: DispatchSourceRead?
 
-    init(socketURL: URL = ContainerMaintenanceServer.socketURL, handler: @escaping Handler) {
+    init(socketURL: URL = ContainerMaintenanceServer.socketURL,
+         descriptorHandler: DescriptorHandler? = nil, handler: @escaping Handler) {
         self.socketURL = socketURL
         self.handler = handler
+        self.descriptorHandler = descriptorHandler
     }
 
     func start() throws {
@@ -58,6 +62,7 @@ final class ContainerMaintenanceServer {
             throw error
         }
         let handler = self.handler
+        let descriptorHandler = self.descriptorHandler
         let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: .global(qos: .utility))
         source.setEventHandler { @Sendable in
             // Bound each accept batch so a busy client cannot monopolize this queue.
@@ -79,7 +84,23 @@ final class ContainerMaintenanceServer {
                     switch request {
                     case "GET /status HTTP/1.1", "GET /status HTTP/1.0": reply = await handler(false)
                     case "POST /cleanup HTTP/1.1", "POST /cleanup HTTP/1.0": reply = await handler(true)
-                    default: reply = Reply(status: 404, body: Data("{\"message\":\"Not found\"}".utf8))
+                    default:
+                        let parts = request.split(separator: " ")
+                        if parts.count == 3, parts[0] == "GET", (parts[2] == "HTTP/1.1" || parts[2] == "HTTP/1.0"),
+                           let url = URLComponents(string: String(parts[1])), url.path == "/file-descriptors",
+                           let descriptorHandler {
+                            let query = url.queryItems ?? []
+                            let container = query.first?.value
+                            if query.count > 1 || (query.first != nil &&
+                                (query.first?.name != "container" || container == nil ||
+                                 !VMFileDescriptorSampler.validContainerID(container!))) {
+                                reply = Reply(status: 400, body: Data("{\"message\":\"Invalid container ID\"}".utf8))
+                            } else {
+                                reply = await descriptorHandler(container)
+                            }
+                        } else {
+                            reply = Reply(status: 404, body: Data("{\"message\":\"Not found\"}".utf8))
+                        }
                     }
                     Self.writeReply(reply, to: connection)
                 }
@@ -110,7 +131,7 @@ final class ContainerMaintenanceServer {
             if let end = data.range(of: Data("\r\n\r\n".utf8)) {
                 let headers = String(decoding: data[..<end.lowerBound], as: UTF8.self)
                     .components(separatedBy: "\r\n")
-                // Only these fixed, body-free operations are supported.
+                // Only body-free operations are supported.
                 guard headers.dropFirst().allSatisfy({
                     let lower = $0.lowercased()
                     return !lower.hasPrefix("transfer-encoding:") &&

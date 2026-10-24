@@ -33,13 +33,13 @@ private actor RuntimeFixture {
 @Suite(.serialized)
 struct ContainerRuntimeSupervisorTests {
     private func machine(oomKillCount: UInt64, workloadOOM: Bool = false, workloadExited: Bool = false,
-                         pid: Int32 = 123) -> SmolVMMachine {
+                         pid: Int32 = 123, memoryMiB: UInt64 = 4096) -> SmolVMMachine {
         SmolVMMachine(
             name: "test",
             state: "running",
             labels: [:],
             memory: SmolVMMemoryStatus(
-                totalBytes: 4 * 1024 * 1024 * 1024,
+                totalBytes: memoryMiB * 1_048_576,
                 availableBytes: 2 * 1024 * 1024 * 1024,
                 freeBytes: 1024,
                 buffersBytes: 1024,
@@ -52,7 +52,7 @@ struct ContainerRuntimeSupervisorTests {
                 lastExitReason: workloadOOM ? "oom_killed" : nil,
                 oomKilled: workloadOOM
             ),
-            pid: pid
+            pid: pid, memoryMiB: memoryMiB
         )
     }
 
@@ -214,6 +214,67 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.bootId != initialBootId)
         #expect(snapshot.phase == .healthy)
         #expect(HostResourcePolicy.warnings(for: snapshot.hostResources).count == 2)
+    }
+
+    @Test(arguments: ["increased", "unchanged", "not-applied", "failed", "new-oom", "unknown-limit"])
+    func memoryResizeClearsOnlyTheResolvedOOMWarning(outcome: String) async throws {
+        let root = incidentTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let increased = outcome != "unchanged" && outcome != "not-applied" && outcome != "failed"
+        var restarted = machine(oomKillCount: outcome == "new-oom" ? 1 : 0,
+            pid: 456, memoryMiB: increased ? 8192 : 4096)
+        if outcome == "unknown-limit" { restarted.memoryMiB = nil }
+        let fixture = RuntimeFixture(probes: [true, true], diagnostics: [
+            machine(oomKillCount: 0), machine(oomKillCount: 1), restarted,
+            machine(oomKillCount: 1, pid: 456, memoryMiB: 8192),
+        ])
+        let messages = Mutex<[String]>([])
+        let supervisor = ContainerRuntimeSupervisor(
+            configuration: .init(diagnosticInterval: 0),
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: {
+                let result = await fixture.start()
+                let starts = await fixture.starts
+                if outcome == "failed", starts > 1 {
+                    throw SmolVMSetupError.dockerStartupFailed("resize failed")
+                }
+                return result
+            }, stopMachine: {}, probeDocker: { await fixture.probe() },
+            readDiagnostics: { await fixture.diagnostic() }, resetRouter: {}, reconcileRouter: {},
+            readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { message in messages.withLock { $0.append(message) } }
+        )
+        try await supervisor.start()
+        await supervisor.reconcile()
+        let incident = try #require((await supervisor.snapshot()).lastIncident)
+        do {
+            try await supervisor.restart(afterMemoryIncreaseTo: outcome == "unchanged" ? nil : 8192)
+            #expect(outcome != "failed")
+        } catch {
+            #expect(outcome == "failed")
+        }
+        let snapshot = await supervisor.snapshot()
+        if outcome == "increased" {
+            #expect(snapshot.phase == .healthy)
+            #expect(snapshot.lastIncident == nil)
+            #expect(!snapshot.menuDescription.contains("out of memory"))
+            let data = try Data(contentsOf: root.appendingPathComponent("status.json"))
+            let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(payload["lastIncident"] == nil)
+            let reopened = ContainerRuntimeStatusStore(directoryURL: root)
+            #expect((await reopened.snapshot()).lastIncident == nil)
+            #expect(messages.withLock { $0.contains { $0.contains("OOM incident \(incident.id) resolved") } })
+            // Clearing the old incident must not suppress a later OOM.
+            await supervisor.reconcile()
+            let nextIncident = try #require((await supervisor.snapshot()).lastIncident)
+            #expect(nextIncident.id != incident.id)
+            #expect(nextIncident.memoryLimitBytes == UInt64(8) << 30)
+        } else if outcome == "new-oom" {
+            #expect(snapshot.lastIncident?.id != incident.id)
+            #expect(snapshot.lastIncident?.memoryLimitBytes == UInt64(8) << 30)
+        } else {
+            #expect(snapshot.lastIncident?.id == incident.id)
+        }
     }
 
     @Test func resourceRestartWaitsForStartupAndCancelledRestartDoesNotRunDuringShutdown() async throws {
