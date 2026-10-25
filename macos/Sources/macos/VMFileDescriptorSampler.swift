@@ -24,6 +24,8 @@ struct FileDescriptorSnapshot: Codable, Equatable, Sendable {
     let processes: [ProcessFileDescriptors]
     let partial: Bool
     let processError: String?
+    let inotifyWatchLimit: UInt64?
+    let watcherError: String?
 }
 
 /// Read kernel counters and only the selected container's process descriptors.
@@ -100,6 +102,8 @@ actor VMFileDescriptorSampler {
         var processes: [ProcessFileDescriptors] = []
         var partial = false
         var error: String?
+        var watchLimit: UInt64?
+        var watcherError: String?
         for line in output.split(separator: "\n") {
             let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
             if fields.first == "VM", fields.count == 4, let allocated = UInt64(fields[1]),
@@ -116,10 +120,15 @@ actor VMFileDescriptorSampler {
                 partial = true
             } else if fields.first == "ERROR" {
                 error = "Selected container process list is unavailable."
+            } else if fields.first == "WATCH_LIMIT", fields.count == 2 {
+                watchLimit = UInt64(fields[1])
+            } else if fields.first == "WATCHER_ERROR", fields.count == 2, !fields[1].isEmpty {
+                watcherError = String(fields[1])
             }
         }
         return FileDescriptorSnapshot(sampledAt: at, bootId: bootID, containerId: containerID,
-            vm: vm, processes: processes, partial: partial, processError: error)
+            vm: vm, processes: processes, partial: partial, processError: error,
+            inotifyWatchLimit: watchLimit, watcherError: watcherError)
     }
 
     // find reads only the numeric /proc FD entries, without following symlinks
@@ -128,11 +137,28 @@ actor VMFileDescriptorSampler {
     // lowered its limit while retaining higher-numbered open descriptors.
     static let script = #"""
     proc_root="$4"
-    if read -r allocated unused maximum < "$proc_root/sys/fs/file-nr"; then
-      printf 'VM\t%s\t%s\t%s\n' "$allocated" "$unused" "$maximum"
-    fi
+    # BusyBox read uses byte-sized reads, which sysctl files may reject after byte one.
+    awk '{ printf "VM\t%s\t%s\t%s\n", $1, $2, $3 }' "$proc_root/sys/fs/file-nr" 2>/dev/null
+    awk '{ printf "WATCH_LIMIT\t%s\n", $1 }' "$proc_root/sys/fs/inotify/max_user_watches" 2>/dev/null
     container="$1"; process_cap="$2"; descriptor_cap="$3"
     [ -n "$container" ] || exit 0
+    # Keep failures visible after a failed watch registration releases its watches.
+    # Restrict history to this container run and bound both lines and bytes.
+    started=$(docker inspect --format '{{.State.StartedAt}}' "$container" 2>/dev/null)
+    if [ -n "$started" ]; then
+      docker logs --since "$started" --timestamps --tail 200 "$container" 2>&1 |
+        head -c 262144 |
+        awk '
+          {
+            lower=tolower($0);
+            if (lower ~ /inotify.*(limit reached|enospc|emfile)/ ||
+                lower ~ /system limit for number of file watchers reached/ ||
+                (lower ~ /file watcher/ && lower ~ /enospc|emfile|enfile/)) {
+              gsub(/[\t\r]/, " "); last=substr($0, 1, 512);
+            }
+          }
+          END { if (last != "") printf "WATCHER_ERROR\t%s\n", last }'
+    fi
     if ! pids=$(docker top "$container" -eo pid 2>/dev/null); then
       printf 'ERROR\n'; exit 0
     fi

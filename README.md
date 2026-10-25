@@ -242,6 +242,15 @@ Each probe has a three-second deadline and reads at most 256 processes and
 Incomplete samples carry an asterisk; unavailable or capped readings never
 invent zero free descriptors or a healthy percentage.
 
+File watchers also consume inotify watches, with a separate limit shared by
+processes with the same real user ID in the VM. Healthy FD counts do not rule
+out watcher exhaustion. For the selected container, each probe checks up to
+200 recent log lines (at most 256 KiB) from its current run for reported watcher
+limit failures. A red **WATCHER** indicator shows the error and timestamp, plus
+the VM's per-user inotify watch limit. It records a reported failure rather than
+claiming that watching recovered when counts fall; container restart excludes
+the previous run's errors. Errors outside this bounded log history may be missed.
+
 ## Building from source
 
 Follow the [development setup](https://github.com/Agent54/xe-darc/blob/main/INSTALL.md).
