@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import os
+import PortHelperSupport
 @preconcurrency import XPC
 
 private let serviceName = "dev.xe.computer.ports"
@@ -89,7 +90,8 @@ private func runDaemon() -> Never {
                String(cString: operation) == "acquire" {
                 xpc_dictionary_set_fd(reply, "http", http)
                 xpc_dictionary_set_fd(reply, "https", https)
-                xpc_dictionary_set_int64(reply, "version", 2)
+                xpc_dictionary_set_int64(reply, "version", PortHelperProtocol.version)
+                xpc_dictionary_set_int64(reply, "revision", PortHelperProtocol.revision)
                 xpc_dictionary_set_string(reply, "status", "ok")
             } else {
                 xpc_dictionary_set_string(reply, "status", "denied")

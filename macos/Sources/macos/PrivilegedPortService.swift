@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import CryptoKit
 import ServiceManagement
-import Security
+import PortHelperSupport
 @preconcurrency import XPC
 
 enum PrivilegedPortError: LocalizedError {
@@ -72,7 +72,7 @@ enum PrivilegedPortService {
         }
         let fingerprint: String
         do {
-            fingerprint = try registrationFingerprint(bundleURL: bundleURL, helperURL: helperURL, plistURL: plistURL)
+            fingerprint = try registrationFingerprint(bundleURL: bundleURL, plistURL: plistURL)
         } catch {
             return "Could not inspect the Xe Launcher port helper: \(error.localizedDescription)"
         }
@@ -80,21 +80,25 @@ enum PrivilegedPortService {
         let recordedFingerprint = try? String(contentsOf: markerURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let service = SMAppService.daemon(plistName: plistName)
         var needsRegistration = service.status == .notRegistered || service.status == .notFound
-        // Adopt a healthy service when migrating the old whole-file hash or
-        // starting in another account. The XPC probe verifies compatibility
-        // and both listener addresses before we preserve the registration.
-        if !forceRefresh, recordedFingerprint?.hasPrefix("cdhash-v1:") != true,
-           (try? await acquire()) != nil {
-            do { try recordFingerprint(fingerprint, at: markerURL) }
-            catch { return "Port helper is active, but its update state could not be saved: \(error.localizedDescription)" }
+        // Rebuilds can change code identity without changing helper behavior.
+        // Preserve a healthy helper for the same configuration, or adopt one
+        // while migrating an older binary-based marker. Never adopt across a
+        // known configuration change or an explicit recovery request.
+        if await canReuseRegistration(recordedFingerprint: recordedFingerprint,
+                                      fingerprint: fingerprint, forceRefresh: forceRefresh,
+                                      probe: { await waitUntilReady() }) {
+            if recordedFingerprint != fingerprint {
+                do { try recordFingerprint(fingerprint, at: markerURL) }
+                catch { return "Port helper is active, but its update state could not be saved: \(error.localizedDescription)" }
+            }
             return nil
         }
         // SMAppService does not replace an enabled daemon just because the app
-        // bundle was updated. Refresh only when the bundled helper or plist
-        // changed; unregister must finish killing the old process first. Keep
-        // pending approval intact instead of withdrawing it on each update.
-        if service.status == .enabled,
-           (recordedFingerprint != fingerprint || forceRefresh) {
+        // bundle was updated. Refresh when the required revision/configuration
+        // changed, the bounded readiness probe failed, or recovery was requested.
+        // Unregister must finish killing the old process first. Keep pending
+        // approval intact instead of withdrawing it on each update.
+        if service.status == .enabled {
             ExternalState.shared.appendLog("launcher", "Refreshing the port helper registration for the installed Xe Launcher bundle.")
             do {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -143,25 +147,22 @@ enum PrivilegedPortService {
         }
     }
 
-    static func registrationFingerprint(bundleURL: URL, helperURL: URL, plistURL: URL) throws -> String {
-        var code: SecStaticCode?
-        let created = SecStaticCodeCreateWithPath(helperURL as CFURL, [], &code)
-        guard created == errSecSuccess, let code else {
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(created))
+    static func canReuseRegistration(recordedFingerprint: String?, fingerprint: String,
+                                     forceRefresh: Bool, probe: () async -> Bool) async -> Bool {
+        guard !forceRefresh,
+              recordedFingerprint == fingerprint || recordedFingerprint?.hasPrefix("config-v1:") != true else {
+            return false
         }
-        var information: CFDictionary?
-        let copied = SecCodeCopySigningInformation(code, [], &information)
-        guard copied == errSecSuccess,
-              let identity = (information as? [String: Any])?[kSecCodeInfoUnique as String] as? Data else {
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(copied == errSecSuccess ? errSecCSUnsigned : copied))
-        }
-        // CodeDirectory identity covers executable code and signing requirements,
-        // but excludes the CMS signing timestamp that changes on every release.
+        return await probe()
+    }
+
+    static func registrationFingerprint(bundleURL: URL, plistURL: URL,
+                                        helperRevision: Int64 = PortHelperProtocol.revision) throws -> String {
         var hash = SHA256()
         hash.update(data: Data(bundleURL.resolvingSymlinksInPath().path.utf8))
-        hash.update(data: identity)
+        hash.update(data: Data("\u{0}\(PortHelperProtocol.version):\(helperRevision)\u{0}".utf8))
         hash.update(data: try Data(contentsOf: plistURL))
-        return "cdhash-v1:" + hash.finalize().map { String(format: "%02x", $0) }.joined()
+        return "config-v1:" + hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     static func waitUntilReady(timeout: Duration = .seconds(3)) async -> Bool {
@@ -219,7 +220,10 @@ enum PrivilegedPortService {
         guard let status = xpc_dictionary_get_string(reply, "status"),
               String(cString: status) == "ok" else { throw PrivilegedPortError.denied }
         // Only a helper with the supported socket-handoff protocol may be used.
-        guard xpc_dictionary_get_int64(reply, "version") == 2 else { throw PrivilegedPortError.unavailable }
+        guard PortHelperProtocol.supports(version: xpc_dictionary_get_int64(reply, "version"),
+                                          revision: xpc_dictionary_get_int64(reply, "revision")) else {
+            throw PrivilegedPortError.unavailable
+        }
         let http = xpc_dictionary_dup_fd(reply, "http")
         let https = xpc_dictionary_dup_fd(reply, "https")
         guard http >= 0, https >= 0 else {

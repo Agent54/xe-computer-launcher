@@ -1223,18 +1223,18 @@ done
 if installed_app_is_running; then
     fail "launcher did not quit before the relaunch check"
 fi
-# Model an older release's whole-file hash changing after code signing. The
+# Model an older release's code identity changing after a routine rebuild. The
 # working, already-approved helper must be adopted without unregistering it.
 registration_marker="$APP_DATA/workerd/port-helper-registration.sha256"
 if [[ "$STANDARD_USER_MODE" != true ]]; then
-    printf '%064d\n' 0 > "$registration_marker"
+    printf 'cdhash-v1:%064d\n' 0 > "$registration_marker"
 fi
 open -a "$INSTALLED_APP"
 accept_startup_disclaimer
 relaunch_ready=false
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    if { [[ "$STANDARD_USER_MODE" == true ]] || grep -q '^cdhash-v1:' "$registration_marker"; } \
+    if { [[ "$STANDARD_USER_MODE" == true ]] || grep -q '^config-v1:' "$registration_marker"; } \
         && compose_ui_responds \
         && pgrep -u "$managed_shim_user_id" -f "^${managed_shim_pattern}( |$)" >/dev/null; then
         relaunch_ready=true

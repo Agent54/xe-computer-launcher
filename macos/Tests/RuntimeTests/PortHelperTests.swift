@@ -1,34 +1,61 @@
 import Darwin
 import Foundation
+import PortHelperSupport
 import Testing
 @testable import macos
 
 @Suite(.serialized)
 struct PortHelperTests {
-    @Test func registrationFingerprintUsesCodeIdentity() throws {
+    @Test func registrationFingerprintTracksConfigurationAndRequiredRevision() throws {
         let macosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let source = macosRoot.appendingPathComponent(".build/debug/port-helper")
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("xe-helper-\(UUID().uuidString)")
+        let directory = macosRoot.appendingPathComponent(".build/port-helper-tests/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let helper = directory.appendingPathComponent("port-helper")
         let plist = directory.appendingPathComponent("ports.plist")
-        try FileManager.default.copyItem(at: source, to: helper)
         try Data("original service configuration".utf8).write(to: plist)
         let bundle = URL(fileURLWithPath: "/Applications/Xe Launcher.app")
-        let original = try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist)
-        // Trailing signing-envelope bytes change the old whole-file hash but
-        // do not change the executable's CodeDirectory identity.
-        let writer = try FileHandle(forWritingTo: helper)
-        try writer.seekToEnd()
-        try writer.write(contentsOf: Data(repeating: 0, count: 16))
-        try writer.close()
-        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist) == original)
-        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle.appendingPathComponent("moved"), helperURL: helper, plistURL: plist) != original)
-        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: URL(fileURLWithPath: "/usr/bin/true"), plistURL: plist) != original)
+        let original = try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, plistURL: plist)
+        #expect(original.hasPrefix("config-v1:"))
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, plistURL: plist) == original)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle.appendingPathComponent("moved"), plistURL: plist) != original)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, plistURL: plist,
+                                                                 helperRevision: PortHelperProtocol.revision + 1) != original)
         try Data("changed service configuration".utf8).write(to: plist)
-        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, helperURL: helper, plistURL: plist) != original)
+        #expect(try PrivilegedPortService.registrationFingerprint(bundleURL: bundle, plistURL: plist) != original)
+    }
+
+    @Test func registrationReuseRequiresHealthyCompatibleHelper() async {
+        let fingerprint = "config-v1:current"
+        let cases: [(recorded: String?, force: Bool, ready: Bool, reusable: Bool, probes: Bool)] = [
+            (nil, false, true, true, true),
+            (String(repeating: "0", count: 64), false, true, true, true),
+            ("cdhash-v1:previous-build", false, true, true, true),
+            (fingerprint, false, true, true, true),
+            ("config-v1:previous-configuration", false, true, false, false),
+            (fingerprint, true, true, false, false),
+            ("cdhash-v1:previous-build", true, true, false, false),
+            ("cdhash-v1:previous-build", false, false, false, true),
+            (fingerprint, false, false, false, true)
+        ]
+        for item in cases {
+            var probed = false
+            let reusable = await PrivilegedPortService.canReuseRegistration(
+                recordedFingerprint: item.recorded, fingerprint: fingerprint, forceRefresh: item.force
+            ) {
+                probed = true
+                return item.ready
+            }
+            #expect(reusable == item.reusable)
+            #expect(probed == item.probes)
+        }
+    }
+
+    @Test func helperRevisionMustMatchRequiredBehavior() {
+        #expect(PortHelperProtocol.supports(version: PortHelperProtocol.version, revision: PortHelperProtocol.revision))
+        #expect(!PortHelperProtocol.supports(version: PortHelperProtocol.version + 1, revision: PortHelperProtocol.revision))
+        #expect(!PortHelperProtocol.supports(version: PortHelperProtocol.version, revision: PortHelperProtocol.revision + 1))
+        #expect(PortHelperProtocol.supports(version: PortHelperProtocol.version, revision: 0) == (PortHelperProtocol.revision == 1))
     }
 
     @Test func bootstrapPassesBothListenerDescriptorsToWorkerd() throws {

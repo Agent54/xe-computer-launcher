@@ -491,7 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         hideSetupProgressAction()
                         helperStatusMessage = helperStatus == .enabled
                             ? "Starting Xe Launcher's port helper on ports 80/443…"
-                            : "Updating Xe Launcher's port helper registration…"
+                            : "Waiting for Xe Launcher's port helper on ports 80/443…"
                     }
                     updateSetupProgress(status: helperStatusMessage)
                     if Date() >= nextHelperRecoveryAt {

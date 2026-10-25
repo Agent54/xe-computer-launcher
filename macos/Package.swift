@@ -17,6 +17,7 @@ let package = Package(
         .executableTarget(
             name: "macos",
             dependencies: [
+                "PortHelperSupport",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: [
@@ -41,7 +42,8 @@ let package = Package(
                 ])
             ]
         ),
-        .executableTarget(name: "port-helper", path: "Sources/PortHelper"),
-        .testTarget(name: "RuntimeTests", dependencies: ["macos"], path: "Tests/RuntimeTests")
+        .target(name: "PortHelperSupport"),
+        .executableTarget(name: "port-helper", dependencies: ["PortHelperSupport"], path: "Sources/PortHelper"),
+        .testTarget(name: "RuntimeTests", dependencies: ["macos", "PortHelperSupport"], path: "Tests/RuntimeTests")
     ]
 )
