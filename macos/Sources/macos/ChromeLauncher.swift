@@ -17,20 +17,7 @@ private func responsibilitySpawnAttributesSetDisclaim(
 
 extension ExternalState {
 
-    /// File handles for Chrome DevTools Protocol pipe transport.
-    /// Write CDP commands to `cdpWriteHandle`, read responses from `cdpReadHandle`.
-    /// These are set when Chrome starts with --remote-debugging-pipe and can be
-    /// bridged to a Unix socket for workerd or other consumers.
-    private static let _cdpHandles = CDPHandles()
-
-    var cdpWriteHandle: FileHandle? {
-        get { Self._cdpHandles.writeHandle }
-        set { Self._cdpHandles.writeHandle = newValue }
-    }
-    var cdpReadHandle: FileHandle? {
-        get { Self._cdpHandles.readHandle }
-        set { Self._cdpHandles.readHandle = newValue }
-    }
+    private static let cdpTransport = CDPTransport()
 
     /// Command-line flags passed to Chrome on every launch.
     static let chromeFlags: [String] = [
@@ -49,10 +36,10 @@ extension ExternalState {
     //   --remote-debugging-port=9226 \
     //   --remote-allow-origins=https://localhost:5194 \
 
-    /// Path to the Unix domain socket used for Chrome DevTools debugging.
+    /// Path to the Unix domain socket used for CDP.
     /// Uses the short runtime alias to the existing user app-data socket directory.
-    static var debugSocketPath: String {
-        RuntimeSocketPaths.shared.browserSocketsURL.appendingPathComponent("chrome-debug.sock").path
+    static var cdpSocketPath: String {
+        RuntimeSocketPaths.shared.browserSocketsURL.appendingPathComponent("cdp.sock").path
     }
 
     func startChrome(openingURL: String? = nil, forceHeaded: Bool = false) -> String? {
@@ -124,7 +111,7 @@ extension ExternalState {
 
         // Create pipe pairs for Chrome DevTools Protocol pipe transport.
         // Chrome reads commands from fd 3 and writes responses to fd 4.
-        // We keep the other ends for our launcher / future workerd bridge.
+        // The transport shares the other ends with the launcher and workerd.
         let toChrome = Pipe()    // we write → Chrome reads on fd 3
         let fromChrome = Pipe()  // Chrome writes on fd 4 → we read
 
@@ -140,9 +127,11 @@ extension ExternalState {
                 ]
             )
 
-            // Store the pipe handles for later CDP communication (e.g. workerd bridge)
-            cdpWriteHandle = toChrome.fileHandleForWriting
-            cdpReadHandle = fromChrome.fileHandleForReading
+            try Self.cdpTransport.start(
+                reader: fromChrome.fileHandleForReading,
+                writer: toChrome.fileHandleForWriting,
+                socketURL: URL(fileURLWithPath: Self.cdpSocketPath)
+            )
 
             if isBrowserStackStopRequested {
                 terminateBrowserProcessGroup()
@@ -164,6 +153,7 @@ extension ExternalState {
 
             return nil
         } catch {
+            terminateBrowserProcessGroup()
             let msg = "Chrome start failed: \(error)"
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
@@ -173,73 +163,16 @@ extension ExternalState {
 
     // MARK: - CDP Pipe Communication
 
-    /// Monotonically increasing CDP message ID.
-    nonisolated(unsafe) private static var _cdpNextId: Int = 0
-    private static let _cdpIdLock = NSLock()
-    private static func nextCDPId() -> Int {
-        _cdpIdLock.lock()
-        defer { _cdpIdLock.unlock() }
-        _cdpNextId += 1
-        return _cdpNextId
-    }
-
-    /// Leftover data from previous CDP reads (events that arrived between commands).
-    nonisolated(unsafe) private static var _cdpReadBuffer = Data()
-
-    /// Send a CDP command over the debugging pipe with a timeout.
+    /// Send a CDP command over the CDP pipe with a timeout.
     /// The pipe protocol uses \0 as message delimiter.
     /// If `sessionId` is provided, the command is routed to that target session.
     @discardableResult
     func sendCDP(method: String, params: [String: Any] = [:], sessionId: String? = nil, timeout: TimeInterval = 5.0) -> [String: Any]? {
-        guard let writeHandle = cdpWriteHandle, let readHandle = cdpReadHandle else {
-            appendLog("launcher", "CDP: pipe not available")
-            return nil
-        }
-        let id = Self.nextCDPId()
-        var msg: [String: Any] = ["id": id, "method": method]
-        if !params.isEmpty { msg["params"] = params }
-        if let sid = sessionId { msg["sessionId"] = sid }
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: msg),
-              var payload = String(data: jsonData, encoding: .utf8) else {
-            appendLog("launcher", "CDP: failed to serialize \(method)")
-            return nil
-        }
-        payload.append("\0")
-        writeHandle.write(payload.data(using: .utf8)!)
-
-        let deadline = Date().addingTimeInterval(timeout)
-        let fd = readHandle.fileDescriptor
-
-        while Date() < deadline {
-            if isBrowserStackStopRequested { return nil }
-            while let zeroIdx = Self._cdpReadBuffer.firstIndex(of: 0) {
-                let messageData = Self._cdpReadBuffer[Self._cdpReadBuffer.startIndex..<zeroIdx]
-                Self._cdpReadBuffer = Data(Self._cdpReadBuffer[Self._cdpReadBuffer.index(after: zeroIdx)...])
-
-                guard let response = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
-                    continue
-                }
-                if let responseId = response["id"] as? Int, responseId == id {
-                    return response
-                }
-            }
-
-            let remainingMs = Int32(max(deadline.timeIntervalSinceNow * 1000, 1))
-            var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let pollResult = poll(&pollFd, 1, min(remainingMs, 500))
-            if pollResult > 0 {
-                var buf = [UInt8](repeating: 0, count: 65536)
-                let n = read(fd, &buf, buf.count)
-                if n <= 0 { return nil }
-                Self._cdpReadBuffer.append(contentsOf: buf[0..<n])
-            } else if pollResult < 0 {
-                return nil
-            }
-        }
-
-        appendLog("launcher", "CDP: timeout waiting for response to \(method) (id=\(id))")
-        return nil
+        guard !isBrowserStackStopRequested else { return nil }
+        let response = Self.cdpTransport.command(method: method, params: params,
+                                                          sessionID: sessionId, timeout: timeout)
+        if response == nil { appendLog("launcher", "CDP: no response to \(method)") }
+        return response
     }
 
     func stopChrome() {
@@ -253,10 +186,7 @@ extension ExternalState {
         let processGroup = _browserPid
         guard processGroup > 0 else { return }
 
-        cdpWriteHandle?.closeFile()
-        cdpReadHandle?.closeFile()
-        cdpWriteHandle = nil
-        cdpReadHandle = nil
+        Self.cdpTransport.stop()
 
         kill(-processGroup, SIGTERM)
         waitForBrowserProcessGroupToExit(processGroup, timeout: 3.0)
@@ -693,10 +623,4 @@ extension ExternalState {
             Thread.sleep(forTimeInterval: 0.05)
         }
     }
-}
-
-/// Thread-safe storage for CDP pipe handles.
-private class CDPHandles: @unchecked Sendable {
-    var writeHandle: FileHandle?
-    var readHandle: FileHandle?
 }

@@ -3,6 +3,7 @@ import { routeApplication } from './app-routing.js';
 import { isApplicationStartupResponse } from './app-startup.js';
 import { runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 import { isDarcAPIRequest, addDarcCors, darcPreflight } from './darc-api.js';
+import { isCDPPath, handleCDP } from './cdp.js';
 
 const applicationHost = /^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/;
 const uiHost = 'compose-ui.localhost';
@@ -26,6 +27,7 @@ export default {
       return denied();
     }
     if (url.hostname === uiHost) {
+      if (isCDPPath(url.pathname)) return handleCDP(request, env, ctx);
       const origin = request.headers.get('Origin');
       const darcAPIRequest = url.protocol === 'https:' && isDarcAPIRequest(request, url, origin);
       if ((origin && origin !== url.origin && !darcAPIRequest) ||

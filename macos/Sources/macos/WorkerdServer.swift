@@ -127,6 +127,7 @@ final class WorkerdServer {
     private let runtimeStatusURL: URL
     private let maintenanceSocketURL: URL
     private let dockerSocketURL: URL
+    private let cdpSocketURL: URL
     private let managementPort: UInt16
     private let routingPort: UInt16
     private let tlsPort: UInt16
@@ -149,6 +150,7 @@ final class WorkerdServer {
          runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
          maintenanceSocketURL: URL = ContainerMaintenanceServer.socketURL,
          dockerSocketURL: URL = SmolVMSetup.dockerSocketURL,
+         cdpSocketURL: URL = URL(fileURLWithPath: ExternalState.cdpSocketPath),
          managementPort: UInt16 = 8094, routingPort: UInt16 = WorkerdPorts.defaultHTTP,
          tlsPort: UInt16 = WorkerdPorts.defaultHTTPS,
          acquirePrivilegedSockets: @escaping @Sendable () async throws -> PrivilegedPortSockets = { try await PrivilegedPortService.acquire() },
@@ -163,6 +165,7 @@ final class WorkerdServer {
         self.runtimeStatusURL = runtimeStatusURL
         self.maintenanceSocketURL = maintenanceSocketURL
         self.dockerSocketURL = dockerSocketURL
+        self.cdpSocketURL = cdpSocketURL
         self.managementPort = managementPort
         self.routingPort = routingPort
         self.tlsPort = tlsPort
@@ -256,6 +259,7 @@ final class WorkerdServer {
             "--external-addr", "docker=unix:\(dockerSocketURL.path)",
             "--external-addr", "maintenance=unix:\(maintenanceSocketURL.path)",
             "--external-addr", "router=unix:\(routerSocketURL.path)",
+            "--external-addr", "cdp=unix:\(cdpSocketURL.path)",
             "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
         if privilegedSockets != nil {
             workerArguments += ["--socket-fd", "ingest=3", "--socket-fd", "tls=4"]

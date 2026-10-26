@@ -117,6 +117,7 @@ struct ContainerRuntimeSupervisorTests {
         let snapshot = await supervisor.snapshot()
         #expect(snapshot.phase == .healthy)
         #expect(snapshot.reason == "oom_recovered")
+        #expect(snapshot.menuDescription == "Container runtime recovered")
         #expect(snapshot.lastIncident?.reason == "oom")
         #expect(snapshot.lastIncident?.restartedAt != nil)
         #expect(snapshot.lastIncident?.memoryLimitBytes == UInt64(4) * 1024 * 1024 * 1024)
@@ -462,7 +463,7 @@ struct ContainerRuntimeSupervisorTests {
         let next = await supervisor.snapshot()
         #expect(next.lastIncident?.id == incident.id)
         #expect(next.lastIncident?.restartedAt == nil)
-        #expect(next.menuDescription.contains("out of memory"))
+        #expect(next.menuDescription == "Container runtime ready")
         #expect(await fixture.starts == 1)
         #expect(await fixture.stops == 0)
     }
@@ -487,6 +488,11 @@ struct ContainerRuntimeSupervisorTests {
         #expect(recovered.phase == .healthy)
         #expect(recovered.oomKillCount == 0)
         #expect(recovered.lastIncident?.id == incident.id)
+        #expect(recovered.menuDescription == "Container runtime ready")
+        try await relaunched.restart()
+        let restarted = await relaunched.snapshot()
+        #expect(restarted.lastIncident?.id == incident.id)
+        #expect(restarted.menuDescription == "Container runtime ready")
     }
 
     @Test func exhaustedOOMRecoveryKeepsTheActionableCause() async throws {
@@ -505,6 +511,7 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.phase == .failed)
         #expect(snapshot.reason == "oom")
         #expect(snapshot.message.contains("Increase VM memory"))
+        #expect(snapshot.menuDescription.contains("repeatedly ran out of memory"))
         #expect(snapshot.lastIncident?.reason == "oom")
         #expect(await fixture.starts == 2)
     }

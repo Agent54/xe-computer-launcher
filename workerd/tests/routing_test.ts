@@ -825,6 +825,156 @@ Deno.test('application access starts exactly the selected stopped container', as
   }
 });
 
+Deno.test('automatically published apps start before allocation and rediscover their live bindings', async t => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = originalNow() + 200_000;
+  Date.now = () => now;
+  globalThis.fetch = async input => {
+    assert(input instanceof Request);
+    return Response.json({ url: input.url });
+  };
+  try {
+    for (const initialState of ['uncreated', 'created', 'exited']) {
+      await t.step(initialState, async () => {
+        const configFiles = '/stacks/auto/compose.yaml';
+        const starts: unknown[] = [];
+        const background: Promise<unknown>[] = [];
+        const ctx = { waitUntil(promise: Promise<unknown>) { background.push(promise); } };
+        let state = initialState;
+        let published = 49153;
+        let port: { target: number; name?: string; published?: string; app_protocol?: string } = {
+          target: 5173, ...(initialState === 'uncreated' ? {} : { name: 'web' }),
+          ...(initialState === 'created' ? { published: '' } : initialState === 'exited' ? { published: '0' } : {}),
+        };
+        let release: (() => void) | undefined;
+        const container = () => ({ Id: state === 'uncreated' ? '' : 'e'.repeat(64), State: state,
+          Labels: { 'com.docker.compose.project': 'auto', 'com.docker.compose.service': 'app',
+            'com.docker.compose.project.config_files': configFiles },
+          Ports: state === 'running' && published ? [{ Type: 'tcp', PrivatePort: 5173, PublicPort: published }] : [],
+          NetworkSettings: { Networks: { default: { IPAddress: '172.18.0.7' } } },
+        });
+        const env = {
+          COMPOSE: { fetch: async (input: string | Request) => {
+            const request = input instanceof Request ? input : new Request(input);
+            const url = new URL(request.url);
+            if (url.pathname === '/v1.24/ls') return Response.json([{ Name: 'auto', ConfigFiles: configFiles }]);
+            if (url.pathname === '/v1.24/ps/auto') return Response.json(composeContainers([container()]));
+            if (url.pathname === '/v1.24/config/auto') return Response.json({ services: { app: { ports: [port] } } });
+            assert.equal(url.pathname, '/v1.24/start/auto/container');
+            assert.equal(request.method, 'POST');
+            starts.push(await request.json());
+            await new Promise<void>(resolve => { release = resolve; });
+            state = 'running';
+            return Response.json({ ok: true });
+          } },
+          ROUTER: { fetch: (input: Request) => router.fetch(input, {
+            DOCKER: { fetch: () => Promise.resolve(Response.json([container()])) },
+          }, ctx) },
+          RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('app-ports.json')
+            ? { http: 80, https: 443 } : { phase: 'healthy', message: 'ready' })) },
+        };
+        const request = (host = 'app_auto.app.localhost', protocol = 'https') =>
+          appGateway.fetch(new Request(`${protocol}://${host}/deep/link?q=1`), env, ctx);
+        try {
+          now += 3000;
+          const selected = await resolveApplicationPort('app_auto.localhost', env);
+          assert.equal(selected?.port.target, 5173);
+          assert.equal(selected?.published, undefined);
+          for (const host of ['app_auto--nmissing.app.localhost', 'app_auto--p5173.app.localhost']) {
+            assert.equal((await request(host)).status, 404);
+          }
+          assert.equal(starts.length, 0, 'unknown names and unallocated numeric selectors cannot trigger startup');
+          const responses = await Promise.all([
+            request(), request('app_auto.localhost', 'http'),
+            ...(port.name ? [request('app_auto--nweb.app.localhost'), request('app_auto.web.localhost', 'http')] : []),
+          ]);
+          for (const response of responses) {
+            assert.equal(response.status, 503);
+            assert.equal(response.headers.get('retry-after'), '2');
+            assert.match(await response.text(), /Starting…/);
+          }
+          assert.deepEqual(starts, [initialState === 'uncreated'
+            ? { service: 'app', path: configFiles } : { container: 'e'.repeat(64), path: configFiles }]);
+          release!();
+          await Promise.all(background);
+          assert.equal((await request()).status, 200, 'startup completion invalidates discovery immediately');
+          assert.equal((await (await request(port.name ? 'app_auto--nweb.app.localhost' : 'app_auto.app.localhost')).json()).url,
+            'http://172.18.0.7:5173/deep/link?q=1');
+
+          // The unnamed short syntax used by Explorer and Agenda needs only the
+          // stable service hostname, even when the allocation later changes.
+          port = { target: 5173 };
+          published = 49154;
+          now += 3000;
+          assert.equal((await request('app_auto--p49153.app.localhost')).status, 404);
+          assert.equal((await request()).status, 200);
+          assert.equal((await request('app_auto--p49154.app.localhost')).status, 200);
+          assert.equal((await resolveApplicationPort('app_auto.49154.localhost', env))?.published, 49154);
+
+          port = { target: 5173, name: 'secure', app_protocol: 'https' };
+          now += 3000;
+          assert.equal((await resolveApplicationPort('app_auto.49154.localhost', env))?.protocol, 'https');
+          const redirect = await request('app_auto--p49154.app.localhost');
+          assert.equal(redirect.status, 307);
+          assert.equal(redirect.headers.get('location'), 'https://app_auto.localhost/deep/link?q=1');
+
+          published = 0;
+          now += 3000;
+          assert.equal((await request()).status, 404, 'a running app without a binding must not be forwarded');
+          assert.equal(await resolveApplicationPort('app_auto.localhost', env), null);
+          assert.equal(starts.length, 1);
+        } finally {
+          release?.();
+          await Promise.all(background);
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});
+
+Deno.test('native TLS starts an uncreated app without waiting for a published port', async () => {
+  const starts: unknown[] = [];
+  const env = withStartup({
+    COMPOSE: { fetch: async (input: string | Request) => {
+      const request = input instanceof Request ? input : new Request(input);
+      const url = new URL(request.url);
+      if (url.pathname === '/v1.24/ls') return Response.json([{ Name: 'tls-auto', ConfigFiles: '/stacks/tls-auto/compose.yaml' }]);
+      if (url.pathname === '/v1.24/ps/tls-auto') return Response.json([
+        { Service: 'app', State: 'uncreated', Publishers: [] },
+      ]);
+      if (url.pathname === '/v1.24/config/tls-auto') return Response.json({ services: {
+        app: { ports: [{ target: 443, app_protocol: 'https' }] },
+      } });
+      assert.equal(url.pathname, '/v1.24/start/tls-auto/container');
+      starts.push(await request.json());
+      return Response.json({ ok: true });
+    } },
+    ROUTER: { fetch: (input: Request) => {
+      assert.equal(new URL(input.url).pathname, '/__xe_router_health', 'no tunnel may be opened before allocation');
+      return Promise.resolve(new Response('ready'));
+    } },
+    RUNTIME_STATUS: { fetch: () => Promise.resolve(Response.json({ phase: 'healthy', message: 'ready' })) },
+  });
+  const hostname = new TextEncoder().encode('app_tls-auto.localhost');
+  const name = new Uint8Array([0, 0, hostname.length, ...hostname]);
+  const names = new Uint8Array([0, name.length, ...name]);
+  const extension = new Uint8Array([0, 0, 0, names.length, ...names]);
+  const body = new Uint8Array([3, 3, ...new Uint8Array(32), 0, 0, 2, 0x13, 1, 1, 0, 0, extension.length, ...extension]);
+  const handshake = new Uint8Array([1, 0, 0, body.length, ...body]);
+  const hello = new Uint8Array([22, 3, 1, 0, handshake.length, ...handshake]);
+  let closed = false;
+  await tlsGateway.connect({
+    readable: new ReadableStream({ start(controller) { controller.enqueue(hello); controller.close(); } }),
+    close: () => { closed = true; return Promise.resolve(); },
+  }, env);
+  assert.equal(closed, true);
+  assert.deepEqual(starts, [{ service: 'app', path: '/stacks/tls-auto/compose.yaml' }]);
+});
+
 Deno.test('startup errors reach the loader and API safely', async () => {
   const detail = 'No such image: <agenda-agenda> & "latest"';
   const cases = [

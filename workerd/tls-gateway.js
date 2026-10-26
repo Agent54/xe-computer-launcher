@@ -59,6 +59,7 @@ export default {
         await start.promise;
         return;
       }
+      if (!route.published) return;
       const response = await env.ROUTER.fetch(new Request('http://localhost/__xe_tls_tunnel', {
         headers: {
           Upgrade: 'websocket',

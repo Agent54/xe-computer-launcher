@@ -116,7 +116,9 @@ both ports above 1023 to disable the helper.
 Hold Option while opening the launcher menu to change **Container VM Memory**,
 **Container VM CPUs**, or **Container VM Disk Size**. These limits are shared by Docker builds and all
 containers; **Save and Restart VM** applies changes by restarting SmolVM while
-the launcher stays open. Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
+the launcher stays open. The same Option menu offers **Restart VM** to restart
+SmolVM with the current settings, interrupting all containers in it.
+Memory defaults to 4 GiB and accepts 4–32 GiB; CPU allocation
 defaults to 2 and accepts 1 up to the Mac's logical CPU count. Memory is elastic:
 only touched memory is committed. The equivalent settings are
 `container_vm_memory_mib` (4096–32768 MiB) and `container_vm_cpus` in
@@ -203,6 +205,8 @@ the launcher, browser, and host UI stay running. VM operations are serialized
 with startup and automatic recovery. A failed resize restart offers a retry.
 **Ignore** clears the launcher's indicator for that
 event while keeping its details available in the menu. New events warn again.
+The top status line shows the current runtime state; a saved past VM failure
+does not remain in that line after successful startup or recovery.
 
 VM defaults remain 4 GiB RAM and a 20 GiB data disk. The launcher's warning
 dialogs offer 4 → 8 GiB RAM, then increases of 2 GiB; disk increases start at

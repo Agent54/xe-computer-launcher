@@ -47,7 +47,7 @@ struct RuntimeSocketPaths {
         }
         try Self.validateSmolPaths(dataURL: smolDataURL)
         try Self.validateWorkerdPaths(directoryURL: workerdDirectoryURL)
-        try Self.validateSocketPath(browserSocketsURL.appendingPathComponent("chrome-debug.sock"))
+        try Self.validateSocketPath(browserSocketsURL.appendingPathComponent("cdp.sock"))
     }
 
     func prepare() throws {

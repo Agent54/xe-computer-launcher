@@ -26,6 +26,28 @@ the launcher UI to Compose and running containers:
 The launcher starts the Compose UI server but does not open it or provide a
 session token. The IWA UI handles access to Compose.
 
+## CDP
+
+Workerd provides CDP for agent automation, browser control and DevTools.
+
+`https://compose-ui.localhost/devtools-api/json/list` lists Helium targets;
+`/devtools-api/json/version` supplies the browser WebSocket URL for CDP clients.
+Use the configured HTTPS port when it is not 443. Darc discovers that origin
+through its existing Compose connection rather than the Vite proxy on port 9226.
+
+The launcher shares Helium's CDP pipe through the private
+`~/.xe/run/sockets/cdp.sock`. Workerd owns the HTTP API and WebSockets,
+with a separate browser session per connection. The launcher only handles pipe
+framing, command IDs and transport cleanup; its existing CDP commands share the
+same reader. CDP is available without the container VM.
+
+`cdp-payload.js` receives CDP commands, replies and events in both
+directions, along with the connection ID and URL. It is currently a no-op:
+IWA/controlled-frame rewriting, agent permissions and audit logging are not yet
+implemented. Native CDP clients currently have full browser access.
+Inspector links use Chromium's matching hosted frontend, which requires network
+access; their CDP WebSocket still goes through local workerd.
+
 ## Port routes
 
 Use Compose's standard [long port syntax](https://docs.docker.com/reference/compose-file/services/#ports)
@@ -55,6 +77,13 @@ services:
 - `app--nweb.app.localhost` selects the named `web` port on that HTTPS listener.
 
 Short syntax such as `"8080:3000"` supports default and numeric routes too.
+For Docker to allocate an available VM host port, omit `published` in long
+syntax or use `"127.0.0.1::3000"` in short syntax. Default service hostnames and
+named routes can start these apps before a host port has been assigned; retries
+discover the live mapping after startup. Numeric selectors use the actual
+assigned host port and may change after a restart or recreation, so use default
+or named routes for stable links. Existing fixed-port containers need to be
+recreated to apply a change to automatic allocation.
 Names used in URLs must be a single hostname label (letters, digits or hyphens);
 all-numeric selectors always mean published port numbers. Only TCP ports
 published on the running container are routed. Names and YAML order refresh

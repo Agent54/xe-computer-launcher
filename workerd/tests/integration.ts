@@ -6,6 +6,7 @@ import { Buffer } from 'node:buffer';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createConnection } from 'node:net';
+import { connect as connectTLS } from 'node:tls';
 import { once } from 'node:events';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +23,7 @@ const root = await Deno.makeTempDir({ dir: resolve(dirname(fileURLToPath(import.
 const composePath = join(root, 'compose.sock');
 const dockerPath = join(root, 'docker.sock');
 const routerPath = join(root, 'workerd.sock');
+const cdpPath = join(root, 'cdp.sock');
 const statusPath = join(root, 'status');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const processes: Deno.ChildProcess[] = [];
@@ -30,6 +32,48 @@ const servers = new Set<Deno.HttpServer<Deno.UnixAddr>>();
 let releaseSSE: (() => void) | undefined;
 const seen: { path: string; method: string; headers: IncomingMessage['headers']; body: string }[] = [];
 const xeComputerOrigin = 'isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic';
+const browserCommands: Record<string, any>[] = [];
+const cdpClients = new Set<Deno.UnixConn>();
+let cdpListener: Deno.UnixListener | undefined;
+
+async function mockBrowser(connection: Deno.UnixConn) {
+  cdpClients.add(connection);
+  const sessionId = crypto.randomUUID();
+  let buffered = '';
+  const decoder = new TextDecoder();
+  const buffer = new Uint8Array(65536);
+  try {
+    while (true) {
+      const count = await connection.read(buffer);
+      if (count === null) return;
+      buffered += decoder.decode(buffer.subarray(0, count), { stream: true });
+      let delimiter;
+      while ((delimiter = buffered.indexOf('\0')) !== -1) {
+        const message = JSON.parse(buffered.slice(0, delimiter));
+        buffered = buffered.slice(delimiter + 1);
+        browserCommands.push(message);
+        let result;
+        switch (message.method) {
+          case 'Target.attachToBrowserTarget': result = { sessionId }; break;
+          case 'Browser.getVersion': result = { product: 'Helium/153', protocolVersion: '1.3', revision: '@abcdef' }; break;
+          case 'Target.getTargets': result = { targetInfos: [{ targetId: 'controlled-frame', type: 'webview',
+            title: 'Controlled frame', url: 'https://example.test', parentId: 'iwa' }] }; break;
+          case 'Target.attachToTarget': result = { sessionId: `${sessionId}-page` }; break;
+          case 'Runtime.evaluate': result = { result: { type: 'number', value: 2 } }; break;
+          default: result = {};
+        }
+        const reply = new TextEncoder().encode(`${JSON.stringify({ id: message.id, result,
+          ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+        })}\0`);
+        let sent = 0;
+        while (sent < reply.length) sent += await connection.write(reply.subarray(sent));
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.BadResource || error instanceof Deno.errors.BrokenPipe ||
+          error instanceof Deno.errors.ConnectionReset)) throw error;
+  } finally { cdpClients.delete(connection); try { connection.close(); } catch { /* closed */ } }
+}
 
 function startProcess(command: string, args: string[], env?: Record<string, string>) {
   const process = new Deno.Command(command, { args, env, stdout: 'piped', stderr: 'piped' }).spawn();
@@ -99,7 +143,7 @@ async function startUnix(path: string) {
       return Response.json({ services: { web: { ports: [
         { name: 'web', target: appPort, published: '32000', protocol: 'tcp' },
         { name: 'secure', target: securePort, published: '32001', protocol: 'tcp', app_protocol: 'https' },
-      ] }, sleeping: { ports: [{ name: 'web', target: appPort, published: '32002', protocol: 'tcp' }] } } });
+      ] }, sleeping: { ports: [{ name: 'web', target: appPort, protocol: 'tcp' }] } } });
     } else if (requestPath === '/v1.24/ls?all=true') {
       if (discoveryEntered) {
         const entered = discoveryEntered;
@@ -123,7 +167,7 @@ async function startUnix(path: string) {
         ID: sleepingState === 'uncreated' ? '' : sleepingId,
         Name: 'demo-sleeping-1', Service: 'sleeping', State: sleepingState,
         Labels: { 'com.docker.compose.project.config_files': '/stacks/demo/compose.yaml' },
-        Publishers: [{ TargetPort: appPort, PublishedPort: 32002, Protocol: 'tcp' }],
+        Publishers: sleepingState === 'running' ? [{ TargetPort: appPort, PublishedPort: 32002, Protocol: 'tcp' }] : [],
       }]);
     } else if (requestPath === '/v1.24/failure') {
       return Response.json({ error: 'backend EOF' }, { status: 500 });
@@ -194,19 +238,58 @@ const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req =>
 });
 const appPort = app.addr.port;
 
-async function tlsRequest(hostname: string, publicPort = false): Promise<{ status: number; body: string }> {
+async function tlsRequest(hostname: string, publicPort = false, path = '/', origin?: string): Promise<{ status: number; body: string }> {
   // Use the URL hostname for TLS SNI as well as HTTP Host. Deno's node:https
   // compatibility client can omit SNI when connecting to a loopback IP.
   const result = await new Deno.Command('curl', { args: [
     '--disable', '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5',
     '--resolve', `${hostname}:${tlsPort}:127.0.0.1`,
     '--header', `Host: ${publicPort ? `${hostname}:${tlsPort}` : hostname}`,
-    '--write-out', '\n%{http_code}', `https://${hostname}:${tlsPort}/`,
+    ...(origin ? ['--header', `Origin: ${origin}`] : []),
+    '--write-out', '\n%{http_code}', `https://${hostname}:${tlsPort}${path}`,
   ], stdout: 'piped', stderr: 'piped' }).output();
   assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
   const output = new TextDecoder().decode(result.stdout);
   const separator = output.lastIndexOf('\n');
   return { status: Number(output.slice(separator + 1)), body: output.slice(0, separator) };
+}
+
+async function verifyCDPWebSocket(path: string) {
+  const socket = connectTLS({ host: '127.0.0.1', port: tlsPort,
+    servername: 'compose-ui.localhost', rejectUnauthorized: false });
+  try {
+    await once(socket, 'secureConnect');
+    socket.setTimeout(5000, () => socket.destroy(new Error('CDP connection timed out')));
+    socket.write(`GET ${path} HTTP/1.1\r\nHost: compose-ui.localhost:${tlsPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nOrigin: ${xeComputerOrigin}\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    let buffered = Buffer.alloc(0);
+    let upgraded = false;
+    for await (const chunk of socket) {
+      buffered = Buffer.concat([buffered, chunk]);
+      if (!upgraded) {
+        const end = buffered.indexOf('\r\n\r\n');
+        if (end < 0) continue;
+        assert.match(buffered.subarray(0, end).toString(), /^HTTP\/1\.1 101 /);
+        buffered = buffered.subarray(end + 4);
+        upgraded = true;
+        const payload = Buffer.from(JSON.stringify({ id: 7, method: 'Runtime.evaluate', params: { expression: '1+1' } }));
+        const mask = Buffer.from([1, 2, 3, 4]);
+        const frame = Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask,
+          Buffer.from(payload.map((value, index) => value ^ mask[index % 4]))]);
+        socket.write(frame);
+      }
+      if (buffered.length < 2) continue;
+      const length = buffered[1] & 0x7f;
+      assert(length < 126, 'Small fixture response expected');
+      if (buffered.length < length + 2) continue;
+      assert.equal(buffered[0], 0x81);
+      const message = JSON.parse(buffered.subarray(2, length + 2).toString());
+      assert.equal(message.id, 7);
+      assert.equal(message.result.result.value, 2);
+      assert.equal(message.sessionId, undefined, 'The synthetic root session stays private');
+      return;
+    }
+    assert.fail('CDP connection closed without a response');
+  } finally { socket.destroy(); }
 }
 
 async function verifyWebSocket() {
@@ -243,6 +326,12 @@ async function verifyWebSocket() {
 }
 
 try {
+  cdpListener = Deno.listen({ transport: 'unix', path: cdpPath });
+  const listener = cdpListener;
+  (async () => {
+    try { for await (const connection of listener) await mockBrowser(connection); }
+    catch (error) { if (!(error instanceof Deno.errors.BadResource)) throw error; }
+  })();
   const certificate = join(root, 'test.crt');
   const privateKey = join(root, 'test.key');
   const generated = await new Deno.Command('openssl', { args: [
@@ -292,6 +381,7 @@ try {
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`,
     '--external-addr', `docker=unix:${dockerPath}`,
     '--external-addr', `maintenance=unix:${join(root, 'maintenance.sock')}`,
+    '--external-addr', `cdp=unix:${cdpPath}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
   const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
@@ -303,6 +393,21 @@ try {
     await sleep(100);
   }
   assert(ready, 'workerd failed to become ready');
+  const cdpList = await tlsRequest('compose-ui.localhost', true, '/devtools-api/json/list', xeComputerOrigin);
+  assert.equal(cdpList.status, 200, cdpList.body);
+  const [cdpTarget] = JSON.parse(cdpList.body);
+  assert.equal(cdpTarget.type, 'webview', 'IWA rewriting is intentionally a no-op for now');
+  assert.equal(cdpTarget.parentId, 'iwa');
+  assert.equal(cdpTarget.webSocketDebuggerUrl,
+    `wss://compose-ui.localhost:${tlsPort}/devtools-api/devtools/page/controlled-frame`);
+  const cdpVersion = await tlsRequest('compose-ui.localhost', true, '/devtools-api/json/version/');
+  assert.equal(cdpVersion.status, 200, cdpVersion.body);
+  assert.equal(JSON.parse(cdpVersion.body).Browser, 'Helium/153');
+  assert.equal((await tlsRequest('compose-ui.localhost', true, '/devtools-api/json/list', 'https://evil.test')).status, 403);
+  await verifyCDPWebSocket('/devtools-api/devtools/page/controlled-frame');
+  await verifyCDPWebSocket('/devtools-api/devtools/browser');
+  assert(browserCommands.some(command => command.method === 'Target.detachFromTarget'));
+  console.log('PASS: browser discovery and CDP WebSockets on the public HTTPS listener through a private Unix socket');
   const html = await request();
   assert.deepEqual(html.body, Buffer.from(await Deno.readFile(join(assets, 'index.html'))));
   assert.match(String(html.headers['content-type']), /^text\/html/);
@@ -478,7 +583,7 @@ try {
   const waiting = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.match(waiting.body.toString(), /<h1>sleeping<\/h1>/);
   assert.match(waiting.body.toString(), /Starting container runtime…/);
-  assert.match((await tlsRequest('sleeping_demo--p32002.app.localhost', true)).body, /Starting container runtime…/);
+  assert.match((await tlsRequest('sleeping_demo--nweb.app.localhost', true)).body, /Starting container runtime…/);
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 0);
   assert.equal((await request()).status, 200, 'Compose UI stays available during runtime startup');
   await Deno.writeTextFile(join(statusPath, 'status.json'), JSON.stringify({
@@ -504,7 +609,7 @@ try {
   assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
   assert.match(sleeping.body.toString(), /Starting…/);
   assert.equal(sleeping.headers['cache-control'], 'no-store');
-  const sleepingTLS = await tlsRequest('sleeping_demo--p32002.app.localhost', true);
+  const sleepingTLS = await tlsRequest('sleeping_demo--nweb.app.localhost', true);
   assert.equal(sleepingTLS.status, 503);
   assert.match(sleepingTLS.body, /Starting…/);
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 1);
@@ -581,6 +686,8 @@ try {
   throw error;
   } finally { tlsApp.close(); }
 } finally {
+  cdpListener?.close();
+  for (const connection of cdpClients) { try { connection.close(); } catch { /* closed */ } }
   releaseSSE?.();
   releaseContainerStart?.();
   releaseDiscovery?.();

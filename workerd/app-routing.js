@@ -32,12 +32,15 @@ export async function resolveApplicationPort(hostname, env) {
   if (service instanceof Response) return null;
   const ports = servicePorts(service);
   const selected = selector === undefined ? ports.slice(0, 1)
-    : /^\d+$/.test(selector) ? ports.filter(p => Number(p.published) === Number(selector))
+    : /^\d+$/.test(selector) ? ports.filter(p => publishedPortFor(service, p) === Number(selector))
     : ports.filter(p => typeof p.name === 'string' && p.name.toLowerCase() === selector);
   if (selected.length !== 1) return null;
   const port = selected[0];
   const published = publishedPortFor(service, port);
-  if (!Number.isInteger(port.target) || port.target < 1 || port.target > 65535 || !published) return null;
+  if (!Number.isInteger(port.target) || port.target < 1 || port.target > 65535) return null;
+  // Default and named routes identify the app before Docker allocates a host
+  // port. TLS must be able to reach the startup path in that state too.
+  if (!published && !isApplicationStopped(service) && service.state !== 'restarting') return null;
   return { service, port, published, protocol: applicationProtocol(port) || 'http' };
 }
 
@@ -46,7 +49,7 @@ function publishedPortFor(service, port) {
   const configured = Number(port.published);
   const published = [...new Set((service.publishedPorts || [])
     .filter(mapping => mapping.target === target &&
-      (!Number.isInteger(configured) || mapping.published === configured))
+      (!Number.isInteger(configured) || configured === 0 || mapping.published === configured))
     .map(mapping => mapping.published))];
   return published.length === 1 ? published[0] : undefined;
 }
@@ -115,9 +118,6 @@ export async function routeApplication(request, env, ctx) {
       return routeError('Invalid Compose target port');
     }
     published = publishedPortFor(service, selected[0]);
-    if (!published) {
-      return routeError('Published port not available');
-    }
     selectedPort = selected[0];
     canonical = selected[0] === ports[0];
     target = port;
@@ -133,7 +133,7 @@ export async function routeApplication(request, env, ctx) {
     published = Number(selector);
     try {
       const ports = servicePorts(service);
-      const selected = ports.filter(p => Number(p.published) === Number(selector));
+      const selected = ports.filter(p => p.target === target && publishedPortFor(service, p) === published);
       if (selected.length === 1) {
         selectedPort = selected[0];
         canonical = selected[0] === ports[0];
@@ -154,6 +154,9 @@ export async function routeApplication(request, env, ctx) {
   if (service.state && service.state !== 'running') {
     return routeError('Container is not available for application routing', 503);
   }
+  // Startup retries rediscover the allocated mapping. A running container still
+  // needs a real binding, which the guest independently validates.
+  if (!published) return routeError('Published port not available');
   if (selectedPort) {
     const response = await protocolResponse(request, service, selectedPort, env, canonical);
     if (response) return response;

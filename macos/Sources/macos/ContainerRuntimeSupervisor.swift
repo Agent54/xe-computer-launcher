@@ -36,11 +36,7 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     var lastIncident: ContainerRuntimeIncident? = nil
     var cachePressureWarning: ContainerRuntimeMaintenance.CachePressureWarning? = nil
 
-    var menuDescription: String {
-        phase == .healthy && lastIncident?.reason == "oom"
-            ? "\(message) · Last VM failure: out of memory"
-            : message
-    }
+    var menuDescription: String { message }
 }
 
 @MainActor
@@ -231,7 +227,7 @@ actor ContainerRuntimeSupervisor {
         outageWasOOM = false
         bootId = UUID().uuidString
         await publish(phase: restarting ? .restarting : .starting,
-            message: restarting ? "Applying container VM resource changes…" : "Starting container runtime…")
+            message: restarting ? "Restarting container VM…" : "Starting container runtime…")
         do {
             if restarting {
                 await maintenance?.pause()

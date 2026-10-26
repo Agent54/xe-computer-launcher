@@ -42,6 +42,7 @@ printf 'Compose UI: http://compose-ui.localhost%s/\n' "$public_http_port"
     --external-addr "ui-tls=unix:$runtime_dir/ui-https.sock" \
     --external-addr "compose=unix:$COMPOSE_SOCKET" --external-addr "router=unix:$ROUTER_SOCKET" \
     --external-addr "docker=unix:$DOCKER_SOCKET" \
+    --external-addr "cdp=unix:${CDP_SOCKET:-$HOME/.xe/run/sockets/cdp.sock}" \
     --external-addr "maintenance=unix:${MAINTENANCE_SOCKET:-$runtime_dir/maintenance.sock}" &
 child=$!
 wait "$child"

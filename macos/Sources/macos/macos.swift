@@ -298,6 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var containerMemoryItem: NSMenuItem?
     private var containerCPUItem: NSMenuItem?
     private var containerDiskItem: NSMenuItem?
+    private var restartVMItem: NSMenuItem?
     private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -1082,6 +1083,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(diskItem)
         containerDiskItem = diskItem
 
+        let restartVMItem = NSMenuItem(title: "Restart VM", action: #selector(restartVMAction), keyEquivalent: "")
+        restartVMItem.isHidden = true
+        menu.addItem(restartVMItem)
+        self.restartVMItem = restartVMItem
+
         let runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
         runAtStartupItem.isHidden = true
         menu.addItem(runAtStartupItem)
@@ -1450,6 +1456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         containerMemoryItem?.isHidden = !optionHeld
         containerCPUItem?.isHidden = !optionHeld
         containerDiskItem?.isHidden = !optionHeld
+        restartVMItem?.isHidden = !optionHeld
         runAtStartupItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
@@ -1487,6 +1494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         containerMemoryItem?.title = "Container VM Memory: \(vmResources.memoryGiBLabel) GiB…"
         containerCPUItem?.title = "Container VM CPUs: \(vmResources.cpus)…"
         containerDiskItem?.title = "Container VM Disk Size: \(vmResources.diskGiB(preserving: ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB)) GiB…"
+        restartVMItem?.isEnabled = containerVMSettingsTask == nil
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
@@ -1619,12 +1627,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         changeContainerVMResource(.disk)
     }
 
+    @objc private func restartVMAction() {
+        guard containerVMSettingsTask == nil, !isPreparingForTermination else { return }
+        containerVMSettingsTask = Task { @MainActor in
+            defer {
+                containerVMSettingsTask = nil
+                renderMenuLabels()
+            }
+            await restartContainerVM()
+        }
+        renderMenuLabels()
+    }
+
     private func changeContainerVMResource(
         _ resource: ContainerVMSettings.Resource, acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
     ) {
         guard containerVMSettingsTask == nil, !isPreparingForTermination else { return }
         containerVMSettingsTask = Task { @MainActor in
-            defer { containerVMSettingsTask = nil }
+            defer {
+                containerVMSettingsTask = nil
+                renderMenuLabels()
+            }
             do {
                 var diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB
                 if resource == .disk, diskGiB == nil {
@@ -1641,6 +1664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 alert.runModal()
             }
         }
+        renderMenuLabels()
     }
 
     private func applyContainerVMSetting(
@@ -1655,6 +1679,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard changed, !isPreparingForTermination else { return }
         let savedMemoryMiB = ContainerVMResources(settings: ExternalState.shared.settings.rawData).memoryMiB
         let increasedMemoryMiB = resource == .memory && savedMemoryMiB > previousMemoryMiB ? savedMemoryMiB : nil
+        await restartContainerVM(
+            afterMemoryIncreaseTo: increasedMemoryMiB, acknowledging: warning,
+            failureContext: "Your resource settings are saved. The VM must restart to apply them."
+        )
+    }
+
+    private func restartContainerVM(
+        afterMemoryIncreaseTo increasedMemoryMiB: UInt32? = nil,
+        acknowledging warning: ContainerRuntimeWarnings.Warning? = nil,
+        failureContext: String? = nil
+    ) async {
         while !isPreparingForTermination {
             do {
                 try await runtimeSupervisor.restart(afterMemoryIncreaseTo: increasedMemoryMiB)
@@ -1670,7 +1705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = "Could Not Restart Container VM"
-                alert.informativeText = "Your resource settings are saved. The VM must restart to apply them.\n\n\(error.localizedDescription)"
+                alert.informativeText = [failureContext, error.localizedDescription].compactMap { $0 }.joined(separator: "\n\n")
                 alert.addButton(withTitle: "Retry VM Restart")
                 alert.addButton(withTitle: "Close")
                 if alert.runModal() != .alertFirstButtonReturn { return }
