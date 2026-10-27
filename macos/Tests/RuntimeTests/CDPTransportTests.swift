@@ -5,10 +5,10 @@ import Testing
 
 struct CDPTransportTests {
     private func directory() throws -> URL {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(".build/cdp-\(UUID().uuidString.prefix(8))")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // Unix socket addresses must stay short even in deeply nested CI checkouts.
+        let root = URL(fileURLWithPath: "/tmp/xe-cdp-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
         return root
     }
 
