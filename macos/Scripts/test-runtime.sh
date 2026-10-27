@@ -1,6 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
+report_runtime_tests() {
+  local status=$?
+  [[ "${GITHUB_ACTIONS:-}" == true ]] || return "$status"
+  local result="✅ Runtime tests passed"
+  if (( status != 0 )); then
+    result="❌ Runtime test command failed (exit $status). Results may be incomplete; see the logs."
+    printf '::error title=Runtime tests failed::%s\n' "$result"
+  fi
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '### Runtime tests\n\n%s\n' "$result" >> "$GITHUB_STEP_SUMMARY" || true
+  fi
+  return "$status"
+}
+trap report_runtime_tests EXIT
+
 cd "$(dirname "$0")/.."
 
 swift_compiler="$(/usr/bin/xcrun --find swiftc)"
@@ -27,4 +42,4 @@ fi
 /bin/bash Tests/Integration/test-install-targets.sh
 /bin/bash Tests/Integration/settings-termination.sh
 
-exec /usr/bin/xcrun swift "${test_args[@]}" "$@"
+/usr/bin/xcrun swift "${test_args[@]}" "$@"

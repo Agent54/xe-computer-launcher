@@ -27,9 +27,17 @@ struct UnixSocketHTTPTests {
         #expect(await !UnixSocketHTTP.isReady(at: URL(fileURLWithPath: "/tmp/" + String(repeating: "x", count: 150))))
     }
 
+    @Test func peerCanWriteAfterProbeClosesWithoutSignalling() async throws {
+        let result = try await probeResponse(chunks: ["HTTP/1.1 200 OK\r\n", "Content-Length: 0\r\n\r\n"],
+                                             waitForCloseBeforeLastChunk: true)
+        #expect(result.ready)
+        #expect(result.peerSawClientClose)
+    }
+
     /// A native Unix socket fixture; no Docker, VM, or subprocess required.
     private func probeResponse(
-        chunks: [String], waitForClientClose: Bool = false, timeout: Duration = .seconds(1)
+        chunks: [String], waitForClientClose: Bool = false,
+        waitForCloseBeforeLastChunk: Bool = false, timeout: Duration = .seconds(1)
     ) async throws -> (ready: Bool, peerSawClientClose: Bool) {
         let path = "/tmp/xe-probe-\(UUID().uuidString.prefix(8)).sock"
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -50,40 +58,50 @@ struct UnixSocketHTTPTests {
         try #require(bound == 0)
         try #require(listen(listener, 1) == 0)
 
-        async let peerSawClientClose: Bool = withCheckedContinuation { continuation in
-            // Blocking fixture I/O must not occupy Swift's cooperative workers,
-            // where it could delay the very probe being tested.
-            DispatchQueue.global().async {
-                var sawClientClose = false
-                defer { continuation.resume(returning: sawClientClose) }
-                var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
-                guard poll(&pending, 1, 2000) > 0 else { return }
-                let connection = accept(listener, nil, nil)
-                guard connection >= 0 else { return }
-                defer { close(connection) }
-                var enabled: Int32 = 1
-                _ = setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
-                var incoming = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
-                guard poll(&incoming, 1, 1000) > 0 else { return }
-                var request = [UInt8](repeating: 0, count: 1024)
-                guard recv(connection, &request, request.count, 0) > 0 else { return }
-                if waitForClientClose {
-                    // A generous watchdog bounds a broken probe. If it fires,
-                    // the fixture closes the peer and the assertion must fail.
-                    var disconnect = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
-                    guard poll(&disconnect, 1, 5000) > 0 else { return }
-                    var byte: UInt8 = 0
-                    sawClientClose = recv(connection, &byte, 1, 0) == 0
-                    return
+        let (peerResults, continuation) = AsyncStream<Bool>.makeStream()
+        // Give the peer its own thread: the full suite can saturate shared
+        // executors before this fixture gets a chance to answer the probe.
+        Thread.detachNewThread {
+            var sawClientClose = false
+            defer { continuation.yield(sawClientClose); continuation.finish() }
+            var pending = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            guard poll(&pending, 1, 10000) > 0 else { return }
+            let connection = accept(listener, nil, nil)
+            guard connection >= 0 else { return }
+            defer { close(connection) }
+            var enabled: Int32 = 1
+            guard setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled,
+                             socklen_t(MemoryLayout.size(ofValue: enabled))) == 0 else { return }
+            var incoming = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
+            guard poll(&incoming, 1, 1000) > 0 else { return }
+            var request = [UInt8](repeating: 0, count: 1024)
+            guard recv(connection, &request, request.count, 0) > 0 else { return }
+            func clientClosed() -> Bool {
+                // A generous watchdog bounds a broken probe. If it fires,
+                // the fixture closes the peer and the assertion must fail.
+                var disconnect = pollfd(fd: connection, events: Int16(POLLIN), revents: 0)
+                guard poll(&disconnect, 1, 5000) > 0 else { return false }
+                var byte: UInt8 = 0
+                return recv(connection, &byte, 1, 0) == 0
+            }
+            if waitForClientClose {
+                sawClientClose = clientClosed()
+                return
+            }
+            for (index, chunk) in chunks.enumerated() {
+                if waitForCloseBeforeLastChunk && index == chunks.count - 1 {
+                    sawClientClose = clientClosed()
+                    guard sawClientClose else { return }
                 }
-                for chunk in chunks {
-                    let bytes = Array(chunk.utf8)
-                    _ = bytes.withUnsafeBytes { send(connection, $0.baseAddress, bytes.count, 0) }
-                    Thread.sleep(forTimeInterval: 0.02)
-                }
+                let bytes = Array(chunk.utf8)
+                // The probe may time out or finish parsing before this write.
+                let written = bytes.withUnsafeBytes { send(connection, $0.baseAddress, bytes.count, MSG_NOSIGNAL) }
+                guard written == bytes.count else { return }
+                Thread.sleep(forTimeInterval: 0.02)
             }
         }
         let ready = await UnixSocketHTTP.isReady(at: URL(fileURLWithPath: path), timeout: timeout)
-        return (ready, await peerSawClientClose)
+        var iterator = peerResults.makeAsyncIterator()
+        return (ready, await iterator.next() ?? false)
     }
 }
