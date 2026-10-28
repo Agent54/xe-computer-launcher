@@ -91,26 +91,147 @@ struct ContainerRuntimeMaintenanceTests {
         #expect(attempts.withLock { $0 } == 4)
     }
 
-    @Test func lowDiskSamplesTriggerEarlyCleanupWithABoundedRetryRate() async throws {
+    private func diskResources(available: UInt64, total: UInt64 = 100) -> VMResourceSnapshot {
+        VMResourceSnapshot(memoryResidentBytes: nil, memoryLimitBytes: nil,
+            diskAllocatedBytes: nil, diskLogicalBytes: nil, diskTotalBytes: total,
+            diskAvailableBytes: available, diskTotalInodes: nil, diskFreeInodes: nil)
+    }
+
+    @Test(arguments: [UInt64(2), 4])
+    func lowDiskWarnsWithoutCommandsAndWaitsForTheNormalSchedule(available: UInt64) async throws {
         let stateURL = try workspaceStateURL()
         defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
         let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
-        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
-            SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
-                ? "4096 5242880 500000 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
-        }, now: { clock.withLock { $0 } }, log: { _ in })
-        let lowDisk = VMResourceSnapshot(memoryResidentBytes: nil, memoryLimitBytes: nil,
-            diskAllocatedBytes: nil, diskLogicalBytes: nil, diskTotalBytes: 100,
-            diskAvailableBytes: 4, diskTotalInodes: nil, diskFreeInodes: nil)
+        let commands = Mutex<[[String]]>([])
+        let freeBlocks = Mutex(500_000)
+        let execute: ContainerRuntimeMaintenance.Execute = { command in
+            commands.withLock { $0.append(command) }
+            return SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 \(freeBlocks.withLock { $0 }) 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: execute,
+            now: { clock.withLock { $0 } }, log: { _ in })
         let first = try #require(await maintenance.reconcile())
         await first.value
+        let previous = await maintenance.snapshot()
+        commands.withLock { $0 = [] }
+        clock.withLock { $0.addTimeInterval(60) }
+        let lowDisk = diskResources(available: available)
+        #expect(await maintenance.reconcile(resources: lowDisk) == nil)
+        #expect(commands.withLock { $0.isEmpty })
+        let warning = try #require((await maintenance.snapshot()).cachePressureWarning)
+        #expect(warning.message.contains("next scheduled cleanup"))
+        #expect(warning.message.contains("below 2%"))
+        #expect((await maintenance.snapshot()).nextRunAt == previous.nextRunAt)
+        let restored = ContainerRuntimeMaintenance(stateURL: stateURL, execute: execute,
+            now: { clock.withLock { $0 } }, log: { _ in })
+        #expect(await restored.reconcile(resources: lowDisk) == nil)
+        #expect((await restored.snapshot()).cachePressureWarning?.id == warning.id)
+        // At the normal four-hour deadline the younger-cache policy still applies.
+        freeBlocks.withLock { $0 = 200_000 }
+        clock.withLock { $0.addTimeInterval(ContainerRuntimeMaintenance.cleanupInterval - 60) }
+        let scheduled = try #require(await restored.reconcile(resources: lowDisk))
+        await scheduled.value
+        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) }
+                == ["until=32h", "until=8h", "until=1h", "until=0h"])
+        #expect((await restored.snapshot()).cachePressureWarning?.id == warning.id)
+    }
+
+    @Test func criticalDiskSamplesTriggerEarlyCleanupWithABoundedRetryRate() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        let commands = Mutex<[[String]]>([])
+        let freeBlocks = Mutex(500_000)
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            commands.withLock { $0.append(command) }
+            if command == ContainerRuntimeMaintenance.runningBuildsCommand {
+                return SmolVMCommandResult(standardOutput: "", standardError: "", exitCode: 0)
+            }
+            return SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 \(freeBlocks.withLock { $0 }) 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, now: { clock.withLock { $0 } }, log: { _ in })
+        let lowDisk = diskResources(available: 1)
+        let first = try #require(await maintenance.reconcile())
+        await first.value
+        commands.withLock { $0 = [] }
+        freeBlocks.withLock { $0 = 40_000 }
         clock.withLock { $0.addTimeInterval(59) }
         #expect(await maintenance.reconcile(resources: lowDisk) == nil)
+        #expect(commands.withLock { $0.isEmpty })
         clock.withLock { $0.addTimeInterval(1) }
         #expect(await maintenance.reconcile() == nil)
         let pressureRun = try #require(await maintenance.reconcile(resources: lowDisk))
         await pressureRun.value
+        let executed = commands.withLock { $0 }
+        #expect(executed.first == ContainerRuntimeMaintenance.runningBuildsCommand)
+        #expect(executed[1] == VMResourceSampler.guestDiskStatusCommand)
+        #expect(executed.filter { $0.contains("prune") }.count == 5)
         #expect(await maintenance.reconcile(resources: lowDisk) == nil)
+    }
+
+    @Test(arguments: ["running", "unavailable", "throws", "recovered"])
+    func earlyCleanupDefersWithoutChangingScheduledResults(reason: String) async throws {
+        struct ActivityUnavailable: Error {}
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
+        let commands = Mutex<[[String]]>([])
+        let busy = Mutex(true)
+        let freeBlocks = Mutex(500_000)
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            commands.withLock { $0.append(command) }
+            if command == ContainerRuntimeMaintenance.runningBuildsCommand {
+                if reason == "throws", busy.withLock({ $0 }) { throw ActivityUnavailable() }
+                return SmolVMCommandResult(
+                    standardOutput: reason == "running" && busy.withLock({ $0 }) ? "build-in-progress\n" : "",
+                    standardError: "", exitCode: reason == "unavailable" && busy.withLock({ $0 }) ? 1 : 0)
+            }
+            return SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 \(freeBlocks.withLock { $0 }) 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, now: { clock.withLock { $0 } }, log: { _ in })
+        let first = try #require(await maintenance.reconcile())
+        await first.value
+        let previous = await maintenance.snapshot()
+        commands.withLock { $0 = [] }
+        // A fresh reading just above 2% must defer even though it is still below 5%.
+        freeBlocks.withLock { $0 = reason == "recovered" ? 104_858 : 40_000 }
+        clock.withLock { $0.addTimeInterval(60) }
+        let deferred = try #require(await maintenance.reconcile(resources: diskResources(available: 1)))
+        await deferred.value
+        #expect(commands.withLock { !$0.contains { $0.contains("prune") } })
+        let snapshot = await maintenance.snapshot()
+        #expect(snapshot.completedAt == previous.completedAt)
+        #expect(snapshot.lastAttemptAt == previous.lastAttemptAt)
+        #expect(snapshot.results == previous.results)
+        #expect(snapshot.nextRunAt == previous.nextRunAt)
+        #expect(await maintenance.reconcile(resources: diskResources(available: 1)) == nil)
+        // Build completion is reconsidered after one minute, without moving the normal deadline.
+        busy.withLock { $0 = false }
+        clock.withLock { $0.addTimeInterval(60) }
+        let rechecked = try #require(await maintenance.reconcile(resources: diskResources(available: 1)))
+        await rechecked.value
+        #expect(commands.withLock { $0.filter { $0 == ContainerRuntimeMaintenance.runningBuildsCommand }.count } == 2)
+        #expect(commands.withLock { $0.filter { $0.contains("prune") }.count } == (reason == "recovered" ? 0 : 5))
+    }
+
+    @Test func recoveredDiskRearmsTheWarningAndInvalidSamplesDoNotTriggerCleanup() async throws {
+        let stateURL = try workspaceStateURL()
+        defer { try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent()) }
+        let maintenance = ContainerRuntimeMaintenance(stateURL: stateURL, execute: { command in
+            SmolVMCommandResult(standardOutput: command == VMResourceSampler.guestDiskStatusCommand
+                ? "4096 5242880 500000 0 0" : "Total:\t0B", standardError: "", exitCode: 0)
+        }, log: { _ in })
+        let first = try #require(await maintenance.reconcile())
+        await first.value
+        #expect(await maintenance.reconcile(resources: diskResources(available: 4)) == nil)
+        let warning = try #require((await maintenance.snapshot()).cachePressureWarning)
+        #expect(await maintenance.reconcile(resources: diskResources(available: 0, total: 0)) == nil)
+        #expect(await maintenance.reconcile(resources: diskResources(available: 101)) == nil)
+        #expect((await maintenance.snapshot()).cachePressureWarning?.id == warning.id)
+        #expect(await maintenance.reconcile(resources: diskResources(available: 5)) == nil)
+        #expect(await maintenance.reconcile(resources: diskResources(available: 4)) == nil)
+        #expect((await maintenance.snapshot()).cachePressureWarning?.id != warning.id)
     }
 
     @Test func manualCleanupBypassesScheduleAndPersistsResults() async throws {

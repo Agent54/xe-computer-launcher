@@ -376,7 +376,7 @@ Deno.test('browser app requests show the runtime loader until Compose and the VM
       assert.match(html, /<h1>Container runtime<\/h1>/);
       assert.match(html, /Starting container runtime…/);
       assert.match(html, /--background: #000000/);
-      assert.match(html, /http-equiv="refresh" content="2"/);
+      assert.match(html, /id="startup-cancel" type="button">Cancel<\/button>/);
     }
     for (const accept of ['text/html', 'application/json']) {
       const head = await request({ method: 'HEAD', headers: { Accept: accept } });
@@ -410,9 +410,9 @@ Deno.test('browser app requests show the runtime loader until Compose and the VM
       assert.match(html, /VM &lt;failed&gt; &amp; &quot;retry&quot;/);
       assert.doesNotMatch(html, /VM <failed>/);
       if (['failed', 'stopped'].includes(phase)) {
-        assert.doesNotMatch(html, /http-equiv="refresh"/);
+        assert.doesNotMatch(html, /<script nonce=/);
         assert.match(html, /Try again/);
-      } else assert.match(html, /http-equiv="refresh" content="2"/);
+      } else assert.match(html, /id="startup-cancel" type="button">Cancel<\/button>/);
       assert.equal((await (await request({ headers: { Accept: 'application/json' } })).json()).error, 'container_runtime_oom');
     }
   });
@@ -742,7 +742,7 @@ Deno.test('application access starts exactly the selected stopped container', as
         assert.match(html, /<h1>sleeping<\/h1>/);
         assert.match(html, /Starting…/);
         assert.match(html, /--background: #000000/);
-        assert.match(html, /http-equiv="refresh" content="2"/);
+        assert.match(html, /id="startup-cancel" type="button">Cancel<\/button>/);
       }
       assert.deepEqual(starts, [{ path: '/v1.24/start/startup-test/container',
         body: { container: 'sleeping-1', path: '/stacks/startup-test/compose.yaml' } }]);
@@ -794,7 +794,7 @@ Deno.test('application access starts exactly the selected stopped container', as
       const html = await response.text();
       assert.equal(response.status, 503);
       assert.match(html, /Compose returned HTTP 500/);
-      assert.doesNotMatch(html, /http-equiv="refresh"/);
+      assert.doesNotMatch(html, /<script nonce=/);
       assert.equal(starts.length, 3);
       startStatus = 200;
       now += 11_000;
@@ -1001,7 +1001,7 @@ Deno.test('startup errors reach the loader and API safely', async () => {
       assert.equal(response.status, 503);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       const html = await response.text();
-      assert.doesNotMatch(html, /http-equiv="refresh"/);
+      assert.doesNotMatch(html, /<script nonce=/);
       if (index === 0) {
         assert.match(html, /No such image: &lt;agenda-agenda&gt; &amp; &quot;latest&quot;/);
         assert.doesNotMatch(html, /<agenda-agenda>/);
@@ -1039,7 +1039,7 @@ Deno.test('apps wait for runtime readiness, while existing containers need no ro
       const html = await response.text();
       assert.match(html, /<h1>agenda<\/h1>/);
       assert.match(html, /Starting container runtime…/);
-      assert.match(html, /http-equiv="refresh" content="2"/);
+      assert.match(html, /id="startup-cancel" type="button">Cancel<\/button>/);
       assert.equal(starts, 0);
     }
 

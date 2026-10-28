@@ -67,12 +67,14 @@ export function isApplicationStartupResponse(response) {
   return startupResponses.has(response);
 }
 
-export function applicationStarting(request, service, failed = false, startingMessage = 'Starting…') {
+/** @param {boolean | string} [failed] Error details, or false while waiting. */
+export function applicationStarting(request, service, failed = false,
+  startingMessage = service.state === 'restarting' ? 'Restarting…' : 'Starting…') {
   const message = failed ? typeof failed === 'string' ? failed
     : 'Could not start this app. Try again or check its logs in Compose.' : startingMessage;
   const response = startupResponse(request, {
     name: service.service, message, failed: Boolean(failed),
-    payload: { app: service.service, state: failed ? 'failed' : 'starting', message },
+    payload: { app: service.service, state: failed ? 'failed' : service.state === 'restarting' ? 'restarting' : 'starting', message },
   });
   startupResponses.add(response);
   return response;

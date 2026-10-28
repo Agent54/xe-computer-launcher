@@ -21,10 +21,65 @@ struct ContainerRuntimeWarningsTests {
             occurredAt: date, memoryLimitBytes: 4 << 30, restartedAt: date
         )
         snapshot.cachePressureWarning = .init(
-            id: "cache-1", message: "Below 5% free disk; cleanup included cache younger than 32 hours.",
+            id: "cache-1", message: "Below 5% free disk; the next scheduled cleanup may include cache younger than 32 hours.",
             occurredAt: date
         )
         return snapshot
+    }
+
+    @Test func automaticDialogsPresentEachEventOnceAndKeepNewEventsPending() throws {
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in })
+        var current = history()
+        warnings.update(current)
+        let oom = try #require(warnings.nextAutomaticWarning)
+        #expect(oom.kind == .outOfMemory)
+        warnings.didPresent(oom)
+        // Repeated status updates while a dialog is open must not queue it again.
+        warnings.update(current)
+        let disk = try #require(warnings.nextAutomaticWarning)
+        #expect(disk.kind == .cacheCleanup)
+        warnings.didPresent(disk)
+        warnings.update(current)
+        #expect(warnings.nextAutomaticWarning == nil)
+        #expect(warnings.unignoredCount == 2)
+        current.lastIncident = .init(id: "oom-2", reason: "oom", message: "Another OOM",
+            occurredAt: Date(), memoryLimitBytes: 4 << 30)
+        warnings.update(current)
+        #expect(warnings.nextAutomaticWarning?.id == "oom-2")
+        // Completing the older dialog must not suppress the new event.
+        warnings.didPresent(oom)
+        #expect(warnings.nextAutomaticWarning?.id == "oom-2")
+        let nextOOM = try #require(warnings.nextAutomaticWarning)
+        warnings.didPresent(nextOOM)
+        warnings.didPresent(oom)
+        #expect(warnings.nextAutomaticWarning == nil)
+        // Dismissal keeps the tray indicator and history until explicitly ignored.
+        #expect(warnings.unignoredCount == 2)
+        #expect(warnings.warnings.count == 2)
+    }
+
+    @Test func automaticDialogsSkipIgnoredHistoryAndRecoveredPressure() throws {
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        warnings.update(history())
+        for warning in warnings.warnings { warnings.ignore(warning) }
+        let relaunched = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        relaunched.update(history())
+        #expect(relaunched.nextAutomaticWarning == nil)
+        #expect(relaunched.warnings.count == 2)
+        relaunched.update(snapshot(available: 5))
+        let pressure = try #require(relaunched.nextAutomaticWarning)
+        relaunched.didPresent(pressure)
+        relaunched.update(snapshot(available: 4))
+        #expect(relaunched.nextAutomaticWarning == nil)
+        relaunched.update(snapshot(available: 50))
+        #expect(relaunched.nextAutomaticWarning == nil)
+        relaunched.update(snapshot(available: 5))
+        #expect(relaunched.nextAutomaticWarning?.kind == .memoryPressure)
+        #expect(relaunched.nextAutomaticWarning?.id != pressure.id)
+        // Recovery while another dialog is showing removes the pending warning.
+        relaunched.update(snapshot(available: 50))
+        #expect(relaunched.nextAutomaticWarning == nil)
     }
 
     @Test func ignoredHistoryCanBeReopenedAfterRelaunchAndNewIncidentsWarnAgain() throws {
@@ -85,10 +140,13 @@ struct ContainerRuntimeWarningsTests {
             let alert = ContainerRuntimeWarnings.alert(for: warning)
             #expect(alert.alertStyle == .warning)
             #expect(alert.messageText == warning.title)
-            #expect(alert.buttons.count == 2)
+            #expect(alert.buttons.count == 3)
             #expect(alert.buttons[1].title == "Ignore")
-            #expect(alert.buttons[1].keyEquivalent == "\u{1b}")
+            #expect(alert.buttons[1].keyEquivalent != "\u{1b}")
+            #expect(alert.buttons[2].title == "Dismiss")
+            #expect(alert.buttons[2].keyEquivalent == "\u{1b}")
             if warning.kind == .cacheCleanup {
+                #expect(warning.title == "VM Disk Space Is Low")
                 #expect(warning.resource == .disk)
                 #expect(alert.buttons[0].title == "Increase Disk Size…")
                 #expect(alert.informativeText.contains("younger than 32 hours"))
@@ -144,6 +202,8 @@ struct ContainerRuntimeWarningsTests {
         #expect(!alert.buttons[0].isEnabled)
         #expect(alert.buttons[1].title == "Ignore")
         #expect(alert.buttons[1].isEnabled)
+        #expect(alert.buttons[2].title == "Dismiss")
+        #expect(alert.buttons[2].isEnabled)
         let label = try #require(alert.accessoryView as? NSTextField)
         #expect(label.textColor == NSColor.systemRed)
         #expect(label.stringValue.contains("4 GiB"))

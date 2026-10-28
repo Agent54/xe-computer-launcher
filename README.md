@@ -182,21 +182,31 @@ show less than 5% free space, separate passes remove unused cache older than
 8 hours, then 1 hour, then any age, stopping as soon as 5% is free. Active build
 cache remains protected by Docker. If space remains low, the cleanup result
 explains that more disk space or manual image/volume cleanup is needed. The existing
-one-minute filesystem samples trigger earlier cleanup below 5% free, with at
-most one attempt per minute while space stays low. The first healthy
+one-minute filesystem samples show a warning below 5% free without starting
+cleanup. Younger cache is considered during the next normal cleanup if space
+is still low. Early cleanup is allowed only below 2% free, after the default
+builder reports no running builds and a fresh filesystem check confirms the
+critical shortage. Failed build-activity checks defer early cleanup. Checks
+retry at most once per minute without moving the normal cleanup deadline.
+The first healthy
 startup runs cleanup; subsequent attempts are
 recorded in `smol/maintenance.json`, so restarting the app does not reset the
 interval. Missed runs resume when Docker is healthy, without waking a stopped
 VM. Shutdown and VM recovery cancel an active cleanup. Results are logged under
 `maintenance`.
 
-When the 5% reserve triggers cleanup of younger cache, Compose UI shows a separate
-warning that builds may need to rebuild those layers. The warning is recorded
-before the first younger-cache pass, survives later cleanup and launcher relaunch,
-and stays visible until dismissed. A new pressure-cleanup event appears again.
+When free disk space falls below 5%, Compose UI shows a separate warning explaining
+the scheduled and emergency cleanup policies and that builds may need to rebuild
+removed layers. The warning is recorded when pressure is observed, survives later
+cleanup and launcher relaunch, and stays visible until dismissed. Continued pressure
+keeps the same warning; a new episode after disk space recovers warns again.
 
 The launcher's normal menu also exposes **Warnings**, with a menu-bar warning
-indicator for unignored events. Memory pressure and OOM restart dialogs offer
+indicator for unignored events. New resource warnings also open a dialog
+automatically, one at a time and once per event during a launcher run. Ignored
+events stay suppressed across relaunches; their dialogs can still be reopened
+from the menu. **Dismiss** (or Escape) closes the dialog while keeping the tray
+warning indicator and menu entry active. Memory pressure and OOM restart dialogs offer
 **Increase Memory…**; younger-cache cleanup offers **Increase Disk Size…**.
 Confirming **Increase and Restart VM** saves the new limit and restarts only
 SmolVM. Manual resource settings use **Save and Restart VM**. The supervisor

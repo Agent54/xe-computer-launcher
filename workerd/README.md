@@ -45,8 +45,12 @@ same reader. CDP is available without the container VM.
 directions, along with the connection ID and URL. It is currently a no-op:
 IWA/controlled-frame rewriting, agent permissions and audit logging are not yet
 implemented. Native CDP clients currently have full browser access.
-Inspector links use Chromium's matching hosted frontend, which requires network
-access; their CDP WebSocket still goes through local workerd.
+Inspector links load the frontend through local workerd at
+`/devtools-api/frontend/serve_rev/@<revision>/inspector.html`. The revision comes
+from the running Helium's `Browser.getVersion`, so the UI follows browser updates.
+Workerd fetches the matching assets from Chromium's hosted frontend (network
+access required) and adds only its own WSS origin to the frontend's CSP, including
+the HTML meta policy. Assets, inspector UI and CDP use the same local origin.
 
 ## Port routes
 
@@ -174,9 +178,14 @@ Opening an uncreated app or one backed by a created, stopped, or exited containe
 loading page with its service name and “Starting…”. The host calls Compose's
 `POST /v1.24/start/{project}/container` endpoint with the exact container ID and
 config path. Other replicas and services stay stopped. Concurrent requests share
-the same start operation. The page retries its original URL every two seconds,
-including through the certificate-covered `.app.localhost` HTTPS aliases, and
-keeps showing the loader during connection failures while the app starts.
+the same start operation. The page shows “Restarting…” when Compose reports a
+restart loop. It retries its original URL every two seconds until Cancel is clicked;
+Cancel clears the page's reload timer and stops further requests from that page.
+Reloading the page manually resumes normal startup on access. These controls also
+apply to runtime recovery placeholders. The existing JSON response reports
+`state: "restarting"` for a container in a restart loop. Retries also work through
+the certificate-covered `.app.localhost` HTTPS aliases. The loader remains visible
+during connection failures while the app starts.
 Start failures show the returned Compose error and a retry link; the same error
 is logged by Workerd. API requests receive that error in a retryable JSON 503 instead
 of an HTML page. Apps without containers are discovered through Compose's project

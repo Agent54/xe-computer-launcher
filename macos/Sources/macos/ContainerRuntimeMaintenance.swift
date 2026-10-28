@@ -34,6 +34,11 @@ actor ContainerRuntimeMaintenance {
     // Try older unused cache first, checking cheap filesystem counters between passes.
     static let buildCachePressureAgeHours = [8, 1, 0]
     static let buildCacheMinimumFreeDiskPercent = 5
+    static let emergencyFreeDiskPercent = 2
+    static let runningBuildsCommand = [
+        "docker", "buildx", "history", "ls", "--builder", "default",
+        "--filter", "status=running", "--format", "{{.Ref}}",
+    ]
     static let cleanupInterval: TimeInterval = 4 * 60 * 60
     static let pressureRetryInterval: TimeInterval = 60
 
@@ -48,8 +53,10 @@ actor ContainerRuntimeMaintenance {
         }
     }
 
-    static func buildCacheMinimumFreeBytes(diskTotalBytes: UInt64) -> UInt64 {
-        let percent = UInt64(buildCacheMinimumFreeDiskPercent)
+    static func buildCacheMinimumFreeBytes(
+        diskTotalBytes: UInt64, percent: Int = buildCacheMinimumFreeDiskPercent
+    ) -> UInt64 {
+        let percent = UInt64(percent)
         // Round up without multiplying the full capacity, which could overflow.
         return diskTotalBytes / 100 * percent
             + (diskTotalBytes % 100 * percent + 99) / 100
@@ -68,10 +75,11 @@ actor ContainerRuntimeMaintenance {
     typealias Log = @Sendable (String) -> Void
 
     private struct Record: Codable {
-        let lastImagePruneAttemptAt: Date
+        let lastImagePruneAttemptAt: Date?
         var completedAt: Date?
         var results: [StepResult]?
         var cachePressureWarning: CachePressureWarning?
+        var diskPressureActive: Bool?
     }
 
     private let stateURL: URL
@@ -83,6 +91,8 @@ actor ContainerRuntimeMaintenance {
     private var completedAt: Date?
     private var results: [StepResult] = []
     private var cachePressureWarning: CachePressureWarning?
+    private var diskPressureActive = false
+    private var lastPressureCheckAt: Date?
     private var cleanupTask: Task<Void, Never>?
     private var isPausing = false
 
@@ -102,24 +112,27 @@ actor ContainerRuntimeMaintenance {
     @discardableResult
     func reconcile(force: Bool = false, resources: VMResourceSnapshot? = nil) -> Task<Void, Never>? {
         guard !isPausing, !Task.isCancelled else { return nil }
-        if let cleanupTask { return force ? cleanupTask : nil }
         loadRecordIfNeeded()
-        if !force, let lastImagePruneAttemptAt {
-            let underPressure: Bool
-            if let total = resources?.diskTotalBytes, total > 0,
-               let available = resources?.diskAvailableBytes, available <= total {
-                underPressure = available < Self.buildCacheMinimumFreeBytes(diskTotalBytes: total)
-            } else {
-                underPressure = false
-            }
-            let interval = underPressure ? Self.pressureRetryInterval : Self.cleanupInterval
-            if now().timeIntervalSince(lastImagePruneAttemptAt) < interval { return nil }
+        var emergency = false
+        if let total = resources?.diskTotalBytes, total > 0,
+           let available = resources?.diskAvailableBytes, available <= total {
+            observeDiskPressure(available < Self.buildCacheMinimumFreeBytes(diskTotalBytes: total))
+            emergency = available < Self.buildCacheMinimumFreeBytes(
+                diskTotalBytes: total, percent: Self.emergencyFreeDiskPercent
+            )
         }
-        completedAt = nil
-        results = []
-        lastImagePruneAttemptAt = now()
-        saveRecord()
-        let task = Task { await runCleanup() }
+        if let cleanupTask { return force ? cleanupTask : nil }
+        var requiresIdleBuilder = false
+        if !force, let lastImagePruneAttemptAt {
+            if now().timeIntervalSince(lastImagePruneAttemptAt) < Self.cleanupInterval {
+                guard emergency,
+                      now().timeIntervalSince(lastPressureCheckAt ?? lastImagePruneAttemptAt)
+                        >= Self.pressureRetryInterval else { return nil }
+                requiresIdleBuilder = true
+                lastPressureCheckAt = now()
+            }
+        }
+        let task = Task { await runCleanup(requiresIdleBuilder: requiresIdleBuilder) }
         cleanupTask = task
         return task
     }
@@ -154,6 +167,7 @@ actor ContainerRuntimeMaintenance {
             completedAt = record.completedAt
             results = record.results ?? []
             cachePressureWarning = record.cachePressureWarning
+            diskPressureActive = record.diskPressureActive ?? false
         } catch CocoaError.fileReadNoSuchFile {
             // The first healthy startup is the first cleanup attempt.
         } catch {
@@ -162,7 +176,6 @@ actor ContainerRuntimeMaintenance {
     }
 
     private func saveRecord() {
-        guard let lastImagePruneAttemptAt else { return }
         do {
             try FileManager.default.createDirectory(
                 at: stateURL.deletingLastPathComponent(),
@@ -173,7 +186,8 @@ actor ContainerRuntimeMaintenance {
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(Record(
                 lastImagePruneAttemptAt: lastImagePruneAttemptAt,
-                completedAt: completedAt, results: results, cachePressureWarning: cachePressureWarning
+                completedAt: completedAt, results: results, cachePressureWarning: cachePressureWarning,
+                diskPressureActive: diskPressureActive
             ))
             try data.write(to: stateURL, options: .atomic)
         } catch {
@@ -181,9 +195,32 @@ actor ContainerRuntimeMaintenance {
         }
     }
 
-    private func runCleanup() async {
+    private func runCleanup(requiresIdleBuilder: Bool) async {
         defer { cleanupTask = nil }
         guard !Task.isCancelled else { return }
+        if requiresIdleBuilder {
+            do {
+                // Check activity before any pruning; unknown activity defers the early run.
+                let activity = try await execute(Self.runningBuildsCommand)
+                try Task.checkCancellation()
+                guard activity.exitCode == 0,
+                      activity.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    log("Emergency cleanup deferred: a build is running or build activity is unavailable")
+                    return
+                }
+                guard try await diskIsUnderPressure(percent: Self.emergencyFreeDiskPercent) else { return }
+            } catch is CancellationError {
+                return
+            } catch {
+                log("Emergency cleanup deferred: " + error.localizedDescription)
+                return
+            }
+        }
+        completedAt = nil
+        results = []
+        lastImagePruneAttemptAt = now()
+        lastPressureCheckAt = lastImagePruneAttemptAt
+        saveRecord()
         for step in CleanupStep.allCases {
             var resultName = step.name
             do {
@@ -233,7 +270,7 @@ actor ContainerRuntimeMaintenance {
         saveRecord()
     }
 
-    private func diskIsUnderPressure() async throws -> Bool {
+    private func diskIsUnderPressure(percent: Int = buildCacheMinimumFreeDiskPercent) async throws -> Bool {
         try Task.checkCancellation()
         let status = try await execute(VMResourceSampler.guestDiskStatusCommand)
         try Task.checkCancellation()
@@ -243,23 +280,28 @@ actor ContainerRuntimeMaintenance {
                 NSLocalizedDescriptionKey: "Could not read Docker filesystem capacity; skipped cleanup of younger cache.",
             ])
         }
-        return disk.availableBytes < Self.buildCacheMinimumFreeBytes(diskTotalBytes: disk.totalBytes)
+        observeDiskPressure(disk.availableBytes < Self.buildCacheMinimumFreeBytes(diskTotalBytes: disk.totalBytes))
+        return disk.availableBytes < Self.buildCacheMinimumFreeBytes(diskTotalBytes: disk.totalBytes, percent: percent)
+    }
+
+    private func observeDiskPressure(_ underPressure: Bool) {
+        guard diskPressureActive != underPressure else { return }
+        diskPressureActive = underPressure
+        if underPressure {
+            let warning = CachePressureWarning(
+                id: UUID().uuidString,
+                message: "VM free disk space fell below 5%. The next scheduled cleanup may include unused build cache younger than 32 hours if space is still low. Early cleanup only starts below 2% free space when no build is running. Future builds may need to rebuild removed layers. Increase the VM disk size in Xe Launcher to avoid this.",
+                occurredAt: now()
+            )
+            cachePressureWarning = warning
+            log("Warning: " + warning.message)
+        }
+        saveRecord()
     }
 
     private func cleanUnderDiskPressure() async throws {
-        for (index, age) in Self.buildCachePressureAgeHours.enumerated() {
+        for age in Self.buildCachePressureAgeHours {
             guard try await diskIsUnderPressure() else { return }
-            if index == 0 {
-                let warning = CachePressureWarning(
-                    id: UUID().uuidString,
-                    message: "VM free disk space fell below 5%, forcing cleanup to include unused build cache younger than 32 hours. Future builds may need to rebuild those layers. Increase the VM disk size in Xe Launcher to avoid this.",
-                    occurredAt: now()
-                )
-                cachePressureWarning = warning
-                // Persist before deleting younger cache, including if shutdown interrupts the pass.
-                saveRecord()
-                log("Warning: " + warning.message)
-            }
             let name = age == 0 ? "Unused build cache cleanup (low disk space)"
                 : "Build cache older than \(age) hours cleanup (low disk space)"
             try await runPrune(name: name, command: Self.buildCachePruneCommand(minimumAgeHours: age))

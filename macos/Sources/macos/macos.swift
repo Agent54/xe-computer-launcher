@@ -1752,16 +1752,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             button.setAccessibilityLabel(critical ? "Xe Launcher, host resource warning"
                 : count > 0 ? "Xe Launcher, \(count) runtime warnings" : "Xe Launcher status menu")
         }
+        presentNextRuntimeWarning()
+    }
+
+    private func presentNextRuntimeWarning() {
+        guard let warning = runtimeWarnings.nextAutomaticWarning else { return }
+        showRuntimeWarning(warning, automatically: true)
     }
 
     @objc private func showRuntimeWarningAction(_ sender: NSMenuItem) {
+        guard let warning = sender.representedObject as? ContainerRuntimeWarnings.Warning else { return }
+        showRuntimeWarning(warning)
+    }
+
+    private func showRuntimeWarning(_ requestedWarning: ContainerRuntimeWarnings.Warning, automatically: Bool = false) {
         guard !isPreparingForTermination, !isShowingRuntimeWarning,
-              let warning = sender.representedObject as? ContainerRuntimeWarnings.Warning else { return }
+              containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
         isShowingRuntimeWarning = true
         Task { @MainActor in
-            defer { isShowingRuntimeWarning = false }
+            defer {
+                isShowingRuntimeWarning = false
+                presentNextRuntimeWarning()
+            }
             let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
-            guard !isPreparingForTermination else { return }
+            guard !isPreparingForTermination, containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
+            // The event may have recovered, been ignored, or been superseded
+            // while host sampling was suspended. Present the current details.
+            let warning: ContainerRuntimeWarnings.Warning
+            if automatically {
+                guard let pending = runtimeWarnings.nextAutomaticWarning else { return }
+                warning = pending
+            } else {
+                warning = runtimeWarnings.warnings.first {
+                    $0.kind == requestedWarning.kind && $0.id == requestedWarning.id
+                } ?? requestedWarning
+            }
             let vm = ContainerRuntimePresentation.shared.snapshot.vmResources
             let limits = ContainerVMResources(settings: ExternalState.shared.settings.rawData)
             var title: String?
@@ -1789,6 +1814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             NSApp.activate(ignoringOtherApps: true)
             let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: title, blockedReason: blocked,
                 hostWarnings: HostResourcePolicy.warnings(for: host))
+            runtimeWarnings.didPresent(warning)
             switch alert.runModal() {
             case .alertFirstButtonReturn:
                 if let resource = warning.resource { changeContainerVMResource(resource, acknowledging: warning) }

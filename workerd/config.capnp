@@ -25,6 +25,7 @@ const config :Workerd.Config = (
         (name = "app-gateway.js", esModule = embed "app-gateway.js"),
         (name = "cdp.js", esModule = embed "cdp.js"),
         (name = "cdp-payload.js", esModule = embed "cdp-payload.js"),
+        (name = "cdp-frontend.js", esModule = embed "cdp-frontend.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),
         (name = "app-startup.js", esModule = embed "app-startup.js"),
         (name = "startup-response.js", esModule = embed "startup-response.js"),
@@ -41,6 +42,7 @@ const config :Workerd.Config = (
         (name = "COMPOSE", service = "compose"),
         (name = "RUNTIME_STATUS", service = "status"),
         (name = "CDP", service = "cdp"),
+        (name = "DEVTOOLS_FRONTEND", service = "devtools-frontend"),
       ],
     )),
     (name = "management", worker = (
@@ -109,6 +111,11 @@ const config :Workerd.Config = (
     (name = "maintenance", external = (http = ())),
     (name = "ui-tls", external = (tcp = ())),
     (name = "cdp", external = (tcp = ())),
+    (name = "devtools-frontend", external = (
+      address = "chrome-devtools-frontend.appspot.com:443",
+      https = (options = (), tlsOptions = (trustBrowserCas = true),
+        certificateHost = "chrome-devtools-frontend.appspot.com"),
+    )),
     (name = "deny", network = (allow = [])),
   ],
   sockets = [

@@ -4,6 +4,23 @@ function escapeHTML(value) {
   })[char]);
 }
 
+const retryScript = `
+  let cancelled = false;
+  const timer = setTimeout(() => {
+    if (!cancelled) window.location.reload();
+  }, 2000);
+  document.getElementById('startup-cancel').addEventListener('click', () => {
+    cancelled = true;
+    clearTimeout(timer);
+    document.getElementById('startup-main').setAttribute('aria-busy', 'false');
+    document.getElementById('startup-spinner').hidden = true;
+    document.getElementById('startup-status').textContent = 'Automatic retry cancelled. Reload this page to try again.';
+    const button = document.getElementById('startup-cancel');
+    button.disabled = true;
+    button.textContent = 'Cancelled';
+  });
+`;
+
 export function startupResponse(request, { name, message, failed = false, payload, status = 503 }) {
   const headers = {
     'Cache-Control': 'no-store',
@@ -19,16 +36,17 @@ export function startupResponse(request, { name, message, failed = false, payloa
       status, headers: { ...headers, 'Content-Type': 'application/json' },
     });
   }
+  const nonce = crypto.randomUUID();
+  const restarting = !failed && (payload?.state === 'restarting' || payload?.runtime?.phase === 'restarting');
   headers['Content-Type'] = 'text/html; charset=utf-8';
-  headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+  headers['Content-Security-Policy'] = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
   const heading = escapeHTML(name);
   return new Response(request.method === 'HEAD' ? null : `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  ${failed ? '' : '<meta http-equiv="refresh" content="2">'}
-  <title>${heading} · ${failed ? 'Unable to start' : 'Starting'}</title>
+  <title>${heading} · ${failed ? 'Unable to start' : restarting ? 'Restarting' : 'Starting'}</title>
   <style>
     :root { color-scheme: dark; --background: #000000; --text: #f5f5f5; --muted: #a3a3a3; --track: #262626; }
     * { box-sizing: border-box; }
@@ -38,18 +56,22 @@ export function startupResponse(request, { name, message, failed = false, payloa
     h1 { margin: 0; font-size: clamp(24px, 5vw, 32px); font-weight: 500; letter-spacing: -.03em; overflow-wrap: anywhere; }
     p { margin: 12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
     a { display: inline-block; margin-top: 24px; color: var(--text); text-underline-offset: 4px; }
-    a:focus-visible { outline: 2px solid var(--text); outline-offset: 6px; }
+    button { margin-top: 24px; padding: 8px 18px; border: 1px solid var(--track); border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--track); }
+    button:disabled { color: var(--muted); cursor: default; }
+    a:focus-visible, button:focus-visible { outline: 2px solid var(--text); outline-offset: 6px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .loader { animation: none; } }
   </style>
 </head>
 <body>
-  <main aria-busy="${!failed}" aria-live="polite">
-    ${failed ? '' : '<div class="loader" aria-hidden="true"></div>'}
+  <main id="startup-main" aria-busy="${!failed}" aria-live="polite">
+    ${failed ? '' : '<div id="startup-spinner" class="loader" aria-hidden="true"></div>'}
     <h1>${heading}</h1>
-    <p role="status">${escapeHTML(message)}</p>
-    ${failed ? '<a href="">Try again</a>' : ''}
+    <p id="startup-status" role="status">${escapeHTML(message)}</p>
+    ${failed ? '<a href="">Try again</a>' : '<button id="startup-cancel" type="button">Cancel</button>'}
   </main>
+  ${failed ? '' : `<script nonce="${nonce}">${retryScript}</script>`}
 </body>
 </html>`, { status, headers });
 }

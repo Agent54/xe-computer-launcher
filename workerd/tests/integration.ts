@@ -8,6 +8,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { createConnection } from 'node:net';
 import { connect as connectTLS } from 'node:tls';
 import { once } from 'node:events';
+import { gzipSync } from 'node:zlib';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -238,11 +239,16 @@ const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req =>
 });
 const appPort = app.addr.port;
 
-async function tlsRequest(hostname: string, publicPort = false, path = '/', origin?: string): Promise<{ status: number; body: string }> {
+async function tlsRequest(hostname: string, publicPort = false, path = '/', origin?: string) {
+  const { status, body } = await tlsResponse(hostname, publicPort, path, origin);
+  return { status, body };
+}
+
+async function tlsResponse(hostname: string, publicPort = false, path = '/', origin?: string): Promise<{ status: number; body: string; headers: Headers }> {
   // Use the URL hostname for TLS SNI as well as HTTP Host. Deno's node:https
   // compatibility client can omit SNI when connecting to a loopback IP.
   const result = await new Deno.Command('curl', { args: [
-    '--disable', '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5',
+    '--disable', '--noproxy', '*', '--silent', '--show-error', '--insecure', '--max-time', '5', '--include',
     '--resolve', `${hostname}:${tlsPort}:127.0.0.1`,
     '--header', `Host: ${publicPort ? `${hostname}:${tlsPort}` : hostname}`,
     ...(origin ? ['--header', `Origin: ${origin}`] : []),
@@ -251,7 +257,14 @@ async function tlsRequest(hostname: string, publicPort = false, path = '/', orig
   assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
   const output = new TextDecoder().decode(result.stdout);
   const separator = output.lastIndexOf('\n');
-  return { status: Number(output.slice(separator + 1)), body: output.slice(0, separator) };
+  const headerEnd = output.indexOf('\r\n\r\n');
+  assert(headerEnd >= 0, 'HTTPS response headers are missing');
+  const headers = new Headers();
+  for (const line of output.slice(0, headerEnd).split('\r\n').slice(1)) {
+    const colon = line.indexOf(':');
+    headers.append(line.slice(0, colon), line.slice(colon + 1).trim());
+  }
+  return { status: Number(output.slice(separator + 1)), body: output.slice(headerEnd + 4, separator), headers };
 }
 
 async function verifyCDPWebSocket(path: string) {
@@ -337,7 +350,7 @@ try {
   const generated = await new Deno.Command('openssl', { args: [
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
     '-keyout', privateKey, '-out', certificate, '-subj', '/CN=web.secure.localhost',
-    '-addext', 'subjectAltName=DNS:web.secure.localhost',
+    '-addext', 'subjectAltName=DNS:web.secure.localhost,DNS:chrome-devtools-frontend.appspot.com',
   ], stdout: 'null', stderr: 'piped' }).output();
   assert.equal(generated.code, 0, new TextDecoder().decode(generated.stderr));
   const uiCertificate = join(root, 'ui.crt');
@@ -348,8 +361,27 @@ try {
     '-addext', 'subjectAltName=DNS:compose-ui.localhost,DNS:*.app.localhost',
   ], stdout: 'null', stderr: 'piped' }).output();
   assert.equal(uiGenerated.code, 0, new TextDecoder().decode(uiGenerated.stderr));
+  const frontendRequests: string[] = [];
+  const frontendPolicy = "default-src 'self' devtools: data:; script-src 'self'; connect-src data: https://chromeuxreport.googleapis.com 'self' devtools: ws://127.0.0.1:*; object-src 'none';";
   const tlsApp = createHttpsServer({ key: await Deno.readTextFile(privateKey),
-    cert: await Deno.readTextFile(certificate) }, (_request, response) => response.end('tls-upstream-ok'));
+    cert: await Deno.readTextFile(certificate) }, (request, response) => {
+      if (request.headers.host !== 'chrome-devtools-frontend.appspot.com') return response.end('tls-upstream-ok');
+      frontendRequests.push(request.url!);
+      response.setHeader('Cache-Control', 'public, max-age=604800');
+      if (request.url === '/serve_rev/@abcdef/inspector.html') {
+        response.setHeader('Content-Type', 'text/html');
+        response.setHeader('Content-Encoding', 'gzip');
+        response.setHeader('Content-Security-Policy', frontendPolicy);
+        response.end(gzipSync(`<html><meta\n http-equiv="Content-Security-Policy"\n content="${frontendPolicy}"><script type="module" src="./entrypoints/inspector/inspector.js"></script></html>`));
+      } else if (request.url === '/serve_rev/@abcdef/entrypoints/inspector/inspector.js') {
+        response.setHeader('Content-Type', 'text/javascript');
+        response.setHeader('Content-Encoding', 'gzip');
+        response.end(gzipSync('export const inspector = true;'));
+      } else {
+        response.writeHead(404);
+        response.end('missing');
+      }
+    });
   await new Promise<void>(resolve => tlsApp.listen(0, '127.0.0.1', resolve));
   securePort = (tlsApp.address() as { port: number }).port;
   try {
@@ -369,6 +401,8 @@ try {
     }
   }
   const configPath = join(root, 'config.capnp');
+  await Deno.writeTextFile(configPath, (await Deno.readTextFile(configPath)).replace(
+    'trustBrowserCas = true', 'trustBrowserCas = true, trustedCertificates = [embed "test.crt"]'));
   const uiSocketPath = join(root, 'ui-https.sock');
   startProcess(binary, ['serve', '--experimental', configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
@@ -382,6 +416,7 @@ try {
     '--external-addr', `docker=unix:${dockerPath}`,
     '--external-addr', `maintenance=unix:${join(root, 'maintenance.sock')}`,
     '--external-addr', `cdp=unix:${cdpPath}`,
+    '--external-addr', `devtools-frontend=127.0.0.1:${securePort}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
   const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
@@ -400,6 +435,25 @@ try {
   assert.equal(cdpTarget.parentId, 'iwa');
   assert.equal(cdpTarget.webSocketDebuggerUrl,
     `wss://compose-ui.localhost:${tlsPort}/devtools-api/devtools/page/controlled-frame`);
+  const inspector = new URL(cdpTarget.devtoolsFrontendUrl);
+  assert.equal(inspector.origin, `https://compose-ui.localhost:${tlsPort}`);
+  assert.equal(inspector.pathname, '/devtools-api/frontend/serve_rev/@abcdef/inspector.html');
+  const frontend = await tlsResponse('compose-ui.localhost', true, inspector.pathname + inspector.search);
+  assert.equal(frontend.status, 200, frontend.body);
+  const expectedPolicy = frontendPolicy.replace('; object-src', ` wss://compose-ui.localhost:${tlsPort}; object-src`);
+  assert.equal(frontend.headers.get('content-security-policy'), expectedPolicy);
+  assert(frontend.body.includes(`content="${expectedPolicy}"`), 'HTML meta CSP must allow the local WSS connection too');
+  assert(frontend.body.includes('src="./entrypoints/inspector/inspector.js"'));
+  const scriptPath = new URL('./entrypoints/inspector/inspector.js', inspector).pathname;
+  const script = await tlsResponse('compose-ui.localhost', true, scriptPath);
+  assert.equal(script.status, 200, script.body);
+  assert.equal(script.headers.get('content-type'), 'text/javascript');
+  assert.equal(script.body, 'export const inspector = true;');
+  assert.equal((await tlsRequest('compose-ui.localhost', true,
+    '/devtools-api/frontend/serve_rev/@abcdef/missing.js')).status, 404);
+  assert.deepEqual(frontendRequests, ['/serve_rev/@abcdef/inspector.html',
+    '/serve_rev/@abcdef/entrypoints/inspector/inspector.js', '/serve_rev/@abcdef/missing.js']);
+  console.log('PASS: matching inspector assets through HTTPS workerd with local WSS allowed in header and meta CSP');
   const cdpVersion = await tlsRequest('compose-ui.localhost', true, '/devtools-api/json/version/');
   assert.equal(cdpVersion.status, 200, cdpVersion.body);
   assert.equal(JSON.parse(cdpVersion.body).Browser, 'Helium/153');
@@ -649,7 +703,7 @@ try {
     assert.equal(loader.headers['cache-control'], 'no-store');
     assert.equal(loader.headers['retry-after'], '2');
     assert(loader.body.toString().includes(message));
-    assert.match(loader.body.toString(), /http-equiv="refresh" content="2"/);
+    assert.match(loader.body.toString(), /id="startup-cancel" type="button">Cancel<\/button>/);
     const tlsLoader = await tlsRequest('web--p32000.app.localhost', true);
     assert.equal(tlsLoader.status, 503);
     assert(tlsLoader.body.includes(message));

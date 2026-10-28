@@ -1,4 +1,5 @@
 import { rewriteCDPPayload } from './cdp-payload.js';
+import { serveCDPFrontend } from './cdp-frontend.js';
 
 export const cdpPrefix = '/devtools-api';
 const maximumMessage = 32 * 1024 * 1024;
@@ -168,10 +169,12 @@ function socketURL(url, path) {
 }
 
 export function inspectorURL(version, webSocketURL) {
-  // Use Chromium's matching hosted frontend; no second local web server is needed.
+  // The running Helium revision selects its matching Chromium frontend.
   const revision = version.revision;
   if (!/^@[a-f0-9]+$/i.test(revision || '')) throw new Error('Browser frontend revision is unavailable');
-  const url = new URL(`https://chrome-devtools-frontend.appspot.com/serve_rev/${revision}/inspector.html`);
+  const url = new URL(webSocketURL);
+  url.protocol = 'https:';
+  url.pathname = `${cdpPrefix}/frontend/serve_rev/${revision}/inspector.html`;
   url.searchParams.set('wss', webSocketURL.replace(/^wss:\/\//, ''));
   return url.href;
 }
@@ -199,6 +202,7 @@ export async function handleCDP(request, env, ctx) {
   if (request.method !== 'GET') return response({ error: 'Method not allowed' }, 405, corsOrigin);
   const path = url.pathname.slice(cdpPrefix.length).replace(/\/$/, '');
   const websocket = request.headers.get('Upgrade')?.toLowerCase() === 'websocket';
+  if (!websocket && path.startsWith('/frontend/')) return serveCDPFrontend(path, url, env);
   const target = /^\/devtools\/page\/([a-zA-Z0-9-]+)$/.exec(path)?.[1];
   if (websocket ? path !== '/devtools/browser' && !target :
       !['/json', '/json/list', '/json/version'].includes(path) && !/^\/json\/(?:activate|close)\/[a-zA-Z0-9-]+$/.test(path)) {

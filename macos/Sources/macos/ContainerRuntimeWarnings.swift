@@ -27,6 +27,7 @@ final class ContainerRuntimeWarnings {
     private var pressureID: String?
     private var pressureBootID: String?
     private var hostEpisodeIDs: [Kind: String] = [:]
+    private var presentedIDs: [Kind: Set<String>] = [:]
     private(set) var warnings: [Warning] = []
 
     init(
@@ -43,6 +44,14 @@ final class ContainerRuntimeWarnings {
     func isIgnored(_ warning: Warning) -> Bool { readIgnored(warning.kind) == warning.id }
 
     func ignore(_ warning: Warning) { saveIgnored(warning.kind, warning.id) }
+
+    /// Keep a dismissed dialog from reopening on every status refresh. New episodes
+    /// have new IDs, while ignored events remain suppressed across launcher runs.
+    var nextAutomaticWarning: Warning? {
+        warnings.first { !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
+    }
+
+    func didPresent(_ warning: Warning) { presentedIDs[warning.kind, default: []].insert(warning.id) }
 
     func update(_ snapshot: ContainerRuntimeSnapshot) {
         var current: [Warning] = []
@@ -88,7 +97,7 @@ final class ContainerRuntimeWarnings {
         }
         if let warning = snapshot.cachePressureWarning {
             current.append(Warning(
-                id: warning.id, kind: .cacheCleanup, title: "Low Disk Space Triggered Younger Cache Cleanup",
+                id: warning.id, kind: .cacheCleanup, title: "VM Disk Space Is Low",
                 message: warning.message, occurredAt: warning.occurredAt
             ))
         }
@@ -110,7 +119,8 @@ final class ContainerRuntimeWarnings {
             let redMessages = hostWarnings.map(\.message) + (blockedReason.map { [$0] } ?? [])
             if !redMessages.isEmpty { alert.accessoryView = redLabel(redMessages.joined(separator: "\n\n")) }
         }
-        alert.addButton(withTitle: "Ignore").keyEquivalent = "\u{1b}"
+        alert.addButton(withTitle: "Ignore")
+        alert.addButton(withTitle: "Dismiss").keyEquivalent = "\u{1b}"
         return alert
     }
 
