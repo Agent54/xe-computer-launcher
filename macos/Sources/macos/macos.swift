@@ -1716,11 +1716,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func renderRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
         guard !isPreparingForTermination else { return }
         runtimeWarnings.update(snapshot)
+        let menuWarnings = runtimeWarnings.menuWarnings
         let count = runtimeWarnings.unignoredCount
-        let critical = runtimeWarnings.hasHostWarning
+        let critical = menuWarnings.contains { $0.isHostWarning }
         runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
-        runtimeWarningsItem?.isEnabled = !runtimeWarnings.warnings.isEmpty
-        if runtimeWarnings.warnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
+        runtimeWarningsItem?.isEnabled = !menuWarnings.isEmpty
+        if menuWarnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
         if let item = runtimeWarningsItem {
             item.attributedTitle = NSAttributedString(string: item.title, attributes: [
                 .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
@@ -1728,7 +1729,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         let submenu = NSMenu()
         submenu.autoenablesItems = false
-        for warning in runtimeWarnings.warnings {
+        for warning in menuWarnings {
             let ignored = runtimeWarnings.isIgnored(warning)
             let item = NSMenuItem(
                 title: warning.title + (ignored ? " (ignored)…" : "…"),
@@ -1741,7 +1742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
             submenu.addItem(item)
         }
-        runtimeWarningsItem?.submenu = runtimeWarnings.warnings.isEmpty ? nil : submenu
+        runtimeWarningsItem?.submenu = menuWarnings.isEmpty ? nil : submenu
         if let button = statusItem?.button {
             button.imagePosition = .imageLeft
             button.attributedTitle = NSAttributedString(string: count > 0 || critical ? " ⚠︎" : "", attributes: [
@@ -1820,6 +1821,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 if let resource = warning.resource { changeContainerVMResource(resource, acknowledging: warning) }
             case .alertSecondButtonReturn:
                 runtimeWarnings.ignore(warning)
+                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
+            case .alertThirdButtonReturn:
+                runtimeWarnings.dismiss(warning)
                 renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
             default:
                 break

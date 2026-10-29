@@ -8,6 +8,7 @@ final class ContainerRuntimeWarnings {
         case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk
 
         var settingKey: String { "runtime_ignored_\(rawValue)_id" }
+        var dismissedSettingKey: String { "runtime_dismissed_\(rawValue)_id" }
     }
 
     struct Warning: Equatable, Identifiable, Sendable {
@@ -24,6 +25,8 @@ final class ContainerRuntimeWarnings {
 
     private let readIgnored: (Kind) -> String?
     private let saveIgnored: (Kind, String) -> Void
+    private let readDismissed: (Kind) -> String?
+    private let saveDismissed: (Kind, String) -> Void
     private var pressureID: String?
     private var pressureBootID: String?
     private var hostEpisodeIDs: [Kind: String] = [:]
@@ -32,23 +35,32 @@ final class ContainerRuntimeWarnings {
 
     init(
         readIgnored: @escaping (Kind) -> String? = { ExternalState.shared.stringSetting($0.settingKey) },
-        saveIgnored: @escaping (Kind, String) -> Void = { ExternalState.shared.setStringSetting($0.settingKey, $1) }
+        saveIgnored: @escaping (Kind, String) -> Void = { ExternalState.shared.setStringSetting($0.settingKey, $1) },
+        readDismissed: @escaping (Kind) -> String? = { ExternalState.shared.stringSetting($0.dismissedSettingKey) },
+        saveDismissed: @escaping (Kind, String) -> Void = { ExternalState.shared.setStringSetting($0.dismissedSettingKey, $1) }
     ) {
         self.readIgnored = readIgnored
         self.saveIgnored = saveIgnored
+        self.readDismissed = readDismissed
+        self.saveDismissed = saveDismissed
     }
 
-    var unignoredCount: Int { warnings.filter { !isIgnored($0) }.count }
+    var menuWarnings: [Warning] { warnings.filter { !isDismissed($0) } }
+    var unignoredCount: Int { menuWarnings.filter { !isIgnored($0) }.count }
     var hasHostWarning: Bool { warnings.contains { $0.isHostWarning } }
 
     func isIgnored(_ warning: Warning) -> Bool { readIgnored(warning.kind) == warning.id }
 
     func ignore(_ warning: Warning) { saveIgnored(warning.kind, warning.id) }
 
-    /// Keep a dismissed dialog from reopening on every status refresh. New episodes
-    /// have new IDs, while ignored events remain suppressed across launcher runs.
+    func isDismissed(_ warning: Warning) -> Bool { readDismissed(warning.kind) == warning.id }
+
+    func dismiss(_ warning: Warning) { saveDismissed(warning.kind, warning.id) }
+
+    /// Keep a presented dialog from reopening on every status refresh. New episodes
+    /// have new IDs; ignored and dismissed events stay suppressed across launcher runs.
     var nextAutomaticWarning: Warning? {
-        warnings.first { !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
+        menuWarnings.first { !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
     }
 
     func didPresent(_ warning: Warning) { presentedIDs[warning.kind, default: []].insert(warning.id) }

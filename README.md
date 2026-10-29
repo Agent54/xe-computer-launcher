@@ -204,17 +204,18 @@ keeps the same warning; a new episode after disk space recovers warns again.
 The launcher's normal menu also exposes **Warnings**, with a menu-bar warning
 indicator for unignored events. New resource warnings also open a dialog
 automatically, one at a time and once per event during a launcher run. Ignored
-events stay suppressed across relaunches; their dialogs can still be reopened
-from the menu. **Dismiss** (or Escape) closes the dialog while keeping the tray
-warning indicator and menu entry active. Memory pressure and OOM restart dialogs offer
+events stay suppressed across relaunches and remain available in the tray menu.
+**Dismiss** (or Escape) immediately removes the event's tray entry and its
+contribution to the warning indicator, including across relaunches.
+Memory pressure and OOM restart dialogs offer
 **Increase Memory…**; younger-cache cleanup offers **Increase Disk Size…**.
 Confirming **Increase and Restart VM** saves the new limit and restarts only
 SmolVM. Manual resource settings use **Save and Restart VM**. The supervisor
 cancels cache cleanup, reapplies the saved limits, and restores guest routing;
 the launcher, browser, and host UI stay running. VM operations are serialized
 with startup and automatic recovery. A failed resize restart offers a retry.
-**Ignore** clears the launcher's indicator for that
-event while keeping its details available in the menu. New events warn again.
+**Ignore** clears the launcher's indicator for that event while keeping its
+details available in the menu. New events warn again.
 The top status line shows the current runtime state; a saved past VM failure
 does not remain in that line after successful startup or recovery.
 
@@ -227,8 +228,8 @@ sparse disk growth, crediting only resident VM RAM and already allocated
 storage blocks. These checks run only when increasing resources in the launcher;
 normal startup and recovery never block on host reserve requirements.
 An unsafe Increase button is disabled with a red explanation in the launcher
-dialog. Live host reserve breaches also remain red in the launcher until the
-resources recover, even if acknowledged. Other apps can consume host resources
+dialog. Live host reserve breaches remain red in the launcher until the
+resources recover or the warning is dismissed, even if ignored. Other apps can consume host resources
 after a check; the launcher samples host usage every 10 seconds.
 
 Build with `COMPOSE_UI_SOURCE_DIR=/absolute/path/to/darc-worker/svelte`

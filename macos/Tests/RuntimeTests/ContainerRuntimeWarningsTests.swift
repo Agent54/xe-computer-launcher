@@ -53,7 +53,7 @@ struct ContainerRuntimeWarningsTests {
         warnings.didPresent(nextOOM)
         warnings.didPresent(oom)
         #expect(warnings.nextAutomaticWarning == nil)
-        // Dismissal keeps the tray indicator and history until explicitly ignored.
+        // Presentation alone keeps the tray indicator and history.
         #expect(warnings.unignoredCount == 2)
         #expect(warnings.warnings.count == 2)
     }
@@ -80,6 +80,44 @@ struct ContainerRuntimeWarningsTests {
         // Recovery while another dialog is showing removes the pending warning.
         relaunched.update(snapshot(available: 50))
         #expect(relaunched.nextAutomaticWarning == nil)
+    }
+
+    @Test func ignoreKeepsTheTrayEntryAndDismissRemovesItImmediatelyAcrossRelaunches() throws {
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
+        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
+            readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
+        var current = history()
+        warnings.update(current)
+        let oom = try #require(warnings.menuWarnings.first { $0.kind == .outOfMemory })
+        warnings.didPresent(oom)
+        #expect(warnings.menuWarnings.contains(oom))
+        warnings.ignore(oom)
+        #expect(warnings.menuWarnings.contains(oom))
+        #expect(warnings.unignoredCount == 1)
+        warnings.dismiss(oom)
+        #expect(!warnings.menuWarnings.contains(oom))
+        #expect(warnings.menuWarnings.count == 1)
+        warnings.update(current)
+        #expect(!warnings.menuWarnings.contains(oom))
+        let disk = try #require(warnings.menuWarnings.first)
+        warnings.dismiss(disk)
+        #expect(warnings.menuWarnings.isEmpty)
+        #expect(warnings.unignoredCount == 0)
+        #expect(warnings.nextAutomaticWarning == nil)
+        let relaunched = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
+            readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
+        relaunched.update(current)
+        #expect(relaunched.menuWarnings.isEmpty)
+        #expect(relaunched.nextAutomaticWarning == nil)
+        current.lastIncident = .init(id: "oom-new", reason: "oom", message: "New incident",
+            occurredAt: Date(), memoryLimitBytes: 4 << 30)
+        warnings.update(current)
+        #expect(warnings.menuWarnings.map(\.id) == ["oom-new"])
+        // Dismissing a stale menu item cannot hide a newer event.
+        warnings.dismiss(oom)
+        #expect(warnings.menuWarnings.map(\.id) == ["oom-new"])
+        #expect(warnings.nextAutomaticWarning?.id == "oom-new")
     }
 
     @Test func ignoredHistoryCanBeReopenedAfterRelaunchAndNewIncidentsWarnAgain() throws {
