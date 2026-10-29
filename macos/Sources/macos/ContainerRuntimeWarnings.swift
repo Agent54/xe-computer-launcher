@@ -59,8 +59,9 @@ final class ContainerRuntimeWarnings {
 
     /// Keep a presented dialog from reopening on every status refresh. New episodes
     /// have new IDs; ignored and dismissed events stay suppressed across launcher runs.
+    /// Host reserve warnings stay in the menu; only VM events open dialogs automatically.
     var nextAutomaticWarning: Warning? {
-        menuWarnings.first { !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
+        menuWarnings.first { !$0.isHostWarning && !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
     }
 
     func didPresent(_ warning: Warning) { presentedIDs[warning.kind, default: []].insert(warning.id) }

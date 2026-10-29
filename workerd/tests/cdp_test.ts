@@ -63,7 +63,7 @@ Deno.test('discovery uses the public HTTPS origin and preserves unmodified targe
   assert.equal(target.parentId, 'iwa');
   assert.equal(target.webSocketDebuggerUrl, 'wss://compose-ui.localhost/devtools-api/devtools/page/target-1');
   assert.equal(new URL(target.devtoolsFrontendUrl).origin, 'https://compose-ui.localhost');
-  assert.equal(new URL(target.devtoolsFrontendUrl).pathname, '/devtools-api/frontend/serve_rev/@abcdef/inspector.html');
+  assert.equal(new URL(target.devtoolsFrontendUrl).pathname, '/devtools-api/frontend/inspector.html');
   assert.equal(new URL(target.devtoolsFrontendUrl).searchParams.get('wss'),
     'compose-ui.localhost/devtools-api/devtools/page/target-1');
   assert.equal(commands.at(-1)?.method, 'Target.detachFromTarget');
@@ -72,18 +72,18 @@ Deno.test('discovery uses the public HTTPS origin and preserves unmodified targe
     'wss://compose-ui.localhost:5194/devtools-api/devtools/browser');
 });
 
-Deno.test('inspector follows the browser revision and HTTPS port; CSP adds only the local WSS origin', () => {
-  const inspector = new URL(inspectorURL({ revision: '@123456' },
+Deno.test('inspector uses the packaged frontend and HTTPS port; CSP adds only the local WSS origin', () => {
+  const inspector = new URL(inspectorURL(
     'wss://compose-ui.localhost:5194/devtools-api/devtools/page/page-1'));
   assert.equal(inspector.origin, 'https://compose-ui.localhost:5194');
-  assert.equal(inspector.pathname, '/devtools-api/frontend/serve_rev/@123456/inspector.html');
+  assert.equal(inspector.pathname, '/devtools-api/frontend/inspector.html');
   assert.equal(inspector.searchParams.get('wss'), 'compose-ui.localhost:5194/devtools-api/devtools/page/page-1');
   const policy = "default-src 'self'; script-src\n 'self' https://chrome-devtools-frontend.appspot.com; connect-src data: https://chromeuxreport.googleapis.com 'self' devtools: ws://127.0.0.1:*; object-src 'none'";
   assert.equal(allowCDPConnection(policy, inspector), policy.replace('; object-src',
     ' wss://compose-ui.localhost:5194; object-src'));
 });
 
-Deno.test('frontend forwards only fixed asset paths without local query parameters or credentials', async () => {
+Deno.test('frontend serves local disk assets without query parameters or credentials', async () => {
   const { env, commands } = browser();
   const seen: Request[] = [];
   const frontendEnv = { ...env, DEVTOOLS_FRONTEND: { fetch(request: Request) {
@@ -91,24 +91,36 @@ Deno.test('frontend forwards only fixed asset paths without local query paramete
     return new Response('export const value = 1;', { headers: { 'Content-Type': 'text/javascript' } });
   } } };
   const response = await handleCDP(new Request(
-    'https://compose-ui.localhost/devtools-api/frontend/serve_rev/@abcdef/entrypoints/inspector/inspector.js?wss=secret',
+    'https://compose-ui.localhost/devtools-api/frontend/entrypoints/inspector/inspector.js?wss=secret',
     { headers: { Cookie: 'private=secret', Authorization: 'Bearer secret', Referer: 'https://compose-ui.localhost/private' } },
   ), frontendEnv, {});
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'export const value = 1;');
-  assert.equal(seen[0].url, 'https://chrome-devtools-frontend.appspot.com/serve_rev/@abcdef/entrypoints/inspector/inspector.js');
+  assert.equal(seen[0].url, 'http://devtools-frontend/entrypoints/inspector/inspector.js');
   assert.deepEqual([...seen[0].headers], []);
-  assert.equal(seen[0].redirect, 'manual');
+  assert.equal(response.headers.get('Content-Type'), 'text/javascript; charset=utf-8');
+  assert.equal(response.headers.get('Cache-Control'), 'no-cache');
   assert.equal(commands.length, 0, 'assets do not open a browser session');
-  for (const path of ['frontend/serve_rev/latest/inspector.html', 'frontend/https://evil.test/inspector.html']) {
+  for (const path of ['frontend/serve_rev/@abcdef/inspector.html', 'frontend/https://evil.test/inspector.html',
+    'frontend/Images/', 'frontend/secret.key', 'frontend/.hidden.js', 'frontend/a//b.js',
+    'frontend/third_party/.hidden/file.js', 'frontend/a%2fb.js']) {
     assert.equal((await handleCDP(new Request(`https://compose-ui.localhost/devtools-api/${path}`), frontendEnv, {})).status, 404);
   }
   assert.equal(seen.length, 1);
-  const unavailable = await handleCDP(new Request(inspectorURL({ revision: '@abcdef' },
+  const unavailable = await handleCDP(new Request(inspectorURL(
     'wss://compose-ui.localhost/devtools-api/devtools/page/page-1')), {
     ...env, DEVTOOLS_FRONTEND: { fetch() { throw new Error('offline'); } },
   }, {});
   assert.equal(unavailable.status, 502);
+  const dottedDirectory = await handleCDP(new Request(
+    'https://compose-ui.localhost/devtools-api/frontend/third_party/codemirror.next/codemirror.next.js',
+  ), frontendEnv, {});
+  assert.equal(dottedDirectory.status, 200);
+  assert.equal(seen.at(-1)?.url, 'http://devtools-frontend/third_party/codemirror.next/codemirror.next.js');
+  const missing = await handleCDP(new Request('https://compose-ui.localhost/devtools-api/frontend/missing.js'), {
+    ...env, DEVTOOLS_FRONTEND: { fetch() { return new Response('missing', { status: 404 }); } },
+  }, {});
+  assert.equal(missing.status, 404);
 });
 
 Deno.test('separate browser sessions isolate events and support duplicate client command IDs', async () => {
@@ -160,7 +172,6 @@ Deno.test('CDP rejects unrelated origins, HTTP and invalid routes before connect
     assert.equal((await handleCDP(new Request(url, options), env, {})).status, status);
   }
   assert.equal(commands.length, 0);
-  assert.throws(() => inspectorURL({ revision: 'https://evil.test' }, 'wss://compose-ui.localhost'), /revision/);
   const unavailable = await handleCDP(new Request('https://compose-ui.localhost/devtools-api/json/list'), {
     CDP: { connect() { throw new Error('No socket'); } },
   }, {});

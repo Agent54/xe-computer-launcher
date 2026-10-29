@@ -168,13 +168,11 @@ function socketURL(url, path) {
   return `wss://${url.host}${cdpPrefix}/devtools/${path}`;
 }
 
-export function inspectorURL(version, webSocketURL) {
-  // The running Helium revision selects its matching Chromium frontend.
-  const revision = version.revision;
-  if (!/^@[a-f0-9]+$/i.test(revision || '')) throw new Error('Browser frontend revision is unavailable');
+export function inspectorURL(webSocketURL) {
+  // The build pins a production frontend for the shipped Chromium major.
   const url = new URL(webSocketURL);
   url.protocol = 'https:';
-  url.pathname = `${cdpPrefix}/frontend/serve_rev/${revision}/inspector.html`;
+  url.pathname = `${cdpPrefix}/frontend/inspector.html`;
   url.searchParams.set('wss', webSocketURL.replace(/^wss:\/\//, ''));
   return url.href;
 }
@@ -260,11 +258,10 @@ export async function handleCDP(request, env, ctx) {
       }
       if (path === '/json' || path === '/json/list') {
         const { targetInfos } = await connection.command('Target.getTargets');
-        const version = await connection.command('Browser.getVersion');
         return response(targetInfos.map(target => {
           const webSocketDebuggerUrl = socketURL(url, `page/${target.targetId}`);
           return { ...target, id: target.targetId, description: '',
-            webSocketDebuggerUrl, devtoolsFrontendUrl: inspectorURL(version, webSocketDebuggerUrl),
+            webSocketDebuggerUrl, devtoolsFrontendUrl: inspectorURL(webSocketDebuggerUrl),
           };
         }), 200, corsOrigin);
       }

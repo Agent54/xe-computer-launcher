@@ -1,0 +1,150 @@
+/*
+ * GitHub Dark Default, ported from GitHub.github-vscode-theme 6.3.5.
+ * Copyright (c) 2020 Primer. MIT; see theme-source/LICENSE.txt.
+ * Darc palette and syntax overrides follow darc-code/vscode-config/settings.json
+ * (workbench.colorCustomizations and editor.tokenColorCustomizations).
+ *
+ * Appended to the stock design_system_tokens.css: the only modified upstream
+ * resource. Tokens inherit into DevTools' shadow roots, editors and charts.
+ * Keep this palette dark regardless of the host's light/dark preference.
+ */
+@media not (forced-colors: active) {
+  :root:root:root {
+    color-scheme: dark;
+
+    /* Darc editor, sidebar, popup and active-tab surfaces. */
+    --sys-color-surface: #0a0d11;
+    --sys-color-surface-variant: #262626;
+    --sys-color-surface1: #030507;
+    --sys-color-surface2: #161b22;
+    --sys-color-surface3: #161718;
+    --sys-color-surface4: #161b22;
+    --sys-color-surface5: #1c2026;
+    --sys-color-base: #06070a;
+    --sys-color-base-container: #161b22;
+    --sys-color-base-container-elevated: #161b22;
+    --sys-color-cdt-base: #030507;
+    --sys-color-cdt-base-container: #0a0d11;
+    --sys-color-omnibox-container: #0a0d11;
+    --sys-color-neutral-container: #6e768166;
+    --sys-color-tonal-container: #262626;
+    --sys-color-tertiary-container: #a371f726;
+    --sys-color-error-container: #f851491a;
+    --sys-color-yellow-container: #bb800966;
+    --sys-color-inverse-surface: #e6edf3;
+    --sys-color-inverse-on-surface: #0a0d11;
+    --sys-color-inverse-primary: #7d8590;
+
+    --sys-color-on-surface: #e6edf3;
+    --sys-color-on-surface-subtle: #7d8590;
+    --sys-color-on-surface-secondary: #7d8590;
+    --sys-color-on-surface-primary: #e6edf3;
+    --sys-color-on-surface-light: #6e7681;
+    --sys-color-on-surface-light-graphics: #8b949e;
+    --sys-color-on-base: #e6edf3;
+    --sys-color-on-base-divider: #161718;
+    --sys-color-on-tonal-container: #e6edf3;
+    --sys-color-on-tertiary-container: #d2a8ff;
+    --sys-color-on-error-container: #ffa198;
+
+    /* Muted graphite focus, selection and controls; green actions. */
+    --sys-color-primary: #9ba6b2;
+    --sys-color-primary-bright: #b1bac4;
+    --sys-color-on-primary: #0a0d11;
+    --sys-color-secondary: #238636;
+    --sys-color-on-secondary: #ffffff;
+    --sys-color-tertiary: #bc8cff;
+    --sys-color-on-tertiary: #ffffff;
+    --sys-color-error: #f85149;
+    --sys-color-error-bright: #ffa198;
+    --sys-color-on-error: #ffffff;
+    --sys-color-outline: #6e7681;
+    --sys-color-neutral-outline: #161718;
+    --sys-color-tonal-outline: #6e7681;
+    --sys-color-yellow-outline: #b4ac2c;
+    --sys-color-error-outline: #f85149;
+    --sys-color-divider: #161718;
+    --sys-color-divider-on-tonal-container: #161718;
+    --sys-color-divider-prominent: #484f58;
+    --sys-color-state-focus-ring: #7d8590;
+    --sys-color-state-focus-select: #484f58;
+    --sys-color-state-focus-highlight: #8b949e1a;
+    --sys-color-state-text-highlight: #484f58;
+    --sys-color-state-on-text-highlight: #e6edf3;
+    --sys-color-state-hover-on-subtle: #6e76811a;
+    --sys-color-state-hover-on-prominent: #e6edf314;
+    --sys-color-state-ripple-neutral-on-subtle: #e6edf31f;
+    --sys-color-state-ripple-neutral-on-prominent: #e6edf31f;
+    --sys-color-state-ripple-primary: #8b949e33;
+    --sys-color-state-header-hover: #161718;
+    --sys-color-state-on-header-hover: #e6edf3;
+    --sys-color-state-disabled: #484f58;
+
+    /* Active Darc token overrides; unchanged scopes keep GitHub's colors. */
+    --sys-color-token-variable: #ffa500;
+    --sys-color-token-property: #ffa500;
+    --sys-color-token-property-special: #ffa500;
+    --sys-color-token-type: #ffa657;
+    --sys-color-token-definition: #ed2c93;
+    --sys-color-token-variable-special: #ffa500;
+    --sys-color-token-builtin: #79c0ff;
+    --sys-color-token-keyword: #eb0052;
+    --sys-color-token-number: #91c281;
+    --sys-color-token-string: #76b2e3;
+    --sys-color-token-string-special: #76b2e3;
+    --sys-color-token-atom: #79c0ff;
+    --sys-color-token-tag: #7ee787;
+    --sys-color-token-attribute: #ffa500;
+    --sys-color-token-attribute-value: #76b2e3;
+    --sys-color-token-comment: #727272;
+    --sys-color-token-meta: #8b949e;
+    --sys-color-token-deleted: #ffa198;
+    --sys-color-token-inserted: #7ee787;
+    --sys-color-token-pseudo-element: #d2a8ff;
+    --sys-color-token-subtle: #7d8590;
+
+    /* Console, network and performance categories. */
+    --sys-color-blue: #79c0ff;
+    --sys-color-blue-bright: #58a6ff;
+    --sys-color-green: #7ee787;
+    --sys-color-green-bright: #3fb950;
+    --sys-color-orange: #ffa657;
+    --sys-color-orange-bright: #f0883e;
+    --sys-color-yellow: #bab200;
+    --sys-color-yellow-bright: #b4ac2c;
+    --sys-color-cyan: #56d4dd;
+    --sys-color-cyan-bright: #39c5cf;
+    --sys-color-purple: #d2a8ff;
+    --sys-color-purple-bright: #bc8cff;
+    --sys-color-pink: #ff9bce;
+    --sys-color-pink-bright: #db61a2;
+
+    /* Legacy controls still consume application_tokens.css variables. */
+    --color-background: #0a0d11;
+    --color-background-inverted: #e6edf3;
+    --color-background-elevation-1: #161b22;
+    --color-background-elevation-2: #1c2026;
+    --color-background-elevation-dark-only: #161b22;
+    --color-background-opacity-50: #0a0d1180;
+    --color-background-opacity-80: #0a0d11cc;
+    --color-text-primary: #e6edf3;
+    --color-text-secondary: #7d8590;
+    --color-text-disabled: #484f58;
+    --color-primary: #9ba6b2;
+    --color-primary-old: #9ba6b2;
+    --color-primary-variant: #b1bac4;
+    --legacy-accent-color: #7d8590;
+    --legacy-selection-bg-color: #262626;
+    --color-red: #f85149;
+    --divider-line: #161718;
+    --color-scrollbar-mac: #8b949e33;
+    --color-scrollbar-mac-hover: #8b949e47;
+    --color-scrollbar-other: #8b949e33;
+    --color-scrollbar-other-hover: #8b949e47;
+  }
+
+  body {
+    background-color: #0a0d11;
+    color: #e6edf3;
+  }
+}

@@ -879,6 +879,14 @@ Deno.test('automatically published apps start before allocation and rediscover t
         try {
           now += 3000;
           const selected = await resolveApplicationPort('app_auto.localhost', env);
+          if (initialState === 'uncreated') {
+            assert.equal(selected, null);
+            for (const host of ['app_auto.app.localhost', 'app_auto.localhost']) {
+              assert.equal((await request(host)).status, 503);
+            }
+            assert.equal(starts.length, 0, 'requests must not create an uncreated service');
+            return;
+          }
           assert.equal(selected?.port.target, 5173);
           assert.equal(selected?.published, undefined);
           for (const host of ['app_auto--nmissing.app.localhost', 'app_auto--p5173.app.localhost']) {
@@ -894,8 +902,7 @@ Deno.test('automatically published apps start before allocation and rediscover t
             assert.equal(response.headers.get('retry-after'), '2');
             assert.match(await response.text(), /Starting…/);
           }
-          assert.deepEqual(starts, [initialState === 'uncreated'
-            ? { service: 'app', path: configFiles } : { container: 'e'.repeat(64), path: configFiles }]);
+          assert.deepEqual(starts, [{ container: 'e'.repeat(64), path: configFiles }]);
           release!();
           await Promise.all(background);
           assert.equal((await request()).status, 200, 'startup completion invalidates discovery immediately');
@@ -936,7 +943,7 @@ Deno.test('automatically published apps start before allocation and rediscover t
   }
 });
 
-Deno.test('native TLS starts an uncreated app without waiting for a published port', async () => {
+Deno.test('native TLS does not start an uncreated app', async () => {
   const starts: unknown[] = [];
   const env = withStartup({
     COMPOSE: { fetch: async (input: string | Request) => {
@@ -972,7 +979,7 @@ Deno.test('native TLS starts an uncreated app without waiting for a published po
     close: () => { closed = true; return Promise.resolve(); },
   }, env);
   assert.equal(closed, true);
-  assert.deepEqual(starts, [{ service: 'app', path: '/stacks/tls-auto/compose.yaml' }]);
+  assert.deepEqual(starts, []);
 });
 
 Deno.test('startup errors reach the loader and API safely', async () => {
@@ -1066,7 +1073,7 @@ Deno.test('apps wait for runtime readiness, while existing containers need no ro
   }
 });
 
-Deno.test('Agenda URL discovers an uncreated app and shares its single-container creation', async () => {
+Deno.test('app requests do not create an uncreated service', async () => {
   const originalNow = Date.now;
   let now = originalNow() + 300_000;
   Date.now = () => now;
@@ -1128,23 +1135,18 @@ Deno.test('Agenda URL discovers an uncreated app and shares its single-container
     for (const response of responses) {
       assert.equal(response.status, 503);
       const html = await response.text();
-      assert.match(html, /<h1>agenda<\/h1>/);
-      assert.match(html, /Starting…/);
+      assert.match(html, /Container is not available for application routing/);
     }
-    assert.deepEqual(starts, [{ path: '/v1.24/start/agenda/container', body: { service: 'agenda', path: configFiles } }]);
+    assert.deepEqual(starts, []);
     assert.equal(requests.filter(path => path === '/v1.24/ls').length, 1);
     assert.equal(requests.filter(path => path === '/v1.24/ps/agenda').length, 1);
     assert.equal(requests.filter(path => path === '/v1.24/config/agenda').length, 1);
-    release!();
-    await Promise.all(background);
-    assert.match(await (await request()).text(), /Starting…/, 'new container ID must retain startup tracking');
-    assert.equal(requests.filter(path => path === '/v1.24/ps/agenda').length, 2, 'startup invalidates the project cache immediately');
-    assert.equal(requests.filter(path => path === '/v1.24/ps/unrelated').length, 1, 'other variants remain cached');
     state = 'ready';
+    now += 100;
     const ready = await request();
     assert.equal(ready.status, 200);
     assert.equal(await ready.text(), 'agenda is ready');
-    assert.equal(starts.length, 1);
+    assert.equal(starts.length, 0);
   } finally {
     release?.();
     await Promise.all(background);

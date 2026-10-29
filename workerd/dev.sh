@@ -6,6 +6,7 @@ worker_dir="$(cd "$(dirname "$0")" && pwd)"
 : "${ROUTER_SOCKET:?Set ROUTER_SOCKET to the exposed guest workerd Unix socket}"
 : "${DOCKER_SOCKET:?Set DOCKER_SOCKET to the exposed guest Docker Unix socket}"
 worker_binary="${WORKERD_BIN:-$worker_dir/node_modules/.bin/workerd}"
+python3 "$worker_dir/../devtools/build.py"
 http_port="${HTTP_PORT:-5196}"
 https_port="${HTTPS_PORT:-5194}"
 runtime_dir="$(mktemp -d)"
@@ -33,6 +34,7 @@ printf 'Compose UI: http://compose-ui.localhost%s/\n' "$public_http_port"
 "$worker_binary" serve --experimental --watch "$runtime_dir/config.capnp" \
     --inspector-addr=0.0.0.0:9229 --verbose \
     --directory-path "assets=$COMPOSE_UI_ASSETS" \
+    --directory-path "devtools-frontend=$worker_dir/../devtools/assets" \
     --directory-path "status=$runtime_dir/status" \
     --directory-path "startup-state=$runtime_dir/startup-state" \
     --socket-addr "ingest=127.0.0.1:$http_port" \

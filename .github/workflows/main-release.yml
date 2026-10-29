@@ -53,7 +53,7 @@ jobs:
           name: guest-worker
           path: workerd/dist
 
-      - name: Calculate next patch version
+      - name: Calculate next release version
         id: version
         shell: bash
         run: |
@@ -70,7 +70,13 @@ jobs:
           fi
 
           IFS=. read -r major minor patch <<< "$latest_version"
-          version="$major.$minor.$((patch + 1))"
+          version="$(plutil -extract CFBundleShortVersionString raw macos/Sources/macos/Info.plist)"
+          IFS=. read -r minimum_major minimum_minor minimum_patch <<< "$version"
+          if (( major > minimum_major ||
+                (major == minimum_major && minor > minimum_minor) ||
+                (major == minimum_major && minor == minimum_minor && patch >= minimum_patch) )); then
+            version="$major.$minor.$((patch + 1))"
+          fi
 
           if [[ "$GITHUB_REF_NAME" == "int" ]]; then
             release_tag="$version-int.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"

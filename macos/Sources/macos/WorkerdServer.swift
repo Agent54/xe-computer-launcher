@@ -6,6 +6,7 @@ enum WorkerdPaths {
     static var configURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Worker/config.capnp") }
     static var portHelperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/port-helper") }
     static var assetsURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/compose-ui") }
+    static var devtoolsURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Worker/devtools") }
     static var stateURL: URL { ExternalState.appDataURL.appendingPathComponent("workerd", isDirectory: true) }
     static let uiURL = URL(string: "http://127.0.0.1:8094/")!
 }
@@ -122,6 +123,7 @@ final class WorkerdServer {
     private let configURL: URL
     private let portHelperURL: URL
     private let assetsURL: URL
+    private let devtoolsURL: URL
     private let stateURL: URL
     private let socketDirectoryURL: URL
     private let runtimeStatusURL: URL
@@ -147,6 +149,7 @@ final class WorkerdServer {
     init(executableURL: URL = WorkerdPaths.executableURL, configURL: URL = WorkerdPaths.configURL,
          portHelperURL: URL = WorkerdPaths.portHelperURL,
          assetsURL: URL = WorkerdPaths.assetsURL, stateURL: URL = WorkerdPaths.stateURL,
+         devtoolsURL: URL = WorkerdPaths.devtoolsURL,
          runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
          maintenanceSocketURL: URL = ContainerMaintenanceServer.socketURL,
          dockerSocketURL: URL = SmolVMSetup.dockerSocketURL,
@@ -159,6 +162,7 @@ final class WorkerdServer {
         self.configURL = configURL
         self.portHelperURL = portHelperURL
         self.assetsURL = assetsURL
+        self.devtoolsURL = devtoolsURL
         self.stateURL = stateURL
         self.socketDirectoryURL = stateURL == WorkerdPaths.stateURL
             ? RuntimeSocketPaths.shared.workerdDirectoryURL : stateURL
@@ -181,7 +185,8 @@ final class WorkerdServer {
         if let stopTask { await stopTask.value; self.stopTask = nil }
         stopping = false
         try RuntimeSocketPaths.validateWorkerdPaths(directoryURL: socketDirectoryURL)
-        for url in [executableURL, configURL, assetsURL.appendingPathComponent("index.html")] {
+        for url in [executableURL, configURL, assetsURL.appendingPathComponent("index.html"),
+                    devtoolsURL.appendingPathComponent("inspector.html")] {
             guard FileManager.default.fileExists(atPath: url.path) else { throw WorkerdError.missingResource(url.path) }
         }
         let privilegedSockets: PrivilegedPortSockets?
@@ -253,6 +258,7 @@ final class WorkerdServer {
             "--socket-addr", "ui-https=unix:\(uiSocketURL.path)",
             "--socket-addr", "startup=unix:\(startupSocketURL.path)",
             "--directory-path", "assets=\(assetsURL.path)",
+            "--directory-path", "devtools-frontend=\(devtoolsURL.path)",
             "--directory-path", "status=\(runtimeStatusURL.path)",
             "--directory-path", "startup-state=\(startupStateURL.path)",
             "--external-addr", "compose=unix:\(composeSocketURL.path)",

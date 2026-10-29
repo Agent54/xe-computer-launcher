@@ -2,7 +2,7 @@ import { invalidateApplicationService } from './app-discovery.js';
 import { startupResponse } from './startup-response.js';
 
 const startupResponses = new WeakSet();
-const startable = new Set(['uncreated', 'created', 'exited', 'stopped']);
+const startable = new Set(['created', 'exited', 'stopped']);
 // Coalesce readiness acknowledgements; normal app traffic does not need an
 // extra coordinator request on every response. Container starts stay central.
 const readyReports = new WeakMap();

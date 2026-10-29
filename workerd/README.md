@@ -46,11 +46,14 @@ directions, along with the connection ID and URL. It is currently a no-op:
 IWA/controlled-frame rewriting, agent permissions and audit logging are not yet
 implemented. Native CDP clients currently have full browser access.
 Inspector links load the frontend through local workerd at
-`/devtools-api/frontend/serve_rev/@<revision>/inspector.html`. The revision comes
-from the running Helium's `Browser.getVersion`, so the UI follows browser updates.
-Workerd fetches the matching assets from Chromium's hosted frontend (network
-access required) and adds only its own WSS origin to the frontend's CSP, including
-the HTML meta policy. Assets, inspector UI and CDP use the same local origin.
+`/devtools-api/frontend/inspector.html`. Builds vendor the production frontend
+pinned in `../devtools/DevTools.lock` for the shipped Helium Chromium major.
+Workerd serves the packaged files from a read-only disk service, with no network
+fallback, and adds its own WSS origin to the frontend's CSP, including the HTML
+meta policy. Assets, inspector UI and CDP use the same local origin.
+The GitHub Dark Default port is maintained in `../devtools/theme.css`; the build
+appends it to `design_system_tokens.css`, the only changed upstream file.
+See [DevTools vendoring](../devtools/README.md) for offline builds and updates.
 
 ## Port routes
 

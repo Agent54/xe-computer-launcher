@@ -111,11 +111,7 @@ const config :Workerd.Config = (
     (name = "maintenance", external = (http = ())),
     (name = "ui-tls", external = (tcp = ())),
     (name = "cdp", external = (tcp = ())),
-    (name = "devtools-frontend", external = (
-      address = "chrome-devtools-frontend.appspot.com:443",
-      https = (options = (), tlsOptions = (trustBrowserCas = true),
-        certificateHost = "chrome-devtools-frontend.appspot.com"),
-    )),
+    (name = "devtools-frontend", disk = (writable = false)),
     (name = "deny", network = (allow = [])),
   ],
   sockets = [

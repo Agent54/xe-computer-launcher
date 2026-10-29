@@ -86,6 +86,7 @@ private enum ShutdownComponent: CaseIterable, Hashable {
 @main
 struct MacOSApp {
     static func main() {
+        if ApplicationMaintenance.runHelperIfRequested() { return }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--xe-accessibility-trust-probe" {
             exit(AXIsProcessTrusted() ? 0 : 1)
@@ -241,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var isWaitingForRuntimeShutdown = false
     private var terminationTimeoutTask: Task<Void, Never>?
     private var didReplyToTermination = false
+    private var maintenanceAction: ApplicationMaintenance.Action?
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
     private var runtimeWarningsItem: NSMenuItem?
@@ -299,6 +301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var containerCPUItem: NSMenuItem?
     private var containerDiskItem: NSMenuItem?
     private var restartVMItem: NSMenuItem?
+    private var restartXeItem: NSMenuItem?
+    private var uninstallItem: NSMenuItem?
     private var settingsRestartRequired = false
     private var updateChannelItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -875,7 +879,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 vmCleanup.cancel()
                 browserCleanup.cancel()
                 hostCleanup.cancel()
-                finishTermination(sender)
+                finishTermination(sender, shutdownCompleted: false)
             }
 
             Task {
@@ -893,10 +897,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         return .terminateLater
     }
 
-    private func finishTermination(_ sender: NSApplication) {
+    private func finishTermination(_ sender: NSApplication, shutdownCompleted: Bool = true) {
         guard !didReplyToTermination else { return }
         didReplyToTermination = true
         terminationTimeoutTask?.cancel()
+        if let maintenanceAction {
+            do {
+                guard shutdownCompleted else {
+                    throw NSError(domain: "dev.xe.computer", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Shutdown did not finish in time. Xe Launcher will quit; the requested \(maintenanceAction == .restart ? "restart" : "uninstall") was cancelled."
+                    ])
+                }
+                try ApplicationMaintenance.schedule(maintenanceAction)
+            } catch {
+                let alert = NSAlert(error: error)
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
         sender.reply(toApplicationShouldTerminate: true)
     }
 
@@ -1087,6 +1105,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         restartVMItem.isHidden = true
         menu.addItem(restartVMItem)
         self.restartVMItem = restartVMItem
+
+        let restartXeItem = NSMenuItem(title: "Restart Xe", action: #selector(restartXeAction), keyEquivalent: "")
+        restartXeItem.isHidden = true
+        menu.addItem(restartXeItem)
+        self.restartXeItem = restartXeItem
+
+        let uninstallItem = NSMenuItem(title: "Uninstall…", action: #selector(uninstallAction), keyEquivalent: "")
+        uninstallItem.isHidden = true
+        menu.addItem(uninstallItem)
+        self.uninstallItem = uninstallItem
 
         let runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
         runAtStartupItem.isHidden = true
@@ -1457,6 +1485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         containerCPUItem?.isHidden = !optionHeld
         containerDiskItem?.isHidden = !optionHeld
         restartVMItem?.isHidden = !optionHeld
+        restartXeItem?.isHidden = !optionHeld
+        uninstallItem?.isHidden = !optionHeld
         runAtStartupItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
@@ -2134,6 +2164,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         return descriptions.joined(separator: " <- ")
+    }
+
+    @objc private func restartXeAction() {
+        guard !isPreparingForTermination, maintenanceAction == nil else { return }
+        maintenanceAction = .restart
+        ApplicationTermination.request()
+    }
+
+    @objc private func uninstallAction() {
+        guard !isPreparingForTermination, maintenanceAction == nil else { return }
+        do {
+            try ApplicationMaintenance.validateAppBundle(Bundle.main.bundleURL)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            NSAlert(error: error).runModal()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Uninstall Xe Launcher?"
+        alert.informativeText = "Xe Launcher will shut down all components, move its app data (including settings) into a new archive/<current datetime> folder inside:\n\n\(ExternalState.appDataURL.path)\n\nand move this launcher app to Trash. Existing archives and Compose storage outside the app data folder will be kept."
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.addButton(withTitle: "Uninstall")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        maintenanceAction = .uninstall
+        ApplicationTermination.request()
     }
 
     @objc private func quitAction() {

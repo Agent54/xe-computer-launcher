@@ -199,6 +199,33 @@ struct ContainerRuntimeWarningsTests {
         #expect(oom.message.contains("Container runtime ready"))
     }
 
+    @Test func hostReserveWarningsStayInTheMenuWithoutOpeningAutomaticDialogs() throws {
+        let gib: UInt64 = 1 << 30
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in },
+            readDismissed: { _ in nil }, saveDismissed: { _, _ in })
+        let low = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 13 * gib,
+            memoryTotalBytes: 16 * gib, diskUsedBytes: 91 * gib, diskTotalBytes: 100 * gib)
+        for _ in 0..<2 {
+            warnings.update(snapshot(host: low))
+            #expect(warnings.menuWarnings.map(\.kind) == [.hostMemory, .hostDisk])
+            #expect(warnings.unignoredCount == 2)
+            #expect(warnings.nextAutomaticWarning == nil)
+        }
+
+        // Host warnings must not hide a VM event that still needs a dialog.
+        warnings.update(snapshot(available: 5, host: low))
+        let pressure = try #require(warnings.nextAutomaticWarning)
+        #expect(pressure.kind == .memoryPressure)
+        warnings.didPresent(pressure)
+        #expect(warnings.nextAutomaticWarning == nil)
+
+        // A new host warning episode must also remain passive.
+        warnings.update(snapshot())
+        warnings.update(snapshot(host: low))
+        #expect(warnings.menuWarnings.count == 2)
+        #expect(warnings.nextAutomaticWarning == nil)
+    }
+
     @Test func hostReserveWarningsStayRedUntilResourcesRecoverEvenWhenIgnored() throws {
         _ = NSApplication.shared
         let gib: UInt64 = 1 << 30

@@ -14,3 +14,8 @@ macos/.env
 macos/local-secrets/*
 !macos/local-secrets/README.md
 patches
+devtools/.cache/
+devtools/devtools-frontend/
+devtools/devtools-frontend.zip
+devtools/assets/
+devtools/__pycache__/

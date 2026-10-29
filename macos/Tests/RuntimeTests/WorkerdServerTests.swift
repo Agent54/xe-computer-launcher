@@ -10,6 +10,7 @@ struct WorkerdServerTests {
     @MainActor private final class LogCollector { var lines: [String] = [] }
     private let macosRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    private var devtoolsAssets: URL { macosRoot.appendingPathComponent(".build/workerd/resources/devtools") }
 
     @Test func orphanCleanupOnlySelectsThisAccountsXeWorkerd() {
         let stateURL = URL(fileURLWithPath: "/Users/test/Library/Application Support/dev.xe.computer/workerd")
@@ -64,6 +65,7 @@ struct WorkerdServerTests {
         let logs = LogCollector()
         let server = WorkerdServer(executableURL: binary, configURL: config,
                                   assetsURL: assets, stateURL: root,
+                                  devtoolsURL: devtoolsAssets,
                                   runtimeStatusURL: runtimeStatus,
                                   maintenanceSocketURL: maintenanceSocket,
                                   dockerSocketURL: root.appendingPathComponent("missing-docker.sock"),
@@ -84,7 +86,8 @@ struct WorkerdServerTests {
         do {
             #expect(server.isRunning)
             let second = WorkerdServer(executableURL: binary, configURL: config, assetsURL: assets,
-                                       stateURL: root, runtimeStatusURL: runtimeStatus, log: { _ in })
+                                       stateURL: root, devtoolsURL: devtoolsAssets,
+                                       runtimeStatusURL: runtimeStatus, log: { _ in })
             await #expect(throws: WorkerdError.self) { try await second.start(composeSocketURL: absent, routerSocketURL: absent) }
             await second.stop()
             let session = URLSession(configuration: .ephemeral)
@@ -230,7 +233,8 @@ struct WorkerdServerTests {
         let server = WorkerdServer(executableURL: binary, configURL: config,
                                    portHelperURL: macosRoot.appendingPathComponent(".build/debug/port-helper"),
                                    assetsURL: assets,
-                                   stateURL: root, runtimeStatusURL: root.appendingPathComponent("status"),
+                                   stateURL: root, devtoolsURL: devtoolsAssets,
+                                   runtimeStatusURL: root.appendingPathComponent("status"),
                                    managementPort: try freePort(), routingPort: 80, tlsPort: 443,
                                    acquirePrivilegedSockets: { throw failure }, log: { _ in })
         let absent = root.appendingPathComponent("missing.sock")
@@ -255,7 +259,8 @@ struct WorkerdServerTests {
             executableURL: macosRoot.appendingPathComponent(".build/workerd/workerd"),
             configURL: macosRoot.deletingLastPathComponent().appendingPathComponent("workerd/config.capnp"),
             portHelperURL: missingHelper, assetsURL: macosRoot.appendingPathComponent(".build/compose-ui"),
-            stateURL: root, runtimeStatusURL: root.appendingPathComponent("status"),
+            stateURL: root, devtoolsURL: devtoolsAssets,
+            runtimeStatusURL: root.appendingPathComponent("status"),
             routingPort: 80, tlsPort: 443,
             acquirePrivilegedSockets: {
                 requested.withLock { $0 = true }

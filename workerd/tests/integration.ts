@@ -8,7 +8,6 @@ import { createServer as createHttpsServer } from 'node:https';
 import { createConnection } from 'node:net';
 import { connect as connectTLS } from 'node:tls';
 import { once } from 'node:events';
-import { gzipSync } from 'node:zlib';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +19,7 @@ const guestConfig = packaged ? resolve(inputArgs[4]) : undefined;
 const args = packaged ? inputArgs.slice(0, 4) : inputArgs;
 const [binary, workerDir, assets, composeBinary] = (args.length === 4 ? args :
   [args[0], dirname(dirname(fileURLToPath(import.meta.url))), args[1], args[2]]).map(p => resolve(p));
+const devtoolsAssets = packaged ? join(workerDir, 'devtools') : join(workerDir, 'dist/host-worker/devtools');
 const root = await Deno.makeTempDir({ dir: resolve(dirname(fileURLToPath(import.meta.url)), '../../macos/.build'), prefix: 'xe-worker-' });
 const composePath = join(root, 'compose.sock');
 const dockerPath = join(root, 'docker.sock');
@@ -350,7 +350,7 @@ try {
   const generated = await new Deno.Command('openssl', { args: [
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
     '-keyout', privateKey, '-out', certificate, '-subj', '/CN=web.secure.localhost',
-    '-addext', 'subjectAltName=DNS:web.secure.localhost,DNS:chrome-devtools-frontend.appspot.com',
+    '-addext', 'subjectAltName=DNS:web.secure.localhost',
   ], stdout: 'null', stderr: 'piped' }).output();
   assert.equal(generated.code, 0, new TextDecoder().decode(generated.stderr));
   const uiCertificate = join(root, 'ui.crt');
@@ -361,26 +361,9 @@ try {
     '-addext', 'subjectAltName=DNS:compose-ui.localhost,DNS:*.app.localhost',
   ], stdout: 'null', stderr: 'piped' }).output();
   assert.equal(uiGenerated.code, 0, new TextDecoder().decode(uiGenerated.stderr));
-  const frontendRequests: string[] = [];
-  const frontendPolicy = "default-src 'self' devtools: data:; script-src 'self'; connect-src data: https://chromeuxreport.googleapis.com 'self' devtools: ws://127.0.0.1:*; object-src 'none';";
   const tlsApp = createHttpsServer({ key: await Deno.readTextFile(privateKey),
     cert: await Deno.readTextFile(certificate) }, (request, response) => {
-      if (request.headers.host !== 'chrome-devtools-frontend.appspot.com') return response.end('tls-upstream-ok');
-      frontendRequests.push(request.url!);
-      response.setHeader('Cache-Control', 'public, max-age=604800');
-      if (request.url === '/serve_rev/@abcdef/inspector.html') {
-        response.setHeader('Content-Type', 'text/html');
-        response.setHeader('Content-Encoding', 'gzip');
-        response.setHeader('Content-Security-Policy', frontendPolicy);
-        response.end(gzipSync(`<html><meta\n http-equiv="Content-Security-Policy"\n content="${frontendPolicy}"><script type="module" src="./entrypoints/inspector/inspector.js"></script></html>`));
-      } else if (request.url === '/serve_rev/@abcdef/entrypoints/inspector/inspector.js') {
-        response.setHeader('Content-Type', 'text/javascript');
-        response.setHeader('Content-Encoding', 'gzip');
-        response.end(gzipSync('export const inspector = true;'));
-      } else {
-        response.writeHead(404);
-        response.end('missing');
-      }
+      response.end('tls-upstream-ok');
     });
   await new Promise<void>(resolve => tlsApp.listen(0, '127.0.0.1', resolve));
   securePort = (tlsApp.address() as { port: number }).port;
@@ -401,8 +384,6 @@ try {
     }
   }
   const configPath = join(root, 'config.capnp');
-  await Deno.writeTextFile(configPath, (await Deno.readTextFile(configPath)).replace(
-    'trustBrowserCas = true', 'trustBrowserCas = true, trustedCertificates = [embed "test.crt"]'));
   const uiSocketPath = join(root, 'ui-https.sock');
   startProcess(binary, ['serve', '--experimental', configPath,
     '--socket-addr', `management=127.0.0.1:${managementPort}`, '--socket-addr', `ingest=127.0.0.1:${routingPort}`,
@@ -410,13 +391,13 @@ try {
     '--socket-addr', `ui-https=unix:${uiSocketPath}`,
     '--socket-addr', `startup=unix:${join(root, 'startup.sock')}`,
     '--directory-path', `assets=${assets}`,
+    '--directory-path', `devtools-frontend=${devtoolsAssets}`,
     '--directory-path', `status=${statusPath}`,
     '--directory-path', `startup-state=${startupStatePath}`,
     '--external-addr', `compose=unix:${composePath}`, '--external-addr', `router=unix:${routerPath}`,
     '--external-addr', `docker=unix:${dockerPath}`,
     '--external-addr', `maintenance=unix:${join(root, 'maintenance.sock')}`,
     '--external-addr', `cdp=unix:${cdpPath}`,
-    '--external-addr', `devtools-frontend=127.0.0.1:${securePort}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
   const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
@@ -437,23 +418,30 @@ try {
     `wss://compose-ui.localhost:${tlsPort}/devtools-api/devtools/page/controlled-frame`);
   const inspector = new URL(cdpTarget.devtoolsFrontendUrl);
   assert.equal(inspector.origin, `https://compose-ui.localhost:${tlsPort}`);
-  assert.equal(inspector.pathname, '/devtools-api/frontend/serve_rev/@abcdef/inspector.html');
+  assert.equal(inspector.pathname, '/devtools-api/frontend/inspector.html');
   const frontend = await tlsResponse('compose-ui.localhost', true, inspector.pathname + inspector.search);
   assert.equal(frontend.status, 200, frontend.body);
-  const expectedPolicy = frontendPolicy.replace('; object-src', ` wss://compose-ui.localhost:${tlsPort}; object-src`);
-  assert.equal(frontend.headers.get('content-security-policy'), expectedPolicy);
-  assert(frontend.body.includes(`content="${expectedPolicy}"`), 'HTML meta CSP must allow the local WSS connection too');
+  assert(frontend.headers.get('content-security-policy')?.includes(`wss://compose-ui.localhost:${tlsPort}`));
+  assert(frontend.body.includes(`wss://compose-ui.localhost:${tlsPort}`), 'HTML meta CSP must allow the local WSS connection too');
+  assert(!frontend.headers.get('content-security-policy')?.includes('chrome-devtools-frontend.appspot.com'));
   assert(frontend.body.includes('src="./entrypoints/inspector/inspector.js"'));
   const scriptPath = new URL('./entrypoints/inspector/inspector.js', inspector).pathname;
   const script = await tlsResponse('compose-ui.localhost', true, scriptPath);
   assert.equal(script.status, 200, script.body);
-  assert.equal(script.headers.get('content-type'), 'text/javascript');
-  assert.equal(script.body, 'export const inspector = true;');
+  assert.equal(script.headers.get('content-type'), 'text/javascript; charset=utf-8');
+  assert.equal(script.body, await Deno.readTextFile(join(devtoolsAssets, 'entrypoints/inspector/inspector.js')));
+  const theme = await tlsResponse('compose-ui.localhost', true, '/devtools-api/frontend/design_system_tokens.css');
+  assert.equal(theme.status, 200);
+  assert(theme.body.includes('--sys-color-surface: #0a0d11;'));
+  assert(theme.body.includes('--sys-color-token-keyword: #eb0052;'));
+  const lazyModule = await tlsResponse('compose-ui.localhost', true,
+    '/devtools-api/frontend/third_party/codemirror.next/codemirror.next.js');
+  assert.equal(lazyModule.status, 200);
+  assert.equal(lazyModule.body, await Deno.readTextFile(join(devtoolsAssets, 'third_party/codemirror.next/codemirror.next.js')));
   assert.equal((await tlsRequest('compose-ui.localhost', true,
-    '/devtools-api/frontend/serve_rev/@abcdef/missing.js')).status, 404);
-  assert.deepEqual(frontendRequests, ['/serve_rev/@abcdef/inspector.html',
-    '/serve_rev/@abcdef/entrypoints/inspector/inspector.js', '/serve_rev/@abcdef/missing.js']);
-  console.log('PASS: matching inspector assets through HTTPS workerd with local WSS allowed in header and meta CSP');
+    '/devtools-api/frontend/missing.js')).status, 404);
+  assert.equal((await tlsRequest('compose-ui.localhost', true, '/devtools-api/frontend/Images/')).status, 404);
+  console.log('PASS: packaged production DevTools, GitHub Dark Default and lazy modules through HTTPS workerd with local WSS allowed');
   const cdpVersion = await tlsRequest('compose-ui.localhost', true, '/devtools-api/json/version/');
   assert.equal(cdpVersion.status, 200, cdpVersion.body);
   assert.equal(JSON.parse(cdpVersion.body).Browser, 'Helium/153');
@@ -661,11 +649,11 @@ try {
   const sleeping = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.equal(sleeping.status, 503);
   assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
-  assert.match(sleeping.body.toString(), /Starting…/);
+  assert.match(sleeping.body.toString(), /Container is not available for application routing/);
   assert.equal(sleeping.headers['cache-control'], 'no-store');
   const sleepingTLS = await tlsRequest('sleeping_demo--nweb.app.localhost', true);
   assert.equal(sleepingTLS.status, 503);
-  assert.match(sleepingTLS.body, /Starting…/);
+  assert.match(sleepingTLS.body, /Container is not available for application routing/);
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 1);
   assert(releaseContainerStart, 'single-container start must be dispatched before returning the loader');
   assert.equal((await request()).status, 200, 'Compose UI stays available while a container build/start is pending');
