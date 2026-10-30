@@ -1,138 +1,89 @@
 # Host gateway and guest router
 
-The host gateway, its private HTTPS terminator, and the guest router connect
-the launcher UI to Compose and running containers:
+## Architecture
 
-- **Host:** `gateway.js` protects the management socket, `app-gateway.js` routes
-  shared app HTTP/HTTPS, and `management.js` serves the UI and forwards API requests
-  to the Compose server on macOS. The separate workers prevent a forged Host
-  header on the management socket from entering app routing.
-- **Discovery:** `app-discovery.js` resolves running, stopped, and uncreated apps
-  through Compose's existing project, config, and service APIs. Project/config
-  variants share a 100 ms server cache across hostnames and port selectors;
-  app-request startup completion invalidates the affected variant. Docker lookup has the
-  same 100 ms limit. Cache expiry is measured from fetch start, so slow requests
-  cannot extend the reuse window. Pending Compose requests share a fetch with a
-  five-second deadline and a finite cache lease, so an abandoned request cannot
-  block future app discovery. Project-scoped container rows are matched to their
-  config-file labels before applying port configuration, avoiding duplicate
-  matches across checkouts that share a project name. These caches
-  are held in Workerd memory and never stored in the browser.
-- **Guest:** `router.js` runs inside SmolVM. It validates the exact container ID
-  and published/target port pair selected by the host against Docker, resolves
-  the current container address, and forwards the request. The host connects to
-  it through a Unix socket exposed by SmolVM.
+Workerd bridges macOS-hosted Compose and browser services to applications in
+SmolVM. The host UI and API must remain available independently of the VM.
 
-The launcher starts the Compose UI server but does not open it or provide a
-session token. The IWA UI handles access to Compose.
+- The **management gateway** is separate from the **application gateway** so a
+  forged Host header on the management socket cannot enter app routing.
+- The **host** owns project discovery, service startup and public HTTP/TLS
+  listeners. The **guest router** validates live container bindings and reaches
+  the container's private port. Their connection is a Unix socket exposed by
+  SmolVM.
+- One **startup coordinator** serves configured startup and on-demand requests
+  from both HTTP and TLS. Persistent per-boot state prevents Workerd restarts
+  from replaying starts. Project/config identity must remain part of discovery
+  and startup decisions: different checkouts can share a Compose project name.
 
-## CDP
+The host uses text configuration so the launcher can supply local certificates
+and backend addresses without compiling at runtime. The guest uses a compiled
+configuration and a Linux ARM64 runtime mounted read-only into the VM.
 
-Workerd provides CDP for agent automation, browser control and DevTools.
-
-`https://compose-ui.localhost/devtools-api/json/list` lists Helium targets;
-`/devtools-api/json/version` supplies the browser WebSocket URL for CDP clients.
-Use the configured HTTPS port when it is not 443. Darc discovers that origin
-through its existing Compose connection rather than the Vite proxy on port 9226.
-
-The launcher shares Helium's CDP pipe through the private
-`~/.xe/run/sockets/cdp.sock`. Workerd owns the HTTP API and WebSockets,
-with a separate browser session per connection. The launcher only handles pipe
-framing, command IDs and transport cleanup; its existing CDP commands share the
-same reader. CDP is available without the container VM.
-
-`cdp-payload.js` receives CDP commands, replies and events in both
-directions, along with the connection ID and URL. It is currently a no-op:
-IWA/controlled-frame rewriting, agent permissions and audit logging are not yet
-implemented. Native CDP clients currently have full browser access.
-Inspector links load the frontend through local workerd at
-`/devtools-api/frontend/inspector.html`. Builds vendor the production frontend
-pinned in `../devtools/DevTools.lock` for the shipped Helium Chromium major.
-Workerd serves the packaged files from a read-only disk service, with no network
-fallback, and adds its own WSS origin to the frontend's CSP, including the HTML
-meta policy. Assets, inspector UI and CDP use the same local origin.
-The GitHub Dark Default port is maintained in `../devtools/theme.css`; the build
-appends it to `design_system_tokens.css`, the only changed upstream file.
-See [DevTools vendoring](../devtools/README.md) for offline builds and updates.
+Existing development VMs created before application routing need the routing
+mounts and exposed sockets. Until SmolVM can update those sockets, recreate
+such VMs to enable routing; preserve their data separately.
 
 ## Port routes
 
-Use Compose's standard [long port syntax](https://docs.docker.com/reference/compose-file/services/#ports)
-to name a port:
+Compose UI and apps share the selected public HTTP/HTTPS ports. Port 8094 is
+private management and must not be used for application URLs.
 
-```yaml
-services:
-  app:
-    image: my-app
-    ports:
-      - name: web
-        target: 3000
-        published: "8080"
-      - name: admin
-        target: 9000
-        published: "9090"
-      - name: secure
-        target: 9443
-        published: "9443"
-        app_protocol: https
-```
+For a service named `app`, these hostnames select its published TCP ports:
 
-- `app.localhost` uses the first TCP entry in YAML order (`8080` → `3000`).
-- `app.8080.localhost` selects the published port `8080`.
-- `app.web.localhost` selects the port named `web`.
-- `app--p8080.app.localhost` selects published port `8080` through the shared HTTPS listener using the launcher's certificate. Add the selected HTTPS listener port when it is not 443.
-- `app--nweb.app.localhost` selects the named `web` port on that HTTPS listener.
+| Hostname | Selection |
+| --- | --- |
+| `app.localhost` | First TCP entry in Compose YAML order |
+| `app.8080.localhost` | Published port 8080, not the container's target port |
+| `app.web.localhost` | Port named `web` using Compose's [long port syntax](https://docs.docker.com/reference/compose-file/services/#ports) |
+| `app--p8080.app.localhost` | Published port 8080 through the shared HTTPS listener |
+| `app--nweb.app.localhost` | Named port `web` through the shared HTTPS listener |
 
-Short syntax such as `"8080:3000"` supports default and numeric routes too.
-For Docker to allocate an available VM host port, omit `published` in long
-syntax or use `"127.0.0.1::3000"` in short syntax. Default service hostnames and
-named routes can start these apps before a host port has been assigned; retries
-discover the live mapping after startup. Numeric selectors use the actual
-assigned host port and may change after a restart or recreation, so use default
-or named routes for stable links. Existing fixed-port containers need to be
-recreated to apply a change to automatic allocation.
-Names used in URLs must be a single hostname label (letters, digits or hyphens);
-all-numeric selectors always mean published port numbers. Only TCP ports
-published on the running container are routed. Names and YAML order refresh
-from the Compose API on the next request after the 100 ms cache expires. Numeric
-routes can still use Compose's container port bindings when parsed configuration
-is unavailable. Router-generated discovery and availability errors use
-`Cache-Control: no-store`, so the browser cannot cache a stale unavailable page.
+Use `app_<project>` when projects share a service name. Include the selected
+listener port when it is not 80 or 443. Port names must be hostname labels;
+numeric selectors always mean published port numbers.
 
-While the VM or Compose is starting or recovering, browser app requests show
-the same black loading screen as container startup and retry the original URL
-every two seconds. API requests that accept JSON, writes, and WebSocket upgrades
-receive retryable JSON with the runtime status. Failed or stopped runtimes show
-their status with a manual retry link.
+Default and named routes remain stable with Docker-assigned host ports; numeric
+routes can change after recreation. Opening an app may create or start its
+container without starting dependencies or other replicas. This requires the
+bundled Compose server's single-container startup API, including its service
+form for containers that do not exist yet.
 
-The Compose UI uses `compose-ui.localhost` on those same HTTP and HTTPS ports.
-It shares the application gateway and never needs a separate published port.
-The signed Xe Computer app can fetch its selected ports and the limited Compose
-project and checkout API at the HTTPS UI origin. Custom HTTPS ports are discovered
-through the private management listener before those API requests use HTTPS.
-Port 8094 is only the loopback management/API listener; app hostnames on it are
-forbidden. Browser navigation to its UI root redirects to the selected public
-Compose UI hostname and HTTP port only when that listener is ready; otherwise
-it reports 503 instead of serving the UI on 8094 or guessing a fallback port.
-On HTTPS, a generated per-installation local authority signs a certificate for
-the UI and `*.app.localhost` HTTP application aliases; the certificate needs to be trusted
-locally before browsers accept it without warning.
+### TLS ownership
 
-Ports with `app_protocol: https` redirect from the selected shared HTTP port
-to the selected shared HTTPS port (80→443 when opted in, otherwise 5196→5194).
-Workerd forwards TLS bytes through the guest to the selected
-application, which presents its own certificate for the requested `.localhost`
-hostname. Ports with `app_protocol: http`, or without an application protocol,
-continue through the guest HTTP reverse proxy, also when entered on the shared
-HTTPS listener using an `.app.localhost` alias (where Workerd terminates their
-TLS). A named or numeric selector for
-the default HTTPS port redirects to `app.localhost`; a different HTTPS port
-keeps its selector hostname, which must also appear in the application's
-certificate.
+For HTTP containers, Workerd terminates HTTPS on `.app.localhost` aliases using
+the launcher's local CA. The UI uses the same CA at `compose-ui.localhost`.
+Private keys belong in per-user launcher state, outside the signed bundle.
+
+For ports marked `app_protocol: https`, Workerd passes TLS through to the
+container. Its certificate must cover the requested `.localhost` hostname,
+including a port selector when one is used. These apps can start on access,
+but their TLS client must retry while the container starts.
+
+## Browser automation
+
+CDP is available at the Compose UI's HTTPS origin under `/devtools-api/`,
+independently of the VM. `/json/list` supplies page targets and
+`/json/version` the browser WebSocket URL. Discover the selected origin through
+Compose rather than assuming the Vite development proxy or a fixed port.
+
+The launcher owns Helium's debug pipe; Workerd owns the HTTP/WebSocket API and
+per-client browser sessions. Both share the private
+`~/.xe/run/sockets/cdp.sock`. Native CDP clients currently have full browser
+access: IWA/controlled-frame rewriting, agent permissions and audit logging
+are not implemented.
+
+The `Xe` CDP domain reserves future launcher APIs. Its handlers are stubs,
+not permission grants or browser filesystem handles. Future implementations
+must derive the requesting tab, origin and partition from the validated
+session before enforcing permissions.
+
+DevTools is packaged locally to avoid a runtime dependency on Chromium's
+hosted frontend. See [vendoring and theme maintenance](../devtools/README.md).
 
 ## Build
 
-From this directory, using Deno 2:
+From this directory, with Deno 2 and Python 3:
 
 ```sh
 deno install --frozen
@@ -140,115 +91,23 @@ deno task build
 deno task build:guest
 ```
 
-These tasks stage the host text configuration and JavaScript in `dist/host-worker/`
-and compile the guest configuration to `dist/guest-worker.bin`. On Linux ARM64,
-`deno task build:runtime` also packages the
-locked workerd executable and its required runtime libraries in
-`dist/guest-runtime/`, with license notices and a checksum manifest.
+On Linux ARM64, `deno task build:runtime` packages the guest runtime for macOS
+distribution. Local launcher builds need that CI artifact from the same source
+revision; see the [launcher build instructions](../README.md#building-from-source).
 
-CI builds the `guest-worker` artifact on Linux ARM64 and includes it in the macOS
-app. For a local macOS build, download the artifact from the same source revision
-and provide its extracted directory:
+For host development, set `COMPOSE_UI_ASSETS`, `COMPOSE_SOCKET`,
+`DOCKER_SOCKET` and `ROUTER_SOCKET`, then run `deno task dev`.
 
-```sh
-make -C macos BUILD_CONFIG=debug GUEST_ROUTER_ASSET_DIR=/path/to/guest-worker bundle
-```
+## Verification
 
-A locally built Linux runtime in `workerd/dist/guest-runtime/` is used by default.
-The macOS packaging step injects the guest configuration compiled from the
-current checkout into that runtime and regenerates its checksum manifest.
-
-### Host Workerd configuration
-
-The macOS app bundles:
-
-- `Contents/Helpers/workerd`: Cloudflare's runtime executable, similar to Node.js.
-- `Contents/Resources/Worker/`: the text configuration and worker scripts.
-
-The launcher generates a per-user certificate, stages the text configuration
-beside that certificate, then runs one `workerd serve` process. It supplies the
-socket paths and backend addresses at startup; no host config is compiled at
-runtime. The guest still uses a Linux `workerd` executable and the precompiled
-`guest-worker.bin`.
-
-The public TLS gateway forwards UI and HTTP-app TLS bytes to a private HTTPS
-Unix socket in that same process; it passes `app_protocol: https` bytes to the
-container unchanged. The generated private key stays out of the signed bundle.
-
-## Lifecycle
-
-Opening an uncreated app or one backed by a created, stopped, or exited container returns a black
-loading page with its service name and “Starting…”. The host calls Compose's
-`POST /v1.24/start/{project}/container` endpoint with the exact container ID and
-config path. Other replicas and services stay stopped. Concurrent requests share
-the same start operation. The page shows “Restarting…” when Compose reports a
-restart loop. It retries its original URL every two seconds until Cancel is clicked;
-Cancel clears the page's reload timer and stops further requests from that page.
-Reloading the page manually resumes normal startup on access. These controls also
-apply to runtime recovery placeholders. The existing JSON response reports
-`state: "restarting"` for a container in a restart loop. Retries also work through
-the certificate-covered `.app.localhost` HTTPS aliases. The loader remains visible
-during connection failures while the app starts.
-Start failures show the returned Compose error and a retry link; the same error
-is logged by Workerd. API requests receive that error in a retryable JSON 503 instead
-of an HTML page. Apps without containers are discovered through Compose's project
-and service catalogue. Their first container is created and started using the same
-single-container endpoint with `service` and `path`, without starting dependencies
-or other replicas. The bundled Compose server must support this service form of the
-endpoint, build missing service images before creation, and publish creation/start
-progress and errors through its existing build activity stream.
-Uncreated apps wait until the launcher reports a healthy runtime and the guest
-router answers its lightweight health probe before requesting creation or a build.
-While waiting, the loader keeps the app name and explains which part is starting.
-Existing containers can still start individually without waiting for this build gate.
-Direct TLS passthrough apps still own their certificates, so
-their container is started on access but their TLS client must retry the connection.
-
-The launcher starts and supervises the host Workerd and the guest router. The guest runs directly in the
-VM using bundled runtime files mounted read-only. Its logs are at
-`/run/xe-router/workerd.log`. During VM restarts, the host UI stays available and
-container routes return 503 until the guest is ready.
-
-Existing VMs created before application routing still need the socket and mount
-configuration. Until SmolVM can update exposed sockets, recreate those development
-VMs to opt into routing; the launcher never deletes their data automatically.
-
-## Development and verification
-
-For the host development worker set `COMPOSE_UI_ASSETS`, `COMPOSE_SOCKET`, `DOCKER_SOCKET`, and
-`ROUTER_SOCKET`, then run `deno task dev`.
-
-The host management worker also has a private connection to the exposed guest
-Docker socket for disk usage. `GET /v1.24/disk-usage` reads only image, container,
-and volume metadata, caches inventory for 60 seconds, and returns any cached
-analysis. `POST /v1.24/disk-usage/scan` performs a read-only `/system/df` query.
-Concurrent scans share one request; successful reports last five minutes;
-failed scans throttle retries for one minute. Each scan has a 60-second deadline
-and cancels the upstream request on timeout. These fixed routes accept no
-arbitrary Docker endpoint and never invoke pruning or shell commands.
-
-Run `deno task test:unit` for port selection tests with mocked backends; these
-do not start workerd, Docker, or a VM.
-
-The host `startup` worker coordinates the configured `compose_startup_services`
-list (empty by default) and app requests from both HTTP and TLS gateways. Swift
-publishes `status.json` with a VM `bootId` and `startup-services.json`, then sends
-short notifications to the private startup Unix socket. The worker checks VM,
-Docker and Compose readiness, starts only the listed services in the background,
-and cancels pending starts on shutdown or VM recovery. Its writable disk binding
-contains only `boot.json` in the launcher's private `workerd/startup` directory;
-it records attempts before dispatch so a workerd restart resumes remaining
-entries without repeating them. The coordinator's endpoints are internal and
-are not exposed through the public management or application gateways.
-
-The integration suite starts separate host and guest workers linked by a Unix
-socket, using disposable Docker/Compose backends. It uses `curl` for TLS requests
-and `openssl` for temporary test certificates:
+`deno task test:unit` needs no VM or Docker daemon. The integration suite uses
+real host/guest Workerd processes and disposable Docker/Compose backends;
+it also needs `curl`, `openssl`, extracted Compose UI assets and the Compose
+binary:
 
 ```sh
 deno task test:integration node_modules/workerd/bin/workerd /path/to/ui /path/to/compose
 deno task test:integration --packaged node_modules/workerd/bin/workerd dist/host-worker /path/to/ui /path/to/compose dist/guest-worker.bin
 ```
 
-It checks UI availability without the guest, API authentication, streaming,
-WebSockets, private-port routing, and Unix-socket replacement after guest failure.
+Guest router logs are at `/run/xe-router/workerd.log` inside the VM.

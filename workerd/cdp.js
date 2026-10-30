@@ -1,5 +1,6 @@
 import { rewriteCDPPayload } from './cdp-payload.js';
 import { serveCDPFrontend } from './cdp-frontend.js';
+import { handleLauncherCDPCommand } from './cdp-launcher-api.js';
 
 export const cdpPrefix = '/devtools-api';
 const maximumMessage = 32 * 1024 * 1024;
@@ -147,6 +148,9 @@ export async function connectCDP(env, context, onEvent = (_message) => {}) {
           (message.sessionId && !sessions.has(message.sessionId))) {
         throw new Error('Invalid CDP command or session');
       }
+      if (closed) throw new Error('Browser disconnected');
+      const launcherReply = handleLauncherCDPCommand(message);
+      if (launcherReply) return launcherReply;
       const reply = await request(message.method, message.params, message.sessionId);
       if (['Target.attachToTarget', 'Target.attachToBrowserTarget'].includes(message.method) && reply.result?.sessionId) {
         sessions.add(reply.result.sessionId);

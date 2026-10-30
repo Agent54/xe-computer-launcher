@@ -24,6 +24,7 @@ const config :Workerd.Config = (
       modules = [
         (name = "app-gateway.js", esModule = embed "app-gateway.js"),
         (name = "cdp.js", esModule = embed "cdp.js"),
+        (name = "cdp-launcher-api.js", esModule = embed "cdp-launcher-api.js"),
         (name = "cdp-payload.js", esModule = embed "cdp-payload.js"),
         (name = "cdp-frontend.js", esModule = embed "cdp-frontend.js"),
         (name = "app-routing.js", esModule = embed "app-routing.js"),

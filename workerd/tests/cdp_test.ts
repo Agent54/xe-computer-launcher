@@ -161,6 +161,37 @@ Deno.test('browser exit rejects requests and a new connection can reconnect', as
   await next.close();
 });
 
+Deno.test('launcher API stubs stay local and retain CDP session isolation', async () => {
+  const { env, commands } = browser();
+  const connection = await connectCDP(env, {});
+  try {
+    const page = await connection.attach('target-1');
+    const before = commands.length;
+    const methods = [
+      'Xe.showDirectoryPicker', 'Xe.getNotificationPermission',
+      'Xe.requestNotificationPermission', 'Xe.showNotification',
+      'Xe.closeNotification', 'Xe.setAppBadge', 'Xe.clearAppBadge',
+    ];
+    for (const method of methods) {
+      for (const sessionId of [undefined, page]) {
+        const reply = await connection.forward({ id: 42, method, params: {}, ...(sessionId ? { sessionId } : {}) });
+        assert.deepEqual(reply, {
+          id: 42, ...(sessionId ? { sessionId } : {}),
+          error: { code: -32000, message: `${method} is not implemented`,
+            data: { code: 'NOT_IMPLEMENTED', method } },
+        });
+      }
+    }
+    const unknown = await connection.forward({ id: 43, method: 'Xe.unknown' });
+    assert.equal(unknown.error.code, -32601);
+    assert.equal(unknown.error.data.code, 'METHOD_NOT_FOUND');
+    await assert.rejects(connection.forward({ id: 44, method: methods[0], sessionId: 'another-client' }), /Invalid CDP/);
+    assert.equal(commands.length, before);
+    assert.equal((await connection.forward({ id: 45, method: 'Browser.getVersion' })).result.product, 'Chrome/153');
+  } finally { await connection.close(); }
+  await assert.rejects(connection.forward({ id: 46, method: 'Xe.showDirectoryPicker' }), /disconnected/);
+});
+
 Deno.test('CDP rejects unrelated origins, HTTP and invalid routes before connecting', async () => {
   const { env, commands } = browser();
   for (const [url, options, status] of [
