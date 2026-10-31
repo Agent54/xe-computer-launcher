@@ -482,7 +482,8 @@ final class ExternalState: @unchecked Sendable {
         return nil
     }
 
-    func stopDarc() {
+    @discardableResult
+    func stopDarc() -> Bool {
         let wasRunning = darcRunning
         if let app = darcApp, !app.isTerminated {
             _ = app.terminate()
@@ -493,10 +494,11 @@ final class ExternalState: @unchecked Sendable {
                 waitForApplicationToExit(app, timeout: 2.0)
             }
         }
-        darcApp = nil
+        let stopped = darcApp?.isTerminated != false
+        if stopped { darcApp = nil }
         terminateSubprocess("darc_log")
-        appendLog("launcher", "Xe Computer stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] Xe Computer stopped (wasRunning=\(wasRunning))")
+        appendLog("launcher", "Xe Computer shutdown (wasRunning=\(wasRunning), stopped=\(stopped))")
+        return stopped
     }
 
     private func waitForApplicationToExit(_ app: NSRunningApplication, timeout: TimeInterval) {

@@ -45,6 +45,13 @@ Changing the Compose folder does not migrate existing projects. VM disks can
 grow but cannot shrink. Uninstall archives launcher data under that directory's
 `archive/` folder; external Compose projects are preserved.
 
+Hold Option when opening the tray menu for **Restart Xe** and **Uninstall…**.
+Both require verified shutdown of every component. Uninstall retains earlier
+archives and moves the approved launcher bundle to Trash. A shared lifecycle
+lock excludes other launcher copies during runtime and uninstall. Restart keeps
+the every-launch experimental-software prompt; choose **Continue** to start
+components again.
+
 Container startup is owned by the host coordinator rather than Docker's
 boot-time restart mechanism. An explicit startup list and requests for an app
 can start services without bringing up unrelated replicas or dependencies.

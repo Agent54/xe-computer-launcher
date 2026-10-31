@@ -134,6 +134,11 @@ enum SmolVMSetup {
         let machineExists = try await client.listMachines().contains { $0.name == machineName }
         if machineExists {
             try await client.stopMachine(named: machineName)
+            let status = try await client.machineStatus(named: machineName)
+            guard ["stopped", "exited"].contains(status.state.lowercased()),
+                  status.pid.map({ $0 <= 0 || (kill($0, 0) != 0 && errno == ESRCH) }) != false else {
+                throw MaintenanceFailure("The container VM still has a running process after shutdown.")
+            }
         }
         removeStaleSocketIfPresent()
     }

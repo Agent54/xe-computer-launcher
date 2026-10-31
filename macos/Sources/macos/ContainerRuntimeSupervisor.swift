@@ -165,7 +165,7 @@ actor ContainerRuntimeSupervisor {
     private var outageWasOOM = false
     private var lastPublishedAt = Date.distantPast
     private var lifecycleBusy = false
-    private var lifecycleWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lifecycleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     init(
         configuration: Configuration = Configuration(),
@@ -357,8 +357,14 @@ actor ContainerRuntimeSupervisor {
         defer { releaseLifecycle() }
         state = .stopped
         await maintenance?.pause()
-        await publish(phase: .stopped, message: "Container runtime stopped")
-        try await stopMachine()
+        do {
+            try await stopMachine()
+            await publish(phase: .stopped, message: "Container runtime stopped")
+        } catch {
+            state = .failed
+            await publish(phase: .failed, message: "Container runtime shutdown failed: \(error.localizedDescription)", reason: "shutdown_failed")
+            throw error
+        }
     }
 
     func snapshot() async -> ContainerRuntimeSnapshot {
@@ -537,7 +543,15 @@ actor ContainerRuntimeSupervisor {
     /// Queue explicit restarts and shutdown behind the current start/recovery.
     private func acquireLifecycle() async throws {
         while lifecycleBusy {
-            await withCheckedContinuation { lifecycleWaiters.append($0) }
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                    else { lifecycleWaiters[id] = continuation }
+                }
+            } onCancel: {
+                Task { await self.cancelLifecycleWaiter(id) }
+            }
         }
         try Task.checkCancellation()
         lifecycleBusy = true
@@ -547,7 +561,11 @@ actor ContainerRuntimeSupervisor {
         lifecycleBusy = false
         let waiters = lifecycleWaiters
         lifecycleWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        for waiter in waiters.values { waiter.resume() }
+    }
+
+    private func cancelLifecycleWaiter(_ id: UUID) {
+        lifecycleWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
     private func publish(

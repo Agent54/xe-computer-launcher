@@ -93,6 +93,9 @@ struct MacOSApp {
         }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--unregister-port-helper" {
+            // The standalone cleanup command shares the same exclusion rule.
+            guard let lifecycle = try? LauncherLifecycle() else { exit(1) }
+            defer { withExtendedLifetime(lifecycle) {} }
             if let warning = PrivilegedPortService.unregisterIfRegistered() {
                 fputs("\(warning)\n", stderr)
                 exit(1)
@@ -146,15 +149,35 @@ private final class LauncherStartupDelegate: NSObject, NSApplicationDelegate {
         //     exit(1)
         // }
 
-        // Set CWD to app data folder
+        // The DMG installer has no runtime state. Let it hand off to an
+        // installed copy before acquiring that copy's exclusive lifecycle lock.
+        if ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
+            self?.startRuntime()
+        }) { return }
+        startRuntime()
+    }
+
+    private func startRuntime() {
+        do {
+            LauncherLifecycle.current = try LauncherLifecycle()
+            let data = try AnchoredDirectory(ExternalState.appDataURL, create: true)
+            try data.requirePrivateOwner()
+            ApplicationMaintenance.dataDirectory = data
+            ApplicationMaintenance.startupBundle = try ApplicationMaintenance.BundleIdentity.capture()
+        } catch {
+            NSAlert(error: error).runModal()
+            NSApp.terminate(nil)
+            return
+        }
+        // Set CWD only after validating the directory and excluding other copies.
         let appDataPath = ExternalState.appDataFolder
         FileManager.default.changeCurrentDirectoryPath(appDataPath)
         print("[Init] CWD set to \(appDataPath)")
 
         let delegate = AppDelegate()
         launcherDelegate = delegate
-        app.delegate = delegate
-        delegate.applicationDidFinishLaunching(notification)
+        NSApp.delegate = delegate
+        delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     }
 }
 
@@ -164,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var setupDeferredOnThisLaunch = false
     private var isPreparingForTermination = false
     private var runtimeStartupTask: Task<Void, Never>?
+    private var setupStartupTask: Task<Void, Never>?
     private var browserStartupTask: Task<Void, Never>?
     private var composeServer: ComposeServer?
     private var workerdServer = WorkerdServer()
@@ -243,6 +267,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var terminationTimeoutTask: Task<Void, Never>?
     private var didReplyToTermination = false
     private var maintenanceAction: ApplicationMaintenance.Action?
+    private var maintenanceRequest: ApplicationMaintenance.Request?
+    private var maintenanceHandoff: ApplicationMaintenance.Handoff?
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
     private var runtimeWarningsItem: NSMenuItem?
@@ -308,11 +334,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var checkForUpdatesItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
-            self?.finishNormalStartup()
-        })
-        guard !isWaitingForRelaunch else { return }
-
         finishNormalStartup()
     }
 
@@ -384,17 +405,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             _ = updaterController
         }
 
-        Task { @MainActor in
+        setupStartupTask = Task { @MainActor in
             let workerdStateURL = WorkerdPaths.stateURL
             let orphanMessages = await Task.detached(priority: .userInitiated) {
                 WorkerdOrphanCleanup.stopOrphans(stateURL: workerdStateURL)
             }.value
+            guard !Task.isCancelled else { return }
             for message in orphanMessages { state.appendLog("launcher", message) }
             let helperWarning = setupDeferredOnThisLaunch ? nil :
                 (needsPortHelper ? await PrivilegedPortService.registerIfNeeded() :
                     PrivilegedPortService.unregisterIfRegistered())
             let bindingWarnings = setupDeferredOnThisLaunch ? [] :
                 workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper)
+            guard !Task.isCancelled else { return }
             let portWarnings = bindingWarnings + (helperWarning.map { [$0] } ?? [])
             for warning in portWarnings {
                 state.appendLog("launcher", "Warning: \(warning)")
@@ -543,6 +566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             // approvals. Starting services sooner races the system dialogs and
             // lets a fresh installation appear ready before its ports are usable.
             guard await AccessibilityPermission.requestIfNeeded() else { return }
+            guard !Task.isCancelled else { return }
             if !setupDeferredOnThisLaunch {
                 guard await requestLocalHTTPSTrustIfNeeded() else {
                     setupDeferredOnThisLaunch = true
@@ -552,6 +576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
             if !setupDeferredOnThisLaunch {
                 await runtimeSupervisor.prepareForLaunch()
+                guard !Task.isCancelled else { return }
                 startHostServices()
             }
             if needsPortHelper && !setupDeferredOnThisLaunch {
@@ -731,6 +756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func startHostServices() {
+        guard !isPreparingForTermination else { return }
         if let path = ExternalState.shared.stringSetting("compose_storage_path"), !path.isEmpty {
             composeSocketURL = ComposeServerPaths.socketURL
             composeServer = ComposeServer(stacksURL: URL(fileURLWithPath: path))
@@ -814,48 +840,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let shutdownStartedAt = Date()
             ExternalState.shared.appendLog("launcher", "Shutdown started")
 
-            let vmCleanup = Task { @MainActor in
+            let vmCleanup = Task { @MainActor () -> String? in
                 let phaseStartedAt = Date()
                 defer { shutdownComponentFinished(.containerVM) }
                 ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
                 do {
+                    await runtimeStartupTask?.value
+                    await containerVMSettingsTask?.value
                     try await runtimeSupervisor.stop()
                     ExternalState.shared.appendLog(
                         "launcher",
                         "SmolVM machine '\(SmolVMSetup.machineName)' stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
                     )
+                    return nil
                 } catch is CancellationError {
                     ExternalState.shared.appendLog(
                         "launcher",
                         "SmolVM shutdown cancelled after \(Self.elapsedDescription(since: phaseStartedAt))"
                     )
+                    return "Container VM shutdown was cancelled."
                 } catch {
                     ExternalState.shared.appendLog(
                         "launcher",
                         "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)' after \(Self.elapsedDescription(since: phaseStartedAt)): \(error.localizedDescription)"
                     )
+                    return "Container VM: \(error.localizedDescription)"
                 }
             }
 
-            let browserCleanup = Task { @MainActor in
+            let browserCleanup = Task { @MainActor () -> String? in
                 let phaseStartedAt = Date()
                 defer { shutdownComponentFinished(.browserStack) }
                 ExternalState.shared.appendLog("launcher", "Stopping Xe Computer and browser")
-                await Task.detached(priority: .userInitiated) {
+                await browserStartupTask?.value
+                let stopped = await Task.detached(priority: .userInitiated) {
                     let state = ExternalState.shared
-                    state.stopDarc()
-                    state.stopChrome()
+                    let darcStopped = state.stopDarc()
+                    let chromeStopped = state.stopChrome()
+                    do {
+                        let remaining = try state.findZombieProcessesChecked()
+                        state.killZombieProcesses(remaining)
+                        let noRemainingProcesses = try state.findZombieProcessesChecked().isEmpty
+                        return darcStopped && chromeStopped && noRemainingProcesses
+                    } catch { return false }
                 }.value
                 ExternalState.shared.appendLog(
                     "launcher",
-                    "Xe Computer and browser stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
+                    "Browser shutdown finished (stopped=\(stopped)) in \(Self.elapsedDescription(since: phaseStartedAt))"
                 )
+                return stopped ? nil : "Xe Computer or the browser did not stop, or their exit could not be verified."
             }
 
-            let hostCleanup = Task { @MainActor in
+            let hostCleanup = Task { @MainActor () -> String? in
                 let phaseStartedAt = Date()
                 defer { shutdownComponentFinished(.hostServices) }
                 ExternalState.shared.appendLog("launcher", "Stopping host services")
+                await setupStartupTask?.value
+                await hostServicesTask?.value
                 let workerdCleanup = Task { @MainActor in await workerdServer.stop() }
                 let composeCleanup = Task { @MainActor in await composeServer?.stop() }
                 await workerdCleanup.value
@@ -867,6 +908,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     "launcher",
                     "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
                 )
+                return !workerdServer.isRunning && composeServer?.isRunning != true ? nil : "Host services did not stop."
             }
 
             terminationTimeoutTask = Task { @MainActor [weak self] in
@@ -879,40 +921,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 vmCleanup.cancel()
                 browserCleanup.cancel()
                 hostCleanup.cancel()
-                finishTermination(sender, shutdownCompleted: false)
+                finishTermination(sender, shutdown: ShutdownResult(stopped: [], failures: ["Component shutdown exceeded 60 seconds."]))
             }
 
             Task {
-                await vmCleanup.value
-                await browserCleanup.value
-                await hostCleanup.value
+                let results: [(ShutdownResult.Component, String?)] = [
+                    (.containerVM, await vmCleanup.value),
+                    (.browserStack, await browserCleanup.value),
+                    (.hostServices, await hostCleanup.value)
+                ]
+                let shutdown = ShutdownResult(stopped: Set(results.filter { $0.1 == nil }.map(\.0)),
+                                              failures: results.compactMap(\.1))
                 ExternalState.shared.appendLog(
                     "launcher",
                     "Shutdown complete in \(Self.elapsedDescription(since: shutdownStartedAt))"
                 )
                 await ExternalState.shared.logStore.flush()
-                finishTermination(sender)
+                finishTermination(sender, shutdown: shutdown)
             }
         }
         return .terminateLater
     }
 
-    private func finishTermination(_ sender: NSApplication, shutdownCompleted: Bool = true) {
+    private func finishTermination(_ sender: NSApplication, shutdown: ShutdownResult) {
         guard !didReplyToTermination else { return }
         didReplyToTermination = true
         terminationTimeoutTask?.cancel()
         if let maintenanceAction {
             do {
-                guard shutdownCompleted else {
-                    throw NSError(domain: "dev.xe.computer", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey: "Shutdown did not finish in time. Xe Launcher will quit; the requested \(maintenanceAction == .restart ? "restart" : "uninstall") was cancelled."
-                    ])
+                guard shutdown.succeeded, maintenanceRequest != nil, let handoff = maintenanceHandoff else {
+                    throw MaintenanceFailure("The requested \(maintenanceAction == .restart ? "restart" : "uninstall") was cancelled. Xe Launcher will quit without changing app data.\n\n" + shutdown.failures.joined(separator: "\n"))
                 }
-                try ApplicationMaintenance.schedule(maintenanceAction)
+                try handoff.authorize(shutdown)
             } catch {
-                let alert = NSAlert(error: error)
-                NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
+                maintenanceHandoff?.cancel()
+                maintenanceHandoff = nil
+                ExternalState.shared.appendLog("launcher", "Maintenance cancelled: \(error.localizedDescription)")
+                ApplicationMaintenance.reportFailure(error.localizedDescription)
             }
         }
         sender.reply(toApplicationShouldTerminate: true)
@@ -926,6 +971,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
         beginShutdownPresentation()
+        setupStartupTask?.cancel()
+        stopStateRefreshLoop()
         runtimeStartupTask?.cancel()
         containerVMSettingsTask?.cancel()
         browserStartupTask?.cancel()
@@ -1107,6 +1154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         self.restartVMItem = restartVMItem
 
         let restartXeItem = NSMenuItem(title: "Restart Xe", action: #selector(restartXeAction), keyEquivalent: "")
+        restartXeItem.toolTip = "Restarts all components. Choose Continue in the experimental-software prompt after relaunch."
         restartXeItem.isHidden = true
         menu.addItem(restartXeItem)
         self.restartXeItem = restartXeItem
@@ -2168,14 +2216,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func restartXeAction() {
         guard !isPreparingForTermination, maintenanceAction == nil else { return }
-        maintenanceAction = .restart
+        do { try prepareMaintenance(try ApplicationMaintenance.prepare(.restart)) }
+        catch { NSAlert(error: error).runModal(); return }
         ApplicationTermination.request()
     }
 
     @objc private func uninstallAction() {
         guard !isPreparingForTermination, maintenanceAction == nil else { return }
+        let request: ApplicationMaintenance.Request
         do {
             try ApplicationMaintenance.validateAppBundle(Bundle.main.bundleURL)
+            request = try ApplicationMaintenance.prepare(.uninstall)
         } catch {
             NSApp.activate(ignoringOtherApps: true)
             NSAlert(error: error).runModal()
@@ -2189,8 +2240,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         alert.addButton(withTitle: "Uninstall")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertSecondButtonReturn else { return }
-        maintenanceAction = .uninstall
+        do { try prepareMaintenance(request) }
+        catch { NSAlert(error: error).runModal(); return }
         ApplicationTermination.request()
+    }
+
+    private func prepareMaintenance(_ request: ApplicationMaintenance.Request) throws {
+        guard let lifecycle = LauncherLifecycle.current else { throw MaintenanceFailure("The launcher lifecycle lock is unavailable.") }
+        // A helper failure at this stage leaves the live launcher untouched.
+        let handoff = try ApplicationMaintenance.schedule(request, lifecycle: lifecycle)
+        maintenanceHandoff = handoff
+        maintenanceRequest = request
+        maintenanceAction = request.action
     }
 
     @objc private func quitAction() {

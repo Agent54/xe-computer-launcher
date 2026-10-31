@@ -175,16 +175,18 @@ extension ExternalState {
         return response
     }
 
-    func stopChrome() {
+    @discardableResult
+    func stopChrome() -> Bool {
         let wasRunning = _browserPid > 0
-        terminateBrowserProcessGroup()
-        appendLog("launcher", "Chrome stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] Chrome stopped (wasRunning=\(wasRunning))")
+        let stopped = terminateBrowserProcessGroup()
+        appendLog("launcher", "Chrome shutdown (wasRunning=\(wasRunning), stopped=\(stopped))")
+        return stopped
     }
 
-    private func terminateBrowserProcessGroup() {
+    @discardableResult
+    private func terminateBrowserProcessGroup() -> Bool {
         let processGroup = _browserPid
-        guard processGroup > 0 else { return }
+        guard processGroup > 0 else { return true }
 
         Self.cdpTransport.stop()
 
@@ -197,9 +199,11 @@ extension ExternalState {
             waitForBrowserProcessGroupToExit(processGroup, timeout: 2.0)
         }
 
-        if _browserPid == processGroup {
+        let stopped = kill(-processGroup, 0) != 0 && errno == ESRCH
+        if stopped && _browserPid == processGroup {
             _browserPid = 0
         }
+        return stopped
     }
 
     private func waitForBrowserProcessGroupToExit(
@@ -498,28 +502,28 @@ extension ExternalState {
         let profileDir: String? // extracted from --user-data-dir if present
     }
 
+    static func isPrivateBrowserExecutable(_ path: String, dataURL: URL) -> Bool {
+        let root = dataURL.path
+        return path.hasPrefix(root + "/helium/") || path.hasPrefix(root + "/Helium.app/")
+    }
+
     /// Find browser and IWA processes using the launcher's private profiles and
     /// shims. These can only belong to an earlier launcher process.
     func findZombieProcesses() -> [ZombieProcess] {
-        let result: ProcessCaptureResult
-        do {
-            result = try ProcessCapture.standardOutput(
-                executableURL: URL(fileURLWithPath: "/bin/ps"),
-                arguments: ["-eo", "pid,comm"]
-            )
-        } catch {
-            appendLog("launcher", "findZombieProcesses: could not run ps: \(error.localizedDescription)")
-            return []
-        }
+        (try? findZombieProcessesChecked()) ?? []
+    }
+
+    func findZombieProcessesChecked() throws -> [ZombieProcess] {
+        let result = try ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/ps"), arguments: ["-eo", "pid,comm"]
+        )
         guard result.exitCode == 0 else {
-            appendLog("launcher", "findZombieProcesses: ps exited with code \(result.exitCode)")
-            return []
+            throw MaintenanceFailure("Could not verify browser shutdown: ps exited with code \(result.exitCode).")
         }
 
         let data = result.standardOutput
         guard let output = String(data: data, encoding: .utf8) else {
-            appendLog("launcher", "findZombieProcesses: failed to decode ps output")
-            return []
+            throw MaintenanceFailure("Could not decode the browser process list.")
         }
 
         let profilesRoot = URL(fileURLWithPath: Self.profilesPath, isDirectory: true)
@@ -545,7 +549,11 @@ extension ExternalState {
                 appendLog("launcher", "findZombieProcesses: candidate pid=\(pid) comm='\(comm)'")
             }
 
-            let isHelium = comm.hasSuffix("/Helium") || comm == "Helium"
+            // Include private engine helpers even when their main browser has
+            // already exited or they no longer share its process group.
+            let privateEngine = Self.isPrivateBrowserExecutable(comm, dataURL: Self.appDataURL)
+            let isHelium = privateEngine || ["Helium", "Chromium", "Google Chrome", "Google Chrome Canary"]
+                .contains { comm == $0 || comm.hasSuffix("/" + $0) }
             let isDarc = comm.hasSuffix("/app_mode_loader") || comm == "app_mode_loader"
 
             guard isHelium || isDarc else { continue }
@@ -554,14 +562,14 @@ extension ExternalState {
             guard pid != ownPid else { continue }
 
             let profileDir = Self.extractUserDataDir(pid: pid)
-            if isHelium {
+            if isHelium && !privateEngine {
                 guard let profileDir else { continue }
                 let normalizedProfile = URL(fileURLWithPath: profileDir, isDirectory: true)
                     .standardizedFileURL.resolvingSymlinksInPath().path
                 guard normalizedProfile == profilesRoot || normalizedProfile.hasPrefix(profilesRoot + "/") else {
                     continue
                 }
-            } else {
+            } else if isDarc {
                 let executablePath = URL(fileURLWithPath: comm)
                     .standardizedFileURL.resolvingSymlinksInPath().path
                 guard executablePath.hasPrefix(shimsRoot + "/") else { continue }

@@ -759,6 +759,64 @@ struct ContainerRuntimeSupervisorTests {
     }
 }
 
+@Suite(.serialized)
+struct RuntimeShutdownSafetyTests {
+    @Test func cancelledLifecycleWaiterFinishesBeforeTheCurrentOperation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("xe-shutdown-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (entered, entry) = AsyncStream<Void>.makeStream()
+        let (released, release) = AsyncStream<Void>.makeStream()
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root), startMachine: {
+                entry.yield(())
+                var iterator = released.makeAsyncIterator()
+                await iterator.next()
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: {}, probeDocker: { true }, readDiagnostics: { throw CancellationError() },
+            resetRouter: {}, reconcileRouter: {}, readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        let startup = Task { try await supervisor.start() }
+        var entryIterator = entered.makeAsyncIterator()
+        await entryIterator.next()
+        let (results, result) = AsyncStream<Bool>.makeStream()
+        let waiter = Task {
+            do { try await supervisor.restart(); result.yield(false) }
+            catch is CancellationError { result.yield(true) }
+            catch { result.yield(false) }
+        }
+        waiter.cancel()
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(2)); result.yield(false) }
+            catch {}
+        }
+        var resultIterator = results.makeAsyncIterator()
+        let cancelledBeforeRelease = await resultIterator.next()
+        release.yield(())
+        _ = try await startup.value
+        await waiter.value
+        timeout.cancel()
+        #expect(cancelledBeforeRelease == true)
+    }
+
+    @Test func failedVMStopThrowsAndNeverPublishesSuccessfulShutdown() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("xe-shutdown-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let phases = Mutex<[ContainerRuntimeSnapshot.Phase]>([])
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: { SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock")) },
+            stopMachine: { throw MaintenanceFailure("VM still running") }, probeDocker: { true },
+            readDiagnostics: { throw CancellationError() }, resetRouter: {}, reconcileRouter: {},
+            readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { snapshot in phases.withLock { $0.append(snapshot.phase) } }, log: { _ in }
+        )
+        await #expect(throws: (any Error).self) { try await supervisor.stop() }
+        #expect(!phases.withLock { $0 }.contains(.stopped))
+        #expect((await supervisor.snapshot()).reason == "shutdown_failed")
+    }
+}
+
 private extension JSONDecoder {
     static var withISO8601Dates: JSONDecoder {
         let decoder = JSONDecoder()
