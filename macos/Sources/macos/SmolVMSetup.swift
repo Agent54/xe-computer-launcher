@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import LauncherMaintenance
 
 struct SmolVMStartupResult: Sendable {
     let machineName: String

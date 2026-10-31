@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Sparkle
+import LauncherMaintenance
 
 private enum LauncherUpdateChannel: String {
     case stable
@@ -159,11 +160,7 @@ private final class LauncherStartupDelegate: NSObject, NSApplicationDelegate {
 
     private func startRuntime() {
         do {
-            LauncherLifecycle.current = try LauncherLifecycle()
-            let data = try AnchoredDirectory(ExternalState.appDataURL, create: true)
-            try data.requirePrivateOwner()
-            ApplicationMaintenance.dataDirectory = data
-            ApplicationMaintenance.startupBundle = try ApplicationMaintenance.BundleIdentity.capture()
+            ApplicationMaintenance.context = try ApplicationMaintenance.Context()
         } catch {
             NSAlert(error: error).runModal()
             NSApp.terminate(nil)
@@ -266,9 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var isWaitingForRuntimeShutdown = false
     private var terminationTimeoutTask: Task<Void, Never>?
     private var didReplyToTermination = false
-    private var maintenanceAction: ApplicationMaintenance.Action?
-    private var maintenanceRequest: ApplicationMaintenance.Request?
     private var maintenanceHandoff: ApplicationMaintenance.Handoff?
+    private var maintenancePreparationTask: Task<Void, Never>?
+    private var terminationHandoffTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
     private var runtimeWarningsItem: NSMenuItem?
@@ -945,21 +942,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func finishTermination(_ sender: NSApplication, shutdown: ShutdownResult) {
         guard !didReplyToTermination else { return }
-        didReplyToTermination = true
-        terminationTimeoutTask?.cancel()
-        if let maintenanceAction {
+        guard let handoff = maintenanceHandoff else { replyToTermination(sender); return }
+        guard shutdown.succeeded else {
+            terminationHandoffTask?.cancel()
+            handoff.cancel()
+            ApplicationMaintenance.reportFailure("Maintenance cancelled: " + shutdown.failures.joined(separator: "\n"))
+            replyToTermination(sender)
+            return
+        }
+        guard terminationHandoffTask == nil else { return }
+        terminationHandoffTask = Task {
             do {
-                guard shutdown.succeeded, maintenanceRequest != nil, let handoff = maintenanceHandoff else {
-                    throw MaintenanceFailure("The requested \(maintenanceAction == .restart ? "restart" : "uninstall") was cancelled. Xe Launcher will quit without changing app data.\n\n" + shutdown.failures.joined(separator: "\n"))
-                }
-                try handoff.authorize(shutdown)
+                try await handoff.authorize(shutdown)
             } catch {
-                maintenanceHandoff?.cancel()
-                maintenanceHandoff = nil
+                handoff.cancel()
+                guard !didReplyToTermination else { return }
                 ExternalState.shared.appendLog("launcher", "Maintenance cancelled: \(error.localizedDescription)")
                 ApplicationMaintenance.reportFailure(error.localizedDescription)
             }
+            // The watchdog remains active during acknowledgment. It can cancel
+            // the helper and reply without waiting for this actor operation.
+            guard !didReplyToTermination else { return }
+            replyToTermination(sender)
         }
+    }
+
+    private func replyToTermination(_ sender: NSApplication) {
+        didReplyToTermination = true
+        terminationTimeoutTask?.cancel()
         sender.reply(toApplicationShouldTerminate: true)
     }
 
@@ -971,6 +981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !isPreparingForTermination, didFinishNormalStartup else { return }
         isPreparingForTermination = true
         beginShutdownPresentation()
+        maintenancePreparationTask?.cancel()
         setupStartupTask?.cancel()
         stopStateRefreshLoop()
         runtimeStartupTask?.cancel()
@@ -2215,17 +2226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func restartXeAction() {
-        guard !isPreparingForTermination, maintenanceAction == nil else { return }
-        do { try prepareMaintenance(try ApplicationMaintenance.prepare(.restart)) }
+        guard !isPreparingForTermination, maintenanceHandoff == nil, maintenancePreparationTask == nil else { return }
+        do { prepareMaintenance(try ApplicationMaintenance.prepare(.restart)) }
         catch { NSAlert(error: error).runModal(); return }
-        ApplicationTermination.request()
     }
 
     @objc private func uninstallAction() {
-        guard !isPreparingForTermination, maintenanceAction == nil else { return }
+        guard !isPreparingForTermination, maintenanceHandoff == nil, maintenancePreparationTask == nil else { return }
         let request: ApplicationMaintenance.Request
         do {
-            try ApplicationMaintenance.validateAppBundle(Bundle.main.bundleURL)
             request = try ApplicationMaintenance.prepare(.uninstall)
         } catch {
             NSApp.activate(ignoringOtherApps: true)
@@ -2240,18 +2249,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         alert.addButton(withTitle: "Uninstall")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertSecondButtonReturn else { return }
-        do { try prepareMaintenance(request) }
-        catch { NSAlert(error: error).runModal(); return }
-        ApplicationTermination.request()
+        prepareMaintenance(request)
     }
 
-    private func prepareMaintenance(_ request: ApplicationMaintenance.Request) throws {
-        guard let lifecycle = LauncherLifecycle.current else { throw MaintenanceFailure("The launcher lifecycle lock is unavailable.") }
+    private func prepareMaintenance(_ request: ApplicationMaintenance.Request) {
         // A helper failure at this stage leaves the live launcher untouched.
-        let handoff = try ApplicationMaintenance.schedule(request, lifecycle: lifecycle)
-        maintenanceHandoff = handoff
-        maintenanceRequest = request
-        maintenanceAction = request.action
+        maintenancePreparationTask = Task {
+            defer { maintenancePreparationTask = nil }
+            do {
+                let handoff = try await ApplicationMaintenance.schedule(request)
+                guard !isPreparingForTermination else { handoff.cancel(); return }
+                maintenanceHandoff = handoff
+                ApplicationTermination.request()
+            } catch {
+                guard !Task.isCancelled, !isPreparingForTermination else { return }
+                NSAlert(error: error).runModal()
+            }
+        }
     }
 
     @objc private func quitAction() {

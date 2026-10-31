@@ -24,7 +24,7 @@ swift_compiler="$(/usr/bin/xcrun --find swiftc)"
 echo "Swift compiler: $swift_compiler"
 
 # This suite uses Swift Testing exclusively. CLT has no XCTest runner.
-test_args=(test --disable-xctest --enable-swift-testing)
+test_args=(test --configuration "${BUILD_CONFIG:-debug}" --disable-xctest --enable-swift-testing)
 frameworks_dir="$(dirname "$swift_compiler")/../../Library/Developer/Frameworks"
 if [[ -d "$frameworks_dir/Testing.framework" ]]; then
   frameworks_dir="$(cd "$frameworks_dir" && pwd -P)"
@@ -40,6 +40,6 @@ if [[ -d "$frameworks_dir/Testing.framework" ]]; then
 fi
 
 /bin/bash Tests/Integration/test-install-targets.sh
-/bin/bash Tests/Integration/settings-termination.sh
+/bin/bash Tests/Integration/test-build-graph.sh
 
 /usr/bin/xcrun swift "${test_args[@]}" "$@"

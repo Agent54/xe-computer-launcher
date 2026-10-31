@@ -59,9 +59,7 @@ struct PortHelperTests {
     }
 
     @Test func bootstrapPassesBothListenerDescriptorsToWorkerd() throws {
-        let macosRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let helper = macosRoot.appendingPathComponent(".build/debug/port-helper")
+        let helper = TestProducts.executable("port-helper")
         try #require(FileManager.default.isExecutableFile(atPath: helper.path))
 
         func listener() throws -> (FileHandle, UInt16) {

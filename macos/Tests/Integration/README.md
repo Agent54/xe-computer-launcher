@@ -114,18 +114,19 @@ processes without discarding the evidence:
 bash macos/Tests/Integration/cleanup.sh --stop-only
 ```
 
-For host runtime tests, prepare the Workerd and Compose components first:
+For host runtime tests, use the shared build graph:
 
 ```sh
-make -C macos workerd compose-ui compose-server
-bash macos/Scripts/test-runtime.sh
+make -C macos BUILD_CONFIG=debug test
 ```
 
-Use that wrapper with the selected Apple toolchain: it handles Swift Testing's
+The test wrapper uses the selected Apple toolchain and handles Swift Testing's
 framework search paths under Command Line Tools. The standalone
 `settings-termination.sh`, `test-install-targets.sh` and
 `test-ci-security-agent-cleanup.sh` regression checks do not clean a real
-installation; the first still needs a logged-in GUI session.
+installation. The settings check is built and run by the runtime suite and still
+needs a logged-in GUI session; its standalone script reuses that built fixture
+(`BUILD_CONFIG=debug` by default).
 
 ## Permission troubleshooting
 

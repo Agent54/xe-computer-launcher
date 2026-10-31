@@ -1,4 +1,5 @@
 import Foundation
+import LauncherMaintenance
 import AppKit
 import ApplicationServices
 

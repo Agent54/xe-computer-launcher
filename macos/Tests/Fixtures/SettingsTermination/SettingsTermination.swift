@@ -1,4 +1,5 @@
 import AppKit
+import LauncherMaintenance
 
 /// Exercise the Quit Now handoff after async settings work without
 /// starting the launcher's services or touching the user's VM and settings.

@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-extension ApplicationMaintenance {
+package extension ApplicationMaintenance {
     static func archiveData(at dataURL: URL, now: Date = Date(), beforeMove: (String) throws -> Void = { _ in }) throws -> URL {
         try archiveData(in: AnchoredDirectory(dataURL), now: now, beforeMove: beforeMove)
     }

@@ -1,8 +1,9 @@
-import AppKit
+import Foundation
 import Darwin
+import LauncherMaintenance
 
-// Standalone test executable compiled with the production protocol, lock, and
-// filesystem code. No fixture entry point is shipped in the launcher binary.
+// SwiftPM links this fixture and the launcher against the same maintenance
+// library. Only these disposable operations differ from the real entry point.
 let arguments = CommandLine.arguments
 if arguments.count == 1 {
     let lifecycle = try LauncherLifecycle(directoryURL: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("lifecycle"))
@@ -27,18 +28,19 @@ do {
         let action: ApplicationMaintenance.Action = mode == "restart" ? .restart : .uninstall
         let request = ApplicationMaintenance.Request(action: action, nonce: UUID().uuidString, data: data.identity,
                                                      lifecycle: lifecycle.directory.identity, bundle: bundle)
-        let handoff = try ApplicationMaintenance.schedule(request, lifecycle: lifecycle,
-            executableURL: URL(fileURLWithPath: arguments[0]), arguments: ["worker", root.path, mode, mode == "wrong-nonce" ? "wrong" : request.nonce, String(getpid())])
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: arguments[0])
+        helper.arguments = ["worker", root.path, mode, mode == "wrong-nonce" ? "wrong" : request.nonce, String(getpid())]
+        let handoff = try await ApplicationMaintenance.startHelper(helper, request: request, lifecycle: lifecycle)
         let failures: [String] = ShutdownResult.Component.allCases.contains { $0.rawValue + "-failure" == mode } ? [mode] : []
         let stopped = Set(ShutdownResult.Component.allCases.filter { $0.rawValue + "-failure" != mode })
         if mode == "no-commit" { handoff.cancel(); exit(0) }
         if mode == "parent-crash" { withExtendedLifetime(handoff) { exit(0) } }
         if mode == "invalid-commit" {
-            try handoff.channel.send(.init(kind: "commit", shutdown: ShutdownResult(stopped: [], failures: [])))
-            handoff.process.waitUntilExit()
+            _ = try await handoff.exchange(.commit(ShutdownResult(stopped: [], failures: [])))
             exit(0)
         }
-        do { try handoff.authorize(ShutdownResult(stopped: stopped, failures: failures)) }
+        do { try await handoff.authorize(ShutdownResult(stopped: stopped, failures: failures)) }
         catch { handoff.cancel(); exit(0) }
         if mode == "hold" {
             // Tell the test that readiness and commit were acknowledged, then
@@ -50,7 +52,11 @@ do {
     } else if role == "worker" {
         guard arguments.count == 6, getppid() == pid_t(arguments[5]) else { exit(2) }
         if mode == "startup-failure" { exit(3) }
-        if mode == "unresponsive-startup" { Thread.sleep(forTimeInterval: 20); exit(3) }
+        if mode == "unresponsive-startup" {
+            try Data().write(to: root.appendingPathComponent("startup-entered"))
+            try await Task.sleep(for: .seconds(20))
+            exit(3)
+        }
         let action: ApplicationMaintenance.Action = mode == "restart" ? .restart : .uninstall
         let bundle = try ApplicationMaintenance.BundleIdentity.capture(bundleURL: appURL, executableURL: executable)
         try ApplicationMaintenance.serve(action: action, nonce: arguments[4], dataURL: dataURL,

@@ -28,6 +28,8 @@ jobs:
       - name: Check out pull request
         id: checkout
         uses: actions/checkout@v4
+        with:
+          clean: true
 
       - name: Reset launcher integration environment
         env:
@@ -145,9 +147,7 @@ jobs:
             echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
             exit 1
           fi
-          make workerd compose-ui compose-server
-          /bin/bash Scripts/test-runtime.sh
-          make
+          make BUILD_CONFIG=release
 
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable

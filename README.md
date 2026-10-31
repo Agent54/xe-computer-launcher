@@ -92,6 +92,15 @@ for the same source revision:
 make -C macos BUILD_CONFIG=debug GUEST_ROUTER_ASSET_DIR=/path/to/guest-worker bundle
 ```
 
+`make` and `make bundle` prepare components once, build and run the runtime tests,
+then package the tested launcher using the same `BUILD_CONFIG` (release by
+default). Use `make -C macos BUILD_CONFIG=debug test` for host tests only.
+
+This ordering does not itself clean previous local outputs. CI uses a clean
+checkout and the guest-worker artifact from the same workflow run. The self-hosted
+Mac still supplies its toolchains and retained macOS permissions; optional VM
+tests can be skipped when their prerequisites are unavailable.
+
 Component builds normally use checksum-pinned releases. To work across repos,
 pass these overrides to `make`:
 

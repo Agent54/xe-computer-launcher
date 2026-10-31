@@ -231,7 +231,7 @@ struct WorkerdServerTests {
         try #require(FileManager.default.isExecutableFile(atPath: binary.path))
         try #require(FileManager.default.fileExists(atPath: config.path))
         let server = WorkerdServer(executableURL: binary, configURL: config,
-                                   portHelperURL: macosRoot.appendingPathComponent(".build/debug/port-helper"),
+                                   portHelperURL: TestProducts.executable("port-helper"),
                                    assetsURL: assets,
                                    stateURL: root, devtoolsURL: devtoolsAssets,
                                    runtimeStatusURL: root.appendingPathComponent("status"),

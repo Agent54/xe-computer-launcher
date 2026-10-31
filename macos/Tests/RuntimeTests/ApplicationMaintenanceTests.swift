@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import LauncherMaintenance
 @testable import macos
 
 @Suite(.serialized)
@@ -90,37 +91,14 @@ struct ApplicationMaintenanceTests {
 
     @Test @MainActor func refusesToUninstallAnUnbundledDevelopmentExecutable() {
         #expect(throws: (any Error).self) {
-            try ApplicationMaintenance.validateAppBundle(URL(fileURLWithPath: "/workspace/.build/debug/macos"))
+            try ApplicationMaintenance.validateAppBundle(URL(fileURLWithPath: "/workspace/unbundled-launcher"))
         }
     }
 
-    private static let packageURL = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-
-    private static let helperExecutable: Result<URL, Error> = Result {
-        let directory = packageURL.appendingPathComponent(".build/maintenance-fixtures")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let executable = directory.appendingPathComponent("maintenance-helper")
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["swiftc", "-swift-version", "6", "-D", "MAINTENANCE_FIXTURE",
-            "-module-cache-path", directory.appendingPathComponent("module-cache").path,
-            packageURL.appendingPathComponent("Sources/macos/LauncherLifecycle.swift").path,
-            packageURL.appendingPathComponent("Sources/macos/ApplicationMaintenance.swift").path,
-            packageURL.appendingPathComponent("Sources/macos/MaintenanceFileOperations.swift").path,
-            packageURL.appendingPathComponent("Tests/Fixtures/MaintenanceHelper/main.swift").path,
-            "-o", executable.path]
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        let diagnostics = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw MaintenanceFailure("Fixture compilation failed: " + String(decoding: diagnostics, as: UTF8.self))
-        }
-        return executable
-    }
+    // Resolve siblings of this test bundle, so debug and release tests always
+    // exercise the products SwiftPM just built for that configuration.
+    private static let productsURL = TestProducts.directory
+    private static let helperExecutable = TestProducts.executable("maintenance-test-helper")
 
     private func helperFixture() throws -> URL {
         let root = try fixture()
@@ -129,7 +107,7 @@ struct ApplicationMaintenanceTests {
         try fm.createDirectory(at: app.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
         try fm.createDirectory(at: root.appendingPathComponent("data/profiles"), withIntermediateDirectories: true)
         try Data("original settings".utf8).write(to: root.appendingPathComponent("data/settings.json"))
-        try fm.copyItem(at: Self.helperExecutable.get(), to: app.appendingPathComponent("MacOS/fixture"))
+        try fm.copyItem(at: Self.helperExecutable, to: app.appendingPathComponent("MacOS/fixture"))
         let info: [String: Any] = ["CFBundleName": "Maintenance Fixture", "CFBundleExecutable": "fixture",
             "CFBundleIdentifier": "dev.xe.maintenance-fixture.\(UUID().uuidString)", "CFBundlePackageType": "APPL", "LSUIElement": true]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: app.appendingPathComponent("Info.plist"))
@@ -138,7 +116,7 @@ struct ApplicationMaintenanceTests {
 
     private func runHost(_ mode: String, root: URL) throws {
         let host = Process()
-        host.executableURL = try Self.helperExecutable.get()
+        host.executableURL = Self.helperExecutable
         host.arguments = ["host", root.path, mode]
         try ApplicationMaintenance.runBounded(host, timeout: 10)
     }
@@ -160,7 +138,7 @@ struct ApplicationMaintenanceTests {
         let host = Process()
         let input = Pipe()
         let output = Pipe()
-        host.executableURL = try Self.helperExecutable.get()
+        host.executableURL = Self.helperExecutable
         host.arguments = ["host", root.path, "hold"]
         host.standardInput = input
         host.standardOutput = output
@@ -242,18 +220,101 @@ struct ApplicationMaintenanceTests {
     @Test(arguments: [["--xe-uninstall-after-exit", "2", "nonce"], ["--xe-uninstall-after-exit"], ["--xe-restart-after-exit", "garbage"]])
     func actualLauncherRejectsDirectOrMalformedHelperInvocations(_ arguments: [String]) throws {
         let process = Process()
-        process.executableURL = Self.packageURL.appendingPathComponent(".build/debug/macos")
+        process.executableURL = Self.productsURL.appendingPathComponent("macos")
         process.arguments = arguments
         #expect(throws: (any Error).self) { try ApplicationMaintenance.runBounded(process, timeout: 3) }
         #expect(process.terminationStatus == 1)
     }
 
     @Test func evenTheCorrectParentPIDCannotReplaceAnAuthorizedChannel() throws {
+        let fm = FileManager.default
+        // Keep the bundle on a literal path: Foundation rewrites /private/tmp
+        // to the /tmp symlink, which the identity walk deliberately rejects.
+        let root = Self.productsURL.appendingPathComponent("launcher-channel-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let contents = root.appendingPathComponent("Launcher.app/Contents")
+        try fm.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: contents.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        let executable = contents.appendingPathComponent("MacOS/macos")
+        try fm.copyItem(at: Self.productsURL.appendingPathComponent("macos"), to: executable)
+        try fm.copyItem(at: Self.productsURL.appendingPathComponent("Sparkle.framework"),
+                        to: contents.appendingPathComponent("Frameworks/Sparkle.framework"))
+        let info = ["CFBundleIdentifier": "dev.xe.maintenance-channel-test", "CFBundleExecutable": "macos", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
         let process = Process()
-        process.executableURL = Self.packageURL.appendingPathComponent(".build/debug/macos")
+        let errors = Pipe()
+        process.executableURL = executable
         process.arguments = ["--xe-uninstall-after-exit", String(ProcessInfo.processInfo.processIdentifier), UUID().uuidString]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errors
         #expect(throws: (any Error).self) { try ApplicationMaintenance.runBounded(process, timeout: 3) }
+        let diagnostic = errors.fileHandleForReading.readDataToEndOfFile()
         #expect(process.terminationStatus == 1)
+        #expect(String(decoding: diagnostic, as: UTF8.self).contains("Maintenance requires an inherited control socket."))
+        #expect(fm.fileExists(atPath: executable.path))
+    }
+
+    @Test func asyncSettingsTerminationUsesTheBuiltFixture() throws {
+        let process = Process()
+        process.executableURL = Self.productsURL.appendingPathComponent("settings-termination-test")
+        try ApplicationMaintenance.runBounded(process, timeout: 10)
+    }
+
+    @Test @MainActor func readinessWaitLeavesTheMainActorResponsiveAndCanBeCancelled() async throws {
+        let root = try helperFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lifecycle = try LauncherLifecycle(directoryURL: root.appendingPathComponent("lifecycle"))
+        let data = try AnchoredDirectory(root.appendingPathComponent("data"))
+        let app = root.appendingPathComponent("Fixture.app")
+        let bundle = try ApplicationMaintenance.BundleIdentity.capture(bundleURL: app, executableURL: app.appendingPathComponent("Contents/MacOS/fixture"))
+        let request = ApplicationMaintenance.Request(action: .uninstall, nonce: UUID().uuidString, data: data.identity,
+                                                     lifecycle: lifecycle.directory.identity, bundle: bundle)
+        let helper = Process()
+        helper.executableURL = Self.helperExecutable
+        helper.arguments = ["worker", root.path, "unresponsive-startup", request.nonce, String(ProcessInfo.processInfo.processIdentifier)]
+        let start = ContinuousClock.now
+        let preparation = Task { try await ApplicationMaintenance.startHelper(helper, request: request, lifecycle: lifecycle) }
+        try await awaitFile("startup-entered", root: root)
+        #expect(ContinuousClock.now - start < .seconds(2))
+        preparation.cancel()
+        await #expect(throws: (any Error).self) { try await preparation.value }
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("archived").path))
+    }
+
+    @Test @MainActor func commitWaitLeavesTheMainActorResponsiveAndCanBeCancelled() async throws {
+        let root = try helperFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lifecycle = try LauncherLifecycle(directoryURL: root.appendingPathComponent("lifecycle"))
+        let data = try AnchoredDirectory(root.appendingPathComponent("data"))
+        let app = root.appendingPathComponent("Fixture.app")
+        let bundle = try ApplicationMaintenance.BundleIdentity.capture(bundleURL: app, executableURL: app.appendingPathComponent("Contents/MacOS/fixture"))
+        let request = ApplicationMaintenance.Request(action: .uninstall, nonce: UUID().uuidString, data: data.identity,
+                                                     lifecycle: lifecycle.directory.identity, bundle: bundle)
+        let helper = Process()
+        helper.executableURL = Self.helperExecutable
+        helper.arguments = ["worker", root.path, "hold", request.nonce, String(ProcessInfo.processInfo.processIdentifier)]
+        let handoff = try await ApplicationMaintenance.startHelper(helper, request: request, lifecycle: lifecycle)
+        // Readiness is acknowledged before stopping the peer, so commit cannot
+        // receive an acknowledgment until we explicitly resume it.
+        try #require(kill(helper.processIdentifier, SIGSTOP) == 0)
+        defer { handoff.cancel(); kill(helper.processIdentifier, SIGCONT) }
+        let (entered, entry) = AsyncStream<Void>.makeStream()
+        let start = ContinuousClock.now
+        let commit = Task {
+            entry.yield(())
+            try await handoff.authorize(ShutdownResult(stopped: Set(ShutdownResult.Component.allCases), failures: []))
+        }
+        var iterator = entered.makeAsyncIterator()
+        await iterator.next()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(ContinuousClock.now - start < .seconds(2))
+        handoff.cancel()
+        kill(helper.processIdentifier, SIGCONT)
+        await #expect(throws: (any Error).self) { try await commit.value }
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("archived").path))
     }
 
     @Test func privateBrowserHelpersAreIncludedWithoutMatchingUnrelatedEngines() {

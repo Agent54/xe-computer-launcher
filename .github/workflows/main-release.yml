@@ -41,6 +41,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
+          clean: true
           fetch-depth: 0
 
       - name: Reset launcher integration environment
@@ -308,10 +309,8 @@ jobs:
             echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
             exit 1
           fi
-          make workerd compose-ui compose-server
-          /bin/bash Scripts/test-runtime.sh
           report_storage
-          if ! make; then
+          if ! make BUILD_CONFIG=release; then
             report_storage
             exit 1
           fi

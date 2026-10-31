@@ -1,12 +1,12 @@
 import Foundation
 import Darwin
 
-struct MaintenanceFailure: LocalizedError {
-    let errorDescription: String?
-    init(_ message: String) { errorDescription = message }
+package struct MaintenanceFailure: LocalizedError {
+    package let errorDescription: String?
+    package init(_ message: String) { errorDescription = message }
 }
 
-struct FileIdentity: Codable, Equatable, Sendable {
+package struct FileIdentity: Codable, Equatable, Sendable {
     let device: Int32
     let inode: UInt64
 
@@ -22,21 +22,21 @@ struct FileIdentity: Codable, Equatable, Sendable {
     }
 }
 
-func posixFailure() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+package func posixFailure() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
 /// Walk every ancestor without following links. Keep the final directory open;
 /// mutations use *at syscalls against it, never a newly resolved absolute path.
-final class AnchoredDirectory: @unchecked Sendable {
-    struct Identity: Codable, Equatable, Sendable {
-        let path: String
-        let ancestors: [FileIdentity]
+package final class AnchoredDirectory {
+    package struct Identity: Codable, Equatable, Sendable {
+        package let path: String
+        package let ancestors: [FileIdentity]
     }
 
-    let descriptor: Int32
-    let identity: Identity
-    var url: URL { URL(fileURLWithPath: identity.path, isDirectory: true) }
+    package let descriptor: Int32
+    package let identity: Identity
+    package var url: URL { URL(fileURLWithPath: identity.path, isDirectory: true) }
 
-    init(_ url: URL, create: Bool = false, expected: Identity? = nil) throws {
+    package init(_ url: URL, create: Bool = false, expected: Identity? = nil) throws {
         guard url.isFileURL, url.path.hasPrefix("/"), !url.pathComponents.contains("..") else {
             throw MaintenanceFailure("Invalid directory path.")
         }
@@ -70,7 +70,7 @@ final class AnchoredDirectory: @unchecked Sendable {
 
     deinit { close(descriptor) }
 
-    init(childOf parent: AnchoredDirectory, name: String, create: Bool = false) throws {
+    package init(childOf parent: AnchoredDirectory, name: String, create: Bool = false) throws {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { throw MaintenanceFailure("Invalid directory name.") }
         try parent.validate()
         if create, mkdirat(parent.descriptor, name, 0o700) != 0, errno != EEXIST { throw posixFailure() }
@@ -83,14 +83,14 @@ final class AnchoredDirectory: @unchecked Sendable {
         } catch { close(fd); throw error }
     }
 
-    func validate() throws {
+    package func validate() throws {
         _ = try AnchoredDirectory(url, expected: identity)
         guard try FileIdentity.read(descriptor) == identity.ancestors.last else {
             throw MaintenanceFailure("Directory identity changed: \(identity.path)")
         }
     }
 
-    func requirePrivateOwner() throws {
+    package func requirePrivateOwner() throws {
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0 else { throw posixFailure() }
         guard metadata.st_uid == geteuid(), metadata.st_mode & 0o022 == 0 else {
@@ -98,7 +98,7 @@ final class AnchoredDirectory: @unchecked Sendable {
         }
     }
 
-    func names() throws -> [String] {
+    package func names() throws -> [String] {
         // openat creates an independent directory offset (dup would share it).
         let copy = openat(descriptor, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard copy >= 0 else { throw posixFailure() }
@@ -118,13 +118,13 @@ final class AnchoredDirectory: @unchecked Sendable {
         }
     }
 
-    func entryIdentity(_ name: String) throws -> FileIdentity {
+    package func entryIdentity(_ name: String) throws -> FileIdentity {
         var metadata = stat()
         guard fstatat(descriptor, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0 else { throw posixFailure() }
         return FileIdentity(metadata)
     }
 
-    func move(_ name: String, to destination: AnchoredDirectory, as destinationName: String) throws {
+    package func move(_ name: String, to destination: AnchoredDirectory, as destinationName: String) throws {
         guard renameatx_np(descriptor, name, destination.descriptor, destinationName, UInt32(RENAME_EXCL)) == 0 else {
             throw posixFailure()
         }
@@ -133,19 +133,17 @@ final class AnchoredDirectory: @unchecked Sendable {
 
 /// Stored outside app data, so archival never moves or replaces the lock file.
 /// The helper inherits the very same open file description and its flock.
-final class LauncherLifecycle: @unchecked Sendable {
-    @MainActor static var current: LauncherLifecycle?
+package final class LauncherLifecycle {
+    package let directory: AnchoredDirectory
+    package private(set) var descriptor: Int32
+    private let fileIdentity: FileIdentity
 
-    let directory: AnchoredDirectory
-    private(set) var descriptor: Int32
-    let fileIdentity: FileIdentity
-
-    static var directoryURL: URL {
+    package static var directoryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
             .appendingPathComponent("Library/Application Support/.dev.xe.computer-lifecycle", isDirectory: true)
     }
 
-    init(directoryURL: URL = LauncherLifecycle.directoryURL, inherited: Int32? = nil) throws {
+    package init(directoryURL: URL = LauncherLifecycle.directoryURL, inherited: Int32? = nil) throws {
         directory = try AnchoredDirectory(directoryURL, create: inherited == nil)
         try directory.requirePrivateOwner()
         let fd = inherited.map { fcntl($0, F_DUPFD_CLOEXEC, 3) }
@@ -167,11 +165,13 @@ final class LauncherLifecycle: @unchecked Sendable {
         } catch { close(fd); throw error }
     }
 
-    deinit { close(descriptor) }
+    deinit { if descriptor >= 0 { close(descriptor) } }
 
-    func release() { close(descriptor); descriptor = -1 }
+    package func release() {
+        if descriptor >= 0 { close(descriptor); descriptor = -1 }
+    }
 
-    func validate() throws {
+    package func validate() throws {
         try directory.validate()
         guard try directory.entryIdentity("lock") == fileIdentity else {
             throw MaintenanceFailure("The launcher lifecycle lock was replaced.")

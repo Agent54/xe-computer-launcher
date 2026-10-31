@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import Testing
+import LauncherMaintenance
 @testable import macos
 
 private actor RuntimeFixture {

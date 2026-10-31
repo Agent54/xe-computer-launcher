@@ -49,12 +49,17 @@ NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYC
 DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
 DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
 
-.PHONY: all clean build smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd sign-port-helper verify-workerd verify-port-helper verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
+.PHONY: all clean build test smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd sign-port-helper verify-workerd verify-port-helper verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
 build:
 	$(SWIFT) build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
+
+# One SwiftPM build produces the launcher, helpers, and tests in the same
+# configuration. Packaging below consumes that tested launcher binary.
+test: workerd compose-ui compose-server
+	@BUILD_CONFIG="$(BUILD_CONFIG)" /bin/bash Scripts/test-runtime.sh $(SWIFT_BUILD_FLAGS)
 
 smol-runtime:
 	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Scripts/prepare-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
@@ -86,7 +91,7 @@ guest-worker: workerd
 	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
 	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 --check checksums.txt
 
-package: build smol-runtime compose-server workerd guest-worker compose-ui
+package: test smol-runtime guest-worker
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
