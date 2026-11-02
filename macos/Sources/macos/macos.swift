@@ -1250,7 +1250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 self.renderMenuLabels(refreshServiceState: false)
             }
         }
-        let selected = state.selectedChrome()
+        let selectedVariant = state.stringSetting("selected_chrome_variant") ?? "helium"
         let options = (menuChromeOptions.isEmpty ? state.installedChromes : menuChromeOptions)
             .filter { $0.isInstalled && ($0.version ?? 0) >= 145 }
         if chromeVariantItems == nil {
@@ -1269,8 +1269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 item.action = #selector(chromeVariantSelected(_:))
                 item.target = self
                 item.representedObject = key
-                item.isEnabled = true
-                item.state = key == selected?.variant ? .on : .off
+                item.isEnabled = lastSelectedProfile == state.selectedProfileName()
+                item.state = key == selectedVariant ? .on : .off
             } else {
                 item.title = chromeScanTask == nil ? "No compatible Chrome found" : "Looking for Chrome…"
                 item.action = nil
@@ -1607,7 +1607,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             })
         }
         let serviceState = menuServiceState.snapshot
-        let activeProfileMatches = lastSelectedProfile == state.selectedProfileName()
         let sampledProfileMatches = serviceState.profile == state.selectedProfileName()
         let chromeRunning = sampledProfileMatches && serviceState.chromeRunning
         let darcRunning = sampledProfileMatches && serviceState.darcRunning
@@ -1629,6 +1628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
+        let activeProfileMatches = lastSelectedProfile == state.selectedProfileName()
 
         // Update active profile title with status indicator
         // 🟢 = both darc + chrome running, 🔵 = chrome only, ⏳ = pending
@@ -1650,7 +1650,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         // Update titles and enable states for active profile items
         darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: activeProfileMatches && darcRunning)
-        let chromeName = state.selectedChrome()?.name ?? "Chrome Engine"
+        let selectedVariant = state.stringSetting("selected_chrome_variant") ?? "helium"
+        let chromeName = state.selectedChrome()?.name ?? menuChromeOptions.first {
+            $0.variant == selectedVariant && $0.isInstalled && ($0.version ?? 0) >= 145
+        }?.name ?? "Chrome Engine"
         chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: activeProfileMatches && chromeRunning)
 
         let darcPending = pendingServices.contains("darc")
@@ -1853,13 +1856,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let critical = menuWarnings.contains { $0.isHostWarning }
         runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
         runtimeWarningsItem?.isEnabled = !menuWarnings.isEmpty
+            || (isMenuTracking && warningMenuItems.menu.numberOfItems > 0)
         if menuWarnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
         if let item = runtimeWarningsItem {
             item.attributedTitle = NSAttributedString(string: item.title, attributes: [
                 .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
             ])
         }
-        warningMenuItems.update(keys: menuWarnings.map(\.kind), deferStructuralChanges: isMenuTracking) { kind, item in
+        // A previously empty, disabled submenu cannot be open yet, so its
+        // first warning can appear immediately without disturbing tracking.
+        let keepWarningRows = isMenuTracking && warningMenuItems.menu.numberOfItems > 0
+        warningMenuItems.update(keys: menuWarnings.map(\.kind), deferStructuralChanges: keepWarningRows) { kind, item in
             guard let warning = menuWarnings.first(where: { $0.kind == kind }) else { return }
             let ignored = runtimeWarnings.isIgnored(warning)
             item.title = warning.title + (ignored ? " (ignored)…" : "…")

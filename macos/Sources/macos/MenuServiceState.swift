@@ -4,7 +4,8 @@ import Foundation
 @MainActor
 final class MenuServiceState {
     struct Snapshot: Sendable, Equatable {
-        var profile = "default"
+        // An unsampled profile must not enable Start using assumed stopped state.
+        var profile = ""
         var chromeRunning = false
         var darcRunning = false
     }
