@@ -4,7 +4,7 @@ import Foundation
 /// Launcher warning history and acknowledgements, independent of Compose UI dismissal.
 @MainActor
 final class ContainerRuntimeWarnings {
-    enum Kind: String, Sendable {
+    enum Kind: String, Hashable, Sendable {
         case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk
 
         var settingKey: String { "runtime_ignored_\(rawValue)_id" }

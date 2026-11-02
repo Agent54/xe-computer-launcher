@@ -31,7 +31,7 @@ final class ExternalState: @unchecked Sendable {
         "enable-mac-pwas-notification-attribution@1"
     ]
 
-    struct InstalledChrome {
+    struct InstalledChrome: Sendable {
         let name: String
         let appPath: String
         let executablePath: String
@@ -223,6 +223,12 @@ final class ExternalState: @unchecked Sendable {
     ///   When `false` (default), only populate the configured variant (defaults to Helium) to avoid
     ///   silently falling back to a different browser.
     func refreshChromeAvailability(scanAll: Bool = false) {
+        installedChromes = scanChromeAvailability(scanAll: scanAll)
+    }
+
+    /// Discovery may launch browser executables. Call off the UI thread and
+    /// return a value without replacing the runtime's configured-browser cache.
+    func scanChromeAvailability(scanAll: Bool = false) -> [InstalledChrome] {
         let heliumApp = Self.resolveHelperApp(name: "Helium.app")
         let heliumExec = heliumApp.appendingPathComponent("Contents/MacOS/Helium")
         let allChromePaths: [(String, String, String, String)] = [
@@ -242,7 +248,7 @@ final class ExternalState: @unchecked Sendable {
             chromePaths = allChromePaths.filter { $0.3 == savedVariant }
         }
 
-        installedChromes = chromePaths.map { name, app, exec, variant in
+        return chromePaths.map { name, app, exec, variant in
             InstalledChrome(
                 name: name,
                 appPath: app,

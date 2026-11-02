@@ -297,6 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var optionKeyTimer: Timer?
     private var lastOptionKeyState: Bool = false
     private var chromeVariantsScanned: Bool = false
+    private var chromeScanTask: Task<Void, Never>?
+    private var menuChromeOptions: [ExternalState.InstalledChrome] = []
+    private let menuServiceState = MenuServiceState()
+    private var isMenuTracking = false
+    private var canUseUpdater = false
+    private let warningMenuItems = LiveMenuItems<ContainerRuntimeWarnings.Kind>()
 
     // Track which services have a pending operation (shows ⏳)
     private var pendingServices: Set<String> = []
@@ -394,7 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // Updating a copy on a read-only disk image cannot succeed. The copy
         // installed into /Applications or ~/Applications starts Sparkle on its
         // first normal launch instead.
-        if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+        canUseUpdater = isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage()
+        if canUseUpdater {
             ExternalState.shared.appendLog(
                 "launcher",
                 "Sparkle update channel: \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
@@ -1098,6 +1105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         warningsItem.isEnabled = false
         menu.addItem(warningsItem)
         runtimeWarningsItem = warningsItem
+        warningsItem.submenu = warningMenuItems.menu
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -1212,7 +1220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         statusItem?.menu = menu
     }
 
-    private var chromeVariantItems: [NSMenuItem] = []
+    private var chromeVariantItems: LiveMenuItems<String>?
     private var chromeSubmenu: NSMenu?
 
 
@@ -1227,44 +1235,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func refreshChromeMenuOptions(in submenu: NSMenu) {
-        // Remove old variant items
-        for old in chromeVariantItems { submenu.removeItem(old) }
-        chromeVariantItems.removeAll()
-        if let sep = chromeVariantSeparator { submenu.removeItem(sep); chromeVariantSeparator = nil }
-
         let state = ExternalState.shared
-        let minVersion = 145
         let showVariants = isOptionKeyHeld
-
-        // Only scan all Chrome variants once when Option key is first pressed
-        if showVariants && !chromeVariantsScanned {
-            state.refreshChromeAvailability(scanAll: true)
+        if showVariants && !chromeVariantsScanned && chromeScanTask == nil {
             chromeVariantsScanned = true
+            chromeScanTask = Task { [weak self] in
+                let options = await Task.detached(priority: .utility) {
+                    state.scanChromeAvailability(scanAll: true)
+                }.value
+                guard let self else { return }
+                self.menuChromeOptions = options
+                self.chromeScanTask = nil
+                guard !self.isPreparingForTermination else { return }
+                self.renderMenuLabels(refreshServiceState: false)
+            }
         }
         let selected = state.selectedChrome()
-
-        // Only show variant selector when Option key is held
-        guard showVariants else { return }
-
-        let sep = NSMenuItem.separator()
-        submenu.addItem(sep)
-        chromeVariantSeparator = sep
-
-        for chrome in state.installedChromes where chrome.isInstalled && (chrome.version ?? 0) >= minVersion {
-            let versionStr = chrome.version.map { " (v\($0))" } ?? ""
-            let menuItem = NSMenuItem(title: "\(chrome.name)\(versionStr)", action: #selector(chromeVariantSelected(_:)), keyEquivalent: "")
-            menuItem.target = self
-            menuItem.representedObject = chrome.variant
-            menuItem.state = (chrome.variant == selected?.variant) ? .on : .off
-            submenu.addItem(menuItem)
-            chromeVariantItems.append(menuItem)
+        let options = (menuChromeOptions.isEmpty ? state.installedChromes : menuChromeOptions)
+            .filter { $0.isInstalled && ($0.version ?? 0) >= 145 }
+        if chromeVariantItems == nil {
+            let separator = NSMenuItem.separator()
+            submenu.addItem(separator)
+            chromeVariantSeparator = separator
+            chromeVariantItems = LiveMenuItems(menu: submenu)
         }
-
-        if chromeVariantItems.isEmpty {
-            let none = NSMenuItem(title: "No compatible Chrome found", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            submenu.addItem(none)
-            chromeVariantItems.append(none)
+        chromeVariantSeparator?.isHidden = !showVariants
+        let keys = options.isEmpty ? ["unavailable"] : options.map(\.variant)
+        chromeVariantItems?.update(keys: keys) { key, item in
+            item.isHidden = !showVariants
+            if let chrome = options.first(where: { $0.variant == key }) {
+                let version = chrome.version.map { " (v\($0))" } ?? ""
+                item.title = "\(chrome.name)\(version)"
+                item.action = #selector(chromeVariantSelected(_:))
+                item.target = self
+                item.representedObject = key
+                item.isEnabled = true
+                item.state = key == selected?.variant ? .on : .off
+            } else {
+                item.title = chromeScanTask == nil ? "No compatible Chrome found" : "Looking for Chrome…"
+                item.action = nil
+                item.isEnabled = false
+            }
         }
     }
 
@@ -1294,6 +1305,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         if profiles == lastProfileList && selected == lastSelectedProfile && !profileMenuItems.isEmpty {
             return
         }
+        // Removing a parent row tears down any submenu AppKit is tracking.
+        // Apply profile-list/selection changes after the menu closes.
+        guard !isMenuTracking else { return }
         lastProfileList = profiles
         lastSelectedProfile = selected
 
@@ -1306,6 +1320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         darcItem = nil; darcStartItem = nil; darcStopItem = nil
         chromeItem = nil; chromeStartItem = nil; chromeStopItem = nil
         chromeHeadlessItem = nil; chromeSubmenu = nil
+        chromeVariantItems = nil; chromeVariantSeparator = nil
         darcOverrideItem = nil; darcOverrideSeparator = nil
 
         var insertIdx = profileInsertionIndex
@@ -1485,7 +1500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
         renderMenuLabels()
+        isMenuTracking = true
         guard !isPreparingForTermination else { return }
         let optionHeld = isOptionKeyHeld
         lastOptionKeyState = optionHeld
@@ -1516,6 +1533,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        isMenuTracking = false
         stopStateRefreshLoop()
         if let specialKeyCheck {
             NSEvent.removeMonitor(specialKeyCheck)
@@ -1526,6 +1545,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         lastOptionKeyState = false
         chromeVariantsScanned = false
         updateOptionOnlyMenuItems(optionHeld: false)
+        Task { @MainActor [weak self] in
+            // Wait until AppKit has unwound the menu tracking loop before
+            // applying deferred hierarchy changes or presenting a dialog.
+            await Task.yield()
+            guard let self, !self.isMenuTracking else { return }
+            self.renderMenuLabels()
+        }
     }
 
     private func updateOptionOnlyMenuItems(optionHeld: Bool) {
@@ -1558,7 +1584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         return running ? "\(name) 🟢" : name
     }
 
-    private func renderMenuLabels() {
+    private func renderMenuLabels(refreshServiceState: Bool = true) {
         if isPreparingForTermination {
             updateShutdownStatus()
             if let menu = statusItem?.menu {
@@ -1569,6 +1595,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         let state = ExternalState.shared
+        if refreshServiceState {
+            menuServiceState.refresh(sample: {
+                MenuServiceState.Snapshot(
+                    profile: state.selectedProfileName(),
+                    chromeRunning: state.chromeRunning, darcRunning: state.darcRunning
+                )
+            }, didRefresh: { [weak self] in
+                guard let self, !self.isPreparingForTermination else { return }
+                self.renderMenuLabels(refreshServiceState: false)
+            })
+        }
+        let serviceState = menuServiceState.snapshot
+        let activeProfileMatches = lastSelectedProfile == state.selectedProfileName()
+        let sampledProfileMatches = serviceState.profile == state.selectedProfileName()
+        let chromeRunning = sampledProfileMatches && serviceState.chromeRunning
+        let darcRunning = sampledProfileMatches && serviceState.darcRunning
         renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
         let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
         if settingsRestartRequired {
@@ -1591,15 +1633,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // Update active profile title with status indicator
         // 🟢 = both darc + chrome running, 🔵 = chrome only, ⏳ = pending
         if let activeProfileItem {
-            let name = state.selectedProfileName()
+            let name = lastSelectedProfile
             let hasOverride = state.darcOverrideURL(forProfile: name) != nil
             let baseName = hasOverride ? "\(name) (dev proxy)" : name
             let anyPending = pendingServices.contains("chrome") || pendingServices.contains("darc")
             if anyPending {
                 activeProfileItem.title = "\(baseName) ⏳"
-            } else if state.chromeRunning && state.darcRunning {
+            } else if activeProfileMatches && chromeRunning && darcRunning {
                 activeProfileItem.title = "\(baseName) 🟢"
-            } else if state.chromeRunning {
+            } else if activeProfileMatches && chromeRunning {
                 activeProfileItem.title = "\(baseName) 🔵"
             } else {
                 activeProfileItem.title = baseName
@@ -1607,17 +1649,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         // Update titles and enable states for active profile items
-        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: state.darcRunning)
+        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: activeProfileMatches && darcRunning)
         let chromeName = state.selectedChrome()?.name ?? "Chrome Engine"
-        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: state.chromeRunning)
+        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: activeProfileMatches && chromeRunning)
 
         let darcPending = pendingServices.contains("darc")
         let chromePending = pendingServices.contains("chrome")
 
-        darcStartItem?.isEnabled = !state.darcRunning && !darcPending
-        darcStopItem?.isEnabled = state.darcRunning && !darcPending
-        chromeStartItem?.isEnabled = !state.chromeRunning && !chromePending
-        chromeStopItem?.isEnabled = state.chromeRunning && !chromePending
+        darcStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !darcRunning && !darcPending
+        darcStopItem?.isEnabled = activeProfileMatches && darcRunning && !darcPending
+        chromeStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !chromeRunning && !chromePending
+        chromeStopItem?.isEnabled = activeProfileMatches && chromeRunning && !chromePending
+        chromeHeadlessItem?.isEnabled = activeProfileMatches
         chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: true) ? .on : .off
 
         // Refresh chrome variant options (only adds items when Option key is held)
@@ -1628,7 +1671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
         hideDockIconItem?.state = state.boolSetting("hide_dock_icon", default: false) ? .on : .off
-        if isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage() {
+        if canUseUpdater {
             checkForUpdatesItem?.isEnabled = updaterController.updater.canCheckForUpdates
         } else {
             checkForUpdatesItem?.isEnabled = true
@@ -1816,22 +1859,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
             ])
         }
-        let submenu = NSMenu()
-        submenu.autoenablesItems = false
-        for warning in menuWarnings {
+        warningMenuItems.update(keys: menuWarnings.map(\.kind), deferStructuralChanges: isMenuTracking) { kind, item in
+            guard let warning = menuWarnings.first(where: { $0.kind == kind }) else { return }
             let ignored = runtimeWarnings.isIgnored(warning)
-            let item = NSMenuItem(
-                title: warning.title + (ignored ? " (ignored)…" : "…"),
-                action: #selector(showRuntimeWarningAction(_:)), keyEquivalent: ""
-            )
+            item.title = warning.title + (ignored ? " (ignored)…" : "…")
+            item.action = #selector(showRuntimeWarningAction(_:))
             item.target = self
             item.representedObject = warning
+            item.isEnabled = true
             if warning.isHostWarning {
                 item.attributedTitle = NSAttributedString(string: item.title, attributes: [.foregroundColor: NSColor.systemRed])
             }
-            submenu.addItem(item)
         }
-        runtimeWarningsItem?.submenu = menuWarnings.isEmpty ? nil : submenu
         if let button = statusItem?.button {
             button.imagePosition = .imageLeft
             button.attributedTitle = NSAttributedString(string: count > 0 || critical ? " ⚠︎" : "", attributes: [
@@ -1846,6 +1885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func presentNextRuntimeWarning() {
+        guard !isMenuTracking else { return }
         guard let warning = runtimeWarnings.nextAutomaticWarning else { return }
         showRuntimeWarning(warning, automatically: true)
     }
@@ -1865,7 +1905,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 presentNextRuntimeWarning()
             }
             let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
-            guard !isPreparingForTermination, containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
+            guard !isPreparingForTermination, !isMenuTracking,
+                  containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
             // The event may have recovered, been ignored, or been superseded
             // while host sampling was suspended. Present the current details.
             let warning: ContainerRuntimeWarnings.Warning
@@ -2276,10 +2317,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func startStateRefreshLoop() {
         guard stateRefreshTimer == nil else { return }
-        stateRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             // Re-render service state while the menu is open.
             Task { @MainActor [weak self] in self?.renderMenuLabels() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        stateRefreshTimer = timer
     }
 
     private func stopStateRefreshLoop() {
