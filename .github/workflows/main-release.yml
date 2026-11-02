@@ -54,6 +54,9 @@ jobs:
           name: guest-worker
           path: workerd/dist
 
+      - name: Test release version calculation
+        run: bash macos/Tests/Integration/test-release-version.sh
+
       - name: Calculate next release version
         id: version
         shell: bash
@@ -80,7 +83,20 @@ jobs:
           fi
 
           if [[ "$GITHUB_REF_NAME" == "int" ]]; then
-            release_tag="$version-int.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+            # Integration releases count from zero for each base version.
+            # Keep the global run number only in CFBundleVersion so Sparkle
+            # continues to order builds monotonically across version bumps.
+            integration_build=0
+            integration_pattern="^${version//./\\.}-int\\.([0-9]+)\\.([0-9]+)$"
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ $integration_pattern ]]; then
+                previous_build="${BASH_REMATCH[1]}"
+                if (( previous_build >= integration_build )); then
+                  integration_build=$((previous_build + 1))
+                fi
+              fi
+            done < <(git tag --list "$version-int.*")
+            release_tag="$version-int.$integration_build.$((GITHUB_RUN_ATTEMPT - 1))"
             prerelease="true"
             update_channel="int"
           else

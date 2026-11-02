@@ -36,6 +36,9 @@ jobs:
           XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
         run: bash macos/Tests/Integration/cleanup-ci.sh
 
+      - name: Test release version calculation
+        run: bash macos/Tests/Integration/test-release-version.sh
+
       - name: Verify Sparkle delta appcast fixture
         run: |
           macos/Tests/Integration/verify-appcast.sh \
