@@ -103,5 +103,58 @@ struct SystemLogStoreTests {
         #expect(lines.first == "original failure")
         #expect(lines.last == "still running")
         #expect(lines.filter { $0.hasPrefix("Could not save System Logs:") }.count == 1)
+        #expect(store.latestIssue?.severity == .error)
+    }
+
+    @Test func shutdownWarningSurvivesRelaunchAndLogRotation() async throws {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SystemLogStore(directoryURL: directory,
+            configuration: .init(memoryEntries: 2, fileBytes: 512, fileCount: 2))
+        store.append("launcher", "Chrome process group did not exit after Browser.close (10.0s); sending SIGTERM")
+        let warning = try #require(store.latestIssue)
+        for index in 0..<30 { store.append("launcher", "normal line \(index): " + String(repeating: "x", count: 120)) }
+        await store.flush()
+        #expect(!store.snapshot().entries.contains(warning))
+        #expect(!(await store.history()).entries.contains(warning))
+        let reopened = SystemLogStore(directoryURL: directory)
+        #expect(reopened.latestIssue == warning)
+        #expect(try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("last-warning.json").path)[.posixPermissions] as? Int == 0o600)
+    }
+
+    @Test func repeatedErrorsShareAnIssueButNewErrorsAndRecurrencesWarnAgain() async throws {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SystemLogStore(directoryURL: directory)
+        store.append("browser", "Process exited with code -1")
+        let first = try #require(store.latestIssue)
+        store.append("launcher", "normal progress")
+        store.append("browser", "Process exited with code -1")
+        #expect(store.latestIssue == first)
+        store.append("workerd", "Error: connection failed")
+        #expect(store.latestIssue?.id != first.id)
+        await store.flush()
+        let reopened = SystemLogStore(directoryURL: directory)
+        let previous = try #require(reopened.latestIssue)
+        reopened.append(previous.source, previous.line)
+        #expect(try #require(reopened.latestIssue).id > previous.id)
+        await reopened.flush()
+    }
+
+    @Test func importsAnOldBrowserCrashWithoutReplayingHealthyShutdownLogs() async throws {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let crash = SystemLogStore.Entry(id: 41, source: "launcher", line: "browser process exited (code=-1)", timestamp: Date())
+        let healthy = SystemLogStore.Entry(id: 42, source: "launcher", line: "Shutdown complete in 0.6s", timestamp: Date())
+        var data = try JSONEncoder().encode(crash)
+        data.append(0x0a)
+        data.append(try JSONEncoder().encode(healthy))
+        data.append(0x0a)
+        try data.write(to: directory.appendingPathComponent("system.jsonl"))
+        let reopened = SystemLogStore(directoryURL: directory)
+        await reopened.flush()
+        #expect(reopened.latestIssue == crash)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("last-warning.json").path))
     }
 }

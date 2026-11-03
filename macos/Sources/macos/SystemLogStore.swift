@@ -42,6 +42,7 @@ final class SystemLogStore: @unchecked Sendable {
     private var reportedWriteFailure = false
     private var issue: Entry?
     private var lastIssueInRun: Entry?
+    private var persistedIssueID: UInt64?
     // File state is confined to writer.
     private var handle: FileHandle?
     private var fileBytes = 0
@@ -54,6 +55,7 @@ final class SystemLogStore: @unchecked Sendable {
         let savedIssue = (try? Data(contentsOf: directoryURL.appendingPathComponent("last-warning.json")))
             .flatMap { try? JSONDecoder().decode(Entry.self, from: $0) }
         issue = savedIssue.flatMap { $0.id < UInt64(Int64.max) && $0.severity != .info ? $0 : nil }
+        persistedIssueID = issue?.id
         // Read only the journal tail at startup; older history is loaded on demand.
         let latest = (0..<configuration.fileCount).lazy.compactMap { index in
             Self.readEntries(url: directoryURL.appendingPathComponent(index == 0 ? "system.jsonl" : "system.jsonl.\(index)"), limit: 1).first?.id
@@ -152,12 +154,13 @@ final class SystemLogStore: @unchecked Sendable {
     }
 
     private func persistIssue() throws {
-        guard let issue = latestIssue else { return }
+        guard let issue = latestIssue, issue.id != persistedIssueID else { return }
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         let url = directoryURL.appendingPathComponent("last-warning.json")
         try JSONEncoder().encode(issue).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        persistedIssueID = issue.id
     }
 
     private func fileURL(_ index: Int) -> URL {

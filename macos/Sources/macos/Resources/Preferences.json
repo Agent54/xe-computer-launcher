@@ -1,1 +1,917 @@
-{"NewTabPage":{"PrevNavigationTime":"13417886580042558"},"accessibility":{"captions":{"headless_caption_enabled":false}},"ack_existing_ntp_extensions":true,"alternate_error_pages":{"backup":false},"announcement_notification_service_first_run_time":"13417805211988839","apps":{"shortcuts_arch":"arm64","shortcuts_version":8},"autocomplete":{"retention_policy_last_version":145},"autofill":{"last_version_deduped":145,"ran_extra_deduplication":true},"bookmark":{"storage_computation_last_update":"13417805204855613"},"browser":{"app_window_placement":{"_crx_olcppkbdbkjjkmaedekgaajkgipnodan":{"bottom":638,"left":221,"maximized":false,"right":1021,"top":38,"work_area_bottom":1169,"work_area_left":0,"work_area_right":1800,"work_area_top":38}},"theme":{"is_grayscale2":true},"window_placement":{"bottom":1085,"left":356,"maximized":false,"right":1481,"top":149,"work_area_bottom":1169,"work_area_left":0,"work_area_right":1800,"work_area_top":38}},"commerce_daily_metrics_last_update_time":"13417805204856214","countryid_at_install":17733,"default_apps_install_state":3,"default_search_provider":{"choice_screen_completion_program":3,"choice_screen_completion_timestamp":"13417805352","choice_screen_completion_version":"145.0.7632.116","choice_screen_random_shuffle_seed":"2218695142333505731","guid":"485bf7d3-0215-45af-87dc-538868000092","reset_occurred":false},"default_search_provider_data":{"mirrored_template_url_data":{"alternate_urls":[],"contextual_search_url":"","created_from_play_api":false,"date_created":"0","doodle_url":"","enforced_by_policy":false,"favicon_url":"","featured_by_policy":false,"id":"3","image_search_branding_label":"","image_translate_source_language_param_key":"","image_translate_target_language_param_key":"","image_translate_url":"","image_url":"","image_url_post_params":"","input_encodings":["UTF-8"],"is_active":0,"keyword":"duckduckgo.com","last_modified":"0","last_visited":"0","logo_url":"https://staticcdn.duckduckgo.com/android/DuckDuckGoLogo.png","new_tab_url":"https://duckduckgo.com/chrome_newtab","originating_url":"","policy_origin":0,"preconnect_to_search_url":false,"prefetch_likely_navigations":false,"prepopulate_id":92,"safe_for_autoreplace":true,"search_intent_params":[],"search_url_post_params":"","short_name":"DuckDuckGo","starter_pack_id":0,"suggestions_url":"https://duckduckgo.com/ac/?q={searchTerms}&type=list","suggestions_url_post_params":"","synced_guid":"485bf7d3-0215-45af-87dc-538868000092","url":"https://duckduckgo.com/?q={searchTerms}","usage_count":0}},"domain_diversity":{"last_reporting_timestamp":"13417827910369059","last_reporting_timestamp_v4":"13417827910369076"},"dual_layer_user_pref_store":{"user_selected_sync_types":[]},"enterprise_profile_guid":"c9c48766-cee4-4894-b91a-3dfcf9c82a71","extensions":{"alerts":{"initialized":true},"chrome_url_overrides":{},"commands":{},"last_chrome_version":"145.0.7632.116"},"gcm":{"product_category_for_subtypes":"com.helium.macosx","push_messaging_unsubscribed_entries_list":[]},"helium":{"completed_onboarding":true,"services":{"browser_updates":false,"enabled":true,"schema_version":1,"user_consented":true}},"in_product_help":{"recent_session_enabled_time":"13417805217362922","recent_session_start_times":["13417881552723834","13417829233034165","13417805217362922"],"session_last_active_time":"13417886568748267","session_number":4,"session_start_time":"13417881552723834"},"intl":{"selected_languages":"en-GB,en-US,en"},"invalidation":{"per_sender_registered_for_invalidation":{"1013309121859":{},"947318989803":{}}},"media":{"device_id_salt":"F0C4033589F0460091955EDFCE08D45A","engagement":{"schema_version":5}},"media_router":{"receiver_id_hash_token":"hNxHI9wvAS7bn6+B1FStL3vOsBts/NKKekpkO04TEXDNhWv0gyZL5ubqTjJc5XixjAqRxy1J77xJ+zh26LN8FQ=="},"migrated_user_scripts_toggle":true,"ntp":{"num_personal_suggestions":0},"omnibox":{"shown_count_history_scope_promo":1},"optimization_guide":{"hintsfetcher":{"hosts_successfully_fetched":{}},"previously_registered_optimization_types":{"ABOUT_THIS_SITE":true,"AUTOFILL_ACTOR_IFRAME_ORIGIN_ALLOWLIST":true,"DIGITAL_CREDENTIALS_LOW_FRICTION":true,"GLIC_ACTION_PAGE_BLOCK":true,"LENS_OVERLAY_EDU_ACTION_CHIP_ALLOWLIST":true,"LENS_OVERLAY_EDU_ACTION_CHIP_BLOCKLIST":true,"LOADING_PREDICTOR":true,"MERCHANT_TRUST_SIGNALS_V2":true,"PAGE_ENTITIES":true,"PRICE_TRACKING":true,"SALIENT_IMAGE":true,"SAVED_TAB_GROUP":true,"V8_COMPILE_HINTS":true}},"password_manager":{"account_store_backup_password_cleaning_last_timestamp":"13417805271982672","account_store_migrated_to_os_crypt_async":true,"profile_store_backup_password_cleaning_last_timestamp":"13417805271982425","profile_store_migrated_to_os_crypt_async":true},"prefetch":{"search_prefetch":{"cache":{}}},"privacy_sandbox":{"first_party_sets_data_access_allowed_initialized":true,"first_party_sets_enabled":false,"m1":{"ad_measurement_enabled":false,"fledge_enabled":false,"topics_enabled":false},"topics_data_accessible_since":"13417831151971099"},"profile":{"avatar_index":26,"background_password_check":{"check_fri_weight":9,"check_interval":"2592000000000","check_mon_weight":6,"check_sat_weight":6,"check_sun_weight":6,"check_thu_weight":9,"check_tue_weight":9,"check_wed_weight":9,"next_check_time":"13418684694941325"},"content_settings":{"exceptions":{"3pcd_heuristics_grants":{},"abusive_notification_permissions":{},"access_to_get_all_screens_media_in_session":{},"anti_abuse":{},"app_banner":{"https://duckduckgo.com:443,*":{"last_modified":"13417805399336045","setting":{"https://duckduckgo.com/":{"next_install_text_animation":{"delay":"86400000000","last_shown":"13417805399335770"}},"https://duckduckgo.com/?t=crhs":{"couldShowBannerEvents":1.341780539933604e+16}}},"https://github.com:443,*":{"last_modified":"13417805403833374","setting":{"https://github.com/":{"couldShowBannerEvents":1.3417805403833368e+16,"next_install_text_animation":{"delay":"86400000000","last_shown":"13417805403833164"}}}}},"ar":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831386790368","setting":1}},"are_suspicious_notifications_allowlisted_by_user":{},"auto_picture_in_picture":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831380116205","setting":1}},"auto_select_certificate":{},"automatic_downloads":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831361704414","setting":1}},"automatic_fullscreen":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831377819065","setting":1}},"autoplay":{},"background_sync":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831358518704","setting":1}},"bluetooth_chooser_data":{},"bluetooth_guard":{},"bluetooth_scanning":{},"camera_pan_tilt_zoom":{},"captured_surface_control":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831379016196","setting":1}},"client_hints":{},"clipboard":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831369811129","setting":1}},"controlled_frame":{},"cookie_controls_metadata":{},"cookies":{},"direct_sockets":{},"direct_sockets_private_network_access":{},"display_media_system_audio":{},"disruptive_notification_permissions":{},"durable_storage":{},"fedcm_idp_registration":{},"fedcm_idp_signin":{},"fedcm_share":{},"file_system_access_chooser_data":{},"file_system_access_extended_permission":{},"file_system_access_restore_permission":{},"file_system_last_picked_directory":{},"file_system_read_guard":{},"file_system_write_guard":{},"formfill_metadata":{},"geolocation":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831346800075","setting":1}},"geolocation_with_options":{},"hand_tracking":{},"has_migrated_local_network_access":true,"hid_chooser_data":{},"hid_guard":{},"http_allowed":{},"https_enforced":{},"idle_detection":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831384215951","setting":1}},"images":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831354259454","setting":1}},"important_site_info":{},"initialized_translations":{},"intent_picker_auto_display":{},"javascript":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831353094321","setting":1}},"javascript_jit":{},"javascript_optimizer":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831389173802","setting":1}},"keyboard_lock":{},"legacy_cookie_access":{},"legacy_cookie_scope":{},"local_fonts":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831381881506","setting":1}},"local_network":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831375694671","setting":1}},"local_network_access":{},"loopback_network":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831374433370","setting":1}},"media_engagement":{"https://duckduckgo.com:443,*":{"expiration":"13425581400985417","last_modified":"13417805400985420","lifetime":"7776000000000","setting":{"hasHighScore":false,"lastMediaPlaybackTime":0.0,"mediaPlaybacks":0,"visits":1}},"https://github.com:443,*":{"expiration":"13425581432147969","last_modified":"13417805432147991","lifetime":"7776000000000","setting":{"hasHighScore":false,"lastMediaPlaybackTime":0.0,"mediaPlaybacks":0,"visits":1}},"https://xe.dev:443,*":{"expiration":"13425581433328426","last_modified":"13417805433328430","lifetime":"7776000000000","setting":{"hasHighScore":false,"lastMediaPlaybackTime":0.0,"mediaPlaybacks":0,"visits":1}}},"media_stream_camera":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831348032829","setting":1}},"media_stream_mic":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831348948688","setting":1}},"midi_sysex":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831363233719","setting":1}},"mixed_script":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417805481179531","setting":1}},"nfc_devices":{},"notification_interactions":{},"notification_permission_review":{},"notifications":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831351595672","setting":1}},"ondevice_languages_downloaded":{},"password_protection":{},"payment_handler":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831371549106","setting":1}},"permission_actions_history":{},"permission_autoblocking_data":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831387931384","setting":{}}},"permission_autorevocation_data":{},"pointer_lock":{},"popups":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831264196887","setting":1}},"protocol_handler":{},"reduced_accept_language":{},"safe_browsing_url_check_data":{},"sensors":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831350101732","setting":1}},"serial_chooser_data":{},"serial_guard":{},"site_engagement":{"chrome://apps/,*":{"last_modified":"13417886573279399","setting":{"lastEngagementTime":1.3417886573279384e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":6.6,"rawScore":6.412559044607999}},"chrome://flags/,*":{"last_modified":"13417884217076637","setting":{"lastEngagementTime":1.3417884217076612e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":5.1,"rawScore":10.9953504182567}},"chrome://newtab/,*":{"last_modified":"13417886580058256","setting":{"lastEngagementTime":1.3417886580058234e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":15.0,"rawScore":21.297998009082317}},"chrome://settings/,*":{"last_modified":"13417881552707008","setting":{"lastEngagementTime":1.341785275270691e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":5.999999999999999,"rawScore":14.289045964799998}},"chrome://setup/,*":{"last_modified":"13417881552707016","setting":{"lastEngagementTime":1.3417826725271446e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":0.0,"rawScore":2.7}},"chrome://version/,*":{"last_modified":"13417884231221632","setting":{"lastEngagementTime":1.3417884231221612e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":6.3,"rawScore":6.3}},"chrome://web-app-internals/,*":{"last_modified":"13417881552707026","setting":{"lastEngagementTime":1.3417852692631448e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":6.6,"rawScore":10.0299500544}},"https://duckduckgo.com:443,*":{"last_modified":"13417881552706967","setting":{"lastEngagementTime":1.3417826762750874e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":0.0,"rawScore":3.0}},"https://github.com:443,*":{"last_modified":"13417881552706979","setting":{"lastEngagementTime":1.341782679015577e+16,"lastShortcutLaunchTime":0.0,"pointsAddedToday":0.0,"rawScore":2.1}},"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417886574991064","setting":{"lastEngagementTime":0.0,"lastShortcutLaunchTime":1.3417886574991058e+16,"pointsAddedToday":0.0,"rawScore":0.0}}},"sound":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831359767171","setting":1}},"speaker_selection":{},"ssl_cert_decisions":{},"storage_access":{},"storage_access_header_origin_trial":{},"subresource_filter":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831357303008","setting":1}},"subresource_filter_data":{},"suspicious_notification_ids":{},"suspicious_notification_show_original":{},"third_party_storage_partitioning":{},"top_level_storage_access":{},"tracking_protection":{},"unused_site_permissions":{},"usb_chooser_data":{},"usb_guard":{},"vr":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831385482432","setting":1}},"web_app_installation":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831376785388","setting":1}},"webid_api":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831387931475","setting":1}},"webid_auto_reauthn":{},"window_placement":{"isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*":{"last_modified":"13417831383076349","setting":1}}},"pref_version":1},"created_by_version":"145.0.7632.116","creation_time":"13417805204760271","default_content_setting_values":{"has_migrated_local_network_access":true},"exit_type":"Normal","family_member_role":"not_in_family","last_engagement_time":"13417886580058234","last_time_obsolete_http_credentials_removed":1773331671.982504,"last_time_password_store_metrics_reported":1773331641.981746,"managed":{"locally_parent_approved_extensions":{},"locally_parent_approved_extensions_migration_state":1},"managed_user_id":"","name":"Your Helium","password_hash_data_list":[],"were_old_google_logins_removed":true},"safety_hub":{"unused_site_permissions_revocation":{"migration_completed":true}},"saved_tab_groups":{"did_enable_shared_tab_groups_in_last_session":false,"specifics_to_data_migration":true},"segmentation_platform":{"client_result_prefs":"ClIKDXNob3BwaW5nX3VzZXISQQo2DQAAAAAQrMrNycPt6hcaJAocChoNAAAAPxIMU2hvcHBpbmdVc2VyGgVPdGhlchIEEAIYBCADEM7KzcnD7eoX","device_switcher_util":{"result":{"labels":["NotSynced"]}},"last_db_compaction_time":"13417747199000000","uma_in_sql_start_time":"13417805204799698"},"sessions":{"event_log":[{"did_schedule_command":true,"first_session_service":true,"tab_count":1,"time":"13417881636767089","type":2,"window_count":1},{"crashed":false,"time":"13417881652807588","type":0},{"did_schedule_command":false,"first_session_service":true,"tab_count":0,"time":"13417881658256840","type":2,"window_count":0},{"crashed":false,"time":"13417881702427476","type":0},{"did_schedule_command":false,"first_session_service":true,"tab_count":0,"time":"13417881711060186","type":2,"window_count":0},{"crashed":false,"time":"13417881913757515","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":2,"time":"13417881919890819","type":2,"window_count":2},{"crashed":false,"time":"13417881923191004","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":1,"time":"13417881928765626","type":2,"window_count":1},{"crashed":false,"time":"13417881935802724","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":1,"time":"13417881981330727","type":2,"window_count":1},{"crashed":false,"time":"13417884099718322","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":2,"time":"13417884150266815","type":2,"window_count":1},{"crashed":false,"time":"13417884212038897","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":2,"time":"13417884224586584","type":2,"window_count":1},{"crashed":false,"time":"13417884225880612","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":2,"time":"13417884272390405","type":2,"window_count":1},{"crashed":false,"time":"13417886568659785","type":0},{"did_schedule_command":true,"first_session_service":true,"tab_count":2,"time":"13417886848704735","type":2,"window_count":1}],"session_data_status":5},"signin":{"accounts_metadata_dict":{}},"site_search_settings":{"overridden_keywords":[]},"spellcheck":{"dictionaries":["en-GB"]},"storage_partitions":{"should_garbage_collect":false},"sync":{"data_type_status_for_sync_to_signin":{"account_setting":false,"ai_thread":false,"app_list":false,"app_settings":false,"apps":false,"arc_package":false,"autofill":false,"autofill_profiles":false,"autofill_valuable":false,"autofill_valuable_metadata":false,"autofill_wallet":false,"autofill_wallet_credential":false,"autofill_wallet_metadata":false,"autofill_wallet_offer":false,"autofill_wallet_usage":false,"bookmarks":false,"collaboration_group":false,"contact_info":false,"contextual_task":false,"cookies":false,"device_info":false,"dictionary":false,"extension_settings":false,"extensions":false,"history":false,"history_delete_directives":false,"incoming_password_sharing_invitation":false,"managed_user_settings":false,"nigori":false,"os_preferences":false,"os_priority_preferences":false,"outgoing_password_sharing_invitation":false,"passwords":false,"plus_address":false,"plus_address_setting":false,"preferences":false,"printers":false,"printers_authorization_servers":false,"priority_preferences":false,"product_comparison":false,"reading_list":false,"saved_tab_group":false,"search_engines":false,"security_events":false,"send_tab_to_self":false,"sessions":false,"shared_comment":false,"shared_tab_group_account_data":false,"shared_tab_group_data":false,"sharing_message":false,"skill":false,"themes":false,"user_consent":false,"user_events":false,"web_apps":false,"webapks":false,"webauthn_credential":false,"wifi_configurations":false,"workspace_desk":false},"encryption_bootstrap_token_per_account_migration_done":true,"feature_status_for_sync_to_signin":5},"syncing_theme_prefs_migrated_to_non_syncing":true,"toolbar":{"pinned_cast_migration_complete":true,"pinned_chrome_labs_migration_complete":true},"total_passwords_available_for_account":0,"total_passwords_available_for_profile":0,"translate_site_blacklist":[],"translate_site_blocklist_with_time":{},"web_apps":{"did_migrate_default_chrome_apps":["MigrateDefaultChromeAppToWebAppsGSuite","MigrateDefaultChromeAppToWebAppsNonGSuite"],"last_preinstall_synchronize_version":"145"},"webauthn":{"touchid":{"metadata_secret":"RIjVWISjm/PxbFRaijgjxoua51pmjXXYIsP4GI/kSAA="}},"zerosuggest":{"cachedresults":"","cachedresults_with_url":{}}}
+{
+  "NewTabPage": {
+    "PrevNavigationTime": "13417886580042558"
+  },
+  "accessibility": {
+    "captions": {
+      "headless_caption_enabled": false
+    }
+  },
+  "ack_existing_ntp_extensions": true,
+  "alternate_error_pages": {
+    "backup": false
+  },
+  "announcement_notification_service_first_run_time": "13417805211988839",
+  "apps": {
+    "shortcuts_arch": "arm64",
+    "shortcuts_version": 8
+  },
+  "autocomplete": {
+    "retention_policy_last_version": 145
+  },
+  "autofill": {
+    "last_version_deduped": 145,
+    "ran_extra_deduplication": true
+  },
+  "bookmark": {
+    "storage_computation_last_update": "13417805204855613"
+  },
+  "browser": {
+    "app_window_placement": {
+      "_crx_olcppkbdbkjjkmaedekgaajkgipnodan": {
+        "bottom": 638,
+        "left": 221,
+        "maximized": false,
+        "right": 1021,
+        "top": 38,
+        "work_area_bottom": 1169,
+        "work_area_left": 0,
+        "work_area_right": 1800,
+        "work_area_top": 38
+      }
+    },
+    "theme": {
+      "is_grayscale2": true
+    },
+    "window_placement": {
+      "bottom": 1085,
+      "left": 356,
+      "maximized": false,
+      "right": 1481,
+      "top": 149,
+      "work_area_bottom": 1169,
+      "work_area_left": 0,
+      "work_area_right": 1800,
+      "work_area_top": 38
+    }
+  },
+  "commerce_daily_metrics_last_update_time": "13417805204856214",
+  "countryid_at_install": 17733,
+  "default_apps_install_state": 3,
+  "default_search_provider": {
+    "choice_screen_completion_program": 3,
+    "choice_screen_completion_timestamp": "13417805352",
+    "choice_screen_completion_version": "145.0.7632.116",
+    "choice_screen_random_shuffle_seed": "2218695142333505731",
+    "guid": "485bf7d3-0215-45af-87dc-538868000092",
+    "reset_occurred": false
+  },
+  "default_search_provider_data": {
+    "mirrored_template_url_data": {
+      "alternate_urls": [],
+      "contextual_search_url": "",
+      "created_from_play_api": false,
+      "date_created": "0",
+      "doodle_url": "",
+      "enforced_by_policy": false,
+      "favicon_url": "",
+      "featured_by_policy": false,
+      "id": "3",
+      "image_search_branding_label": "",
+      "image_translate_source_language_param_key": "",
+      "image_translate_target_language_param_key": "",
+      "image_translate_url": "",
+      "image_url": "",
+      "image_url_post_params": "",
+      "input_encodings": [
+        "UTF-8"
+      ],
+      "is_active": 0,
+      "keyword": "duckduckgo.com",
+      "last_modified": "0",
+      "last_visited": "0",
+      "logo_url": "https://staticcdn.duckduckgo.com/android/DuckDuckGoLogo.png",
+      "new_tab_url": "https://duckduckgo.com/chrome_newtab",
+      "originating_url": "",
+      "policy_origin": 0,
+      "preconnect_to_search_url": false,
+      "prefetch_likely_navigations": false,
+      "prepopulate_id": 92,
+      "safe_for_autoreplace": true,
+      "search_intent_params": [],
+      "search_url_post_params": "",
+      "short_name": "DuckDuckGo",
+      "starter_pack_id": 0,
+      "suggestions_url": "https://duckduckgo.com/ac/?q={searchTerms}&type=list",
+      "suggestions_url_post_params": "",
+      "synced_guid": "485bf7d3-0215-45af-87dc-538868000092",
+      "url": "https://duckduckgo.com/?q={searchTerms}",
+      "usage_count": 0
+    }
+  },
+  "domain_diversity": {
+    "last_reporting_timestamp": "13417827910369059",
+    "last_reporting_timestamp_v4": "13417827910369076"
+  },
+  "dual_layer_user_pref_store": {
+    "user_selected_sync_types": []
+  },
+  "enterprise_profile_guid": "c9c48766-cee4-4894-b91a-3dfcf9c82a71",
+  "extensions": {
+    "alerts": {
+      "initialized": true
+    },
+    "chrome_url_overrides": {},
+    "commands": {},
+    "last_chrome_version": "145.0.7632.116"
+  },
+  "gcm": {
+    "product_category_for_subtypes": "com.helium.macosx",
+    "push_messaging_unsubscribed_entries_list": []
+  },
+  "helium": {
+    "completed_onboarding": true,
+    "services": {
+      "browser_updates": false,
+      "enabled": true,
+      "schema_version": 1,
+      "user_consented": true
+    }
+  },
+  "in_product_help": {
+    "recent_session_enabled_time": "13417805217362922",
+    "recent_session_start_times": [
+      "13417881552723834",
+      "13417829233034165",
+      "13417805217362922"
+    ],
+    "session_last_active_time": "13417886568748267",
+    "session_number": 4,
+    "session_start_time": "13417881552723834"
+  },
+  "intl": {
+    "selected_languages": "en-GB,en-US,en"
+  },
+  "invalidation": {
+    "per_sender_registered_for_invalidation": {
+      "1013309121859": {},
+      "947318989803": {}
+    }
+  },
+  "media": {
+    "device_id_salt": "F0C4033589F0460091955EDFCE08D45A",
+    "engagement": {
+      "schema_version": 5
+    }
+  },
+  "media_router": {
+    "receiver_id_hash_token": "hNxHI9wvAS7bn6+B1FStL3vOsBts/NKKekpkO04TEXDNhWv0gyZL5ubqTjJc5XixjAqRxy1J77xJ+zh26LN8FQ=="
+  },
+  "migrated_user_scripts_toggle": true,
+  "ntp": {
+    "num_personal_suggestions": 0
+  },
+  "omnibox": {
+    "shown_count_history_scope_promo": 1
+  },
+  "optimization_guide": {
+    "hintsfetcher": {
+      "hosts_successfully_fetched": {}
+    },
+    "previously_registered_optimization_types": {
+      "ABOUT_THIS_SITE": true,
+      "AUTOFILL_ACTOR_IFRAME_ORIGIN_ALLOWLIST": true,
+      "DIGITAL_CREDENTIALS_LOW_FRICTION": true,
+      "GLIC_ACTION_PAGE_BLOCK": true,
+      "LENS_OVERLAY_EDU_ACTION_CHIP_ALLOWLIST": true,
+      "LENS_OVERLAY_EDU_ACTION_CHIP_BLOCKLIST": true,
+      "LOADING_PREDICTOR": true,
+      "MERCHANT_TRUST_SIGNALS_V2": true,
+      "PAGE_ENTITIES": true,
+      "PRICE_TRACKING": true,
+      "SALIENT_IMAGE": true,
+      "SAVED_TAB_GROUP": true,
+      "V8_COMPILE_HINTS": true
+    }
+  },
+  "password_manager": {
+    "account_store_backup_password_cleaning_last_timestamp": "13417805271982672",
+    "account_store_migrated_to_os_crypt_async": true,
+    "profile_store_backup_password_cleaning_last_timestamp": "13417805271982425",
+    "profile_store_migrated_to_os_crypt_async": true
+  },
+  "prefetch": {
+    "search_prefetch": {
+      "cache": {}
+    }
+  },
+  "privacy_sandbox": {
+    "first_party_sets_data_access_allowed_initialized": true,
+    "first_party_sets_enabled": false,
+    "m1": {
+      "ad_measurement_enabled": false,
+      "fledge_enabled": false,
+      "topics_enabled": false
+    },
+    "topics_data_accessible_since": "13417831151971099"
+  },
+  "profile": {
+    "avatar_index": 26,
+    "background_password_check": {
+      "check_fri_weight": 9,
+      "check_interval": "2592000000000",
+      "check_mon_weight": 6,
+      "check_sat_weight": 6,
+      "check_sun_weight": 6,
+      "check_thu_weight": 9,
+      "check_tue_weight": 9,
+      "check_wed_weight": 9,
+      "next_check_time": "13418684694941325"
+    },
+    "content_settings": {
+      "exceptions": {
+        "3pcd_heuristics_grants": {},
+        "abusive_notification_permissions": {},
+        "access_to_get_all_screens_media_in_session": {},
+        "anti_abuse": {},
+        "app_banner": {
+          "https://duckduckgo.com:443,*": {
+            "last_modified": "13417805399336045",
+            "setting": {
+              "https://duckduckgo.com/": {
+                "next_install_text_animation": {
+                  "delay": "86400000000",
+                  "last_shown": "13417805399335770"
+                }
+              },
+              "https://duckduckgo.com/?t=crhs": {
+                "couldShowBannerEvents": 1.341780539933604e+16
+              }
+            }
+          },
+          "https://github.com:443,*": {
+            "last_modified": "13417805403833374",
+            "setting": {
+              "https://github.com/": {
+                "couldShowBannerEvents": 1.3417805403833368e+16,
+                "next_install_text_animation": {
+                  "delay": "86400000000",
+                  "last_shown": "13417805403833164"
+                }
+              }
+            }
+          }
+        },
+        "ar": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831386790368",
+            "setting": 1
+          }
+        },
+        "are_suspicious_notifications_allowlisted_by_user": {},
+        "auto_picture_in_picture": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831380116205",
+            "setting": 1
+          }
+        },
+        "auto_select_certificate": {},
+        "automatic_downloads": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831361704414",
+            "setting": 1
+          }
+        },
+        "automatic_fullscreen": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831377819065",
+            "setting": 1
+          }
+        },
+        "autoplay": {},
+        "background_sync": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831358518704",
+            "setting": 1
+          }
+        },
+        "bluetooth_chooser_data": {},
+        "bluetooth_guard": {},
+        "bluetooth_scanning": {},
+        "camera_pan_tilt_zoom": {},
+        "captured_surface_control": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831379016196",
+            "setting": 1
+          }
+        },
+        "client_hints": {},
+        "clipboard": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831369811129",
+            "setting": 1
+          }
+        },
+        "controlled_frame": {},
+        "cookie_controls_metadata": {},
+        "cookies": {},
+        "direct_sockets": {},
+        "direct_sockets_private_network_access": {},
+        "display_media_system_audio": {},
+        "disruptive_notification_permissions": {},
+        "durable_storage": {},
+        "fedcm_idp_registration": {},
+        "fedcm_idp_signin": {},
+        "fedcm_share": {},
+        "file_system_access_chooser_data": {},
+        "file_system_access_extended_permission": {},
+        "file_system_access_restore_permission": {},
+        "file_system_last_picked_directory": {},
+        "file_system_read_guard": {},
+        "file_system_write_guard": {},
+        "formfill_metadata": {},
+        "geolocation": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831346800075",
+            "setting": 1
+          }
+        },
+        "geolocation_with_options": {},
+        "hand_tracking": {},
+        "has_migrated_local_network_access": true,
+        "hid_chooser_data": {},
+        "hid_guard": {},
+        "http_allowed": {},
+        "https_enforced": {},
+        "idle_detection": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831384215951",
+            "setting": 1
+          }
+        },
+        "images": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831354259454",
+            "setting": 1
+          }
+        },
+        "important_site_info": {},
+        "initialized_translations": {},
+        "intent_picker_auto_display": {},
+        "javascript": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831353094321",
+            "setting": 1
+          }
+        },
+        "javascript_jit": {},
+        "javascript_optimizer": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831389173802",
+            "setting": 1
+          }
+        },
+        "keyboard_lock": {},
+        "legacy_cookie_access": {},
+        "legacy_cookie_scope": {},
+        "local_fonts": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831381881506",
+            "setting": 1
+          }
+        },
+        "local_network": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831375694671",
+            "setting": 1
+          }
+        },
+        "local_network_access": {},
+        "loopback_network": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831374433370",
+            "setting": 1
+          }
+        },
+        "media_engagement": {
+          "https://duckduckgo.com:443,*": {
+            "expiration": "13425581400985417",
+            "last_modified": "13417805400985420",
+            "lifetime": "7776000000000",
+            "setting": {
+              "hasHighScore": false,
+              "lastMediaPlaybackTime": 0.0,
+              "mediaPlaybacks": 0,
+              "visits": 1
+            }
+          },
+          "https://github.com:443,*": {
+            "expiration": "13425581432147969",
+            "last_modified": "13417805432147991",
+            "lifetime": "7776000000000",
+            "setting": {
+              "hasHighScore": false,
+              "lastMediaPlaybackTime": 0.0,
+              "mediaPlaybacks": 0,
+              "visits": 1
+            }
+          },
+          "https://xe.dev:443,*": {
+            "expiration": "13425581433328426",
+            "last_modified": "13417805433328430",
+            "lifetime": "7776000000000",
+            "setting": {
+              "hasHighScore": false,
+              "lastMediaPlaybackTime": 0.0,
+              "mediaPlaybacks": 0,
+              "visits": 1
+            }
+          }
+        },
+        "media_stream_camera": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831348032829",
+            "setting": 1
+          }
+        },
+        "media_stream_mic": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831348948688",
+            "setting": 1
+          }
+        },
+        "midi_sysex": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831363233719",
+            "setting": 1
+          }
+        },
+        "mixed_script": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417805481179531",
+            "setting": 1
+          }
+        },
+        "nfc_devices": {},
+        "notification_interactions": {},
+        "notification_permission_review": {},
+        "notifications": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831351595672",
+            "setting": 1
+          }
+        },
+        "ondevice_languages_downloaded": {},
+        "password_protection": {},
+        "payment_handler": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831371549106",
+            "setting": 1
+          }
+        },
+        "permission_actions_history": {},
+        "permission_autoblocking_data": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831387931384",
+            "setting": {}
+          }
+        },
+        "permission_autorevocation_data": {},
+        "pointer_lock": {},
+        "popups": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831264196887",
+            "setting": 1
+          }
+        },
+        "protocol_handler": {},
+        "reduced_accept_language": {},
+        "safe_browsing_url_check_data": {},
+        "sensors": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831350101732",
+            "setting": 1
+          }
+        },
+        "serial_chooser_data": {},
+        "serial_guard": {},
+        "site_engagement": {
+          "chrome://apps/,*": {
+            "last_modified": "13417886573279399",
+            "setting": {
+              "lastEngagementTime": 1.3417886573279384e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 6.6,
+              "rawScore": 6.412559044607999
+            }
+          },
+          "chrome://flags/,*": {
+            "last_modified": "13417884217076637",
+            "setting": {
+              "lastEngagementTime": 1.3417884217076612e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 5.1,
+              "rawScore": 10.9953504182567
+            }
+          },
+          "chrome://newtab/,*": {
+            "last_modified": "13417886580058256",
+            "setting": {
+              "lastEngagementTime": 1.3417886580058234e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 15.0,
+              "rawScore": 21.297998009082317
+            }
+          },
+          "chrome://settings/,*": {
+            "last_modified": "13417881552707008",
+            "setting": {
+              "lastEngagementTime": 1.341785275270691e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 5.999999999999999,
+              "rawScore": 14.289045964799998
+            }
+          },
+          "chrome://setup/,*": {
+            "last_modified": "13417881552707016",
+            "setting": {
+              "lastEngagementTime": 1.3417826725271446e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 0.0,
+              "rawScore": 2.7
+            }
+          },
+          "chrome://version/,*": {
+            "last_modified": "13417884231221632",
+            "setting": {
+              "lastEngagementTime": 1.3417884231221612e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 6.3,
+              "rawScore": 6.3
+            }
+          },
+          "chrome://web-app-internals/,*": {
+            "last_modified": "13417881552707026",
+            "setting": {
+              "lastEngagementTime": 1.3417852692631448e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 6.6,
+              "rawScore": 10.0299500544
+            }
+          },
+          "https://duckduckgo.com:443,*": {
+            "last_modified": "13417881552706967",
+            "setting": {
+              "lastEngagementTime": 1.3417826762750874e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 0.0,
+              "rawScore": 3.0
+            }
+          },
+          "https://github.com:443,*": {
+            "last_modified": "13417881552706979",
+            "setting": {
+              "lastEngagementTime": 1.341782679015577e+16,
+              "lastShortcutLaunchTime": 0.0,
+              "pointsAddedToday": 0.0,
+              "rawScore": 2.1
+            }
+          },
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417886574991064",
+            "setting": {
+              "lastEngagementTime": 0.0,
+              "lastShortcutLaunchTime": 1.3417886574991058e+16,
+              "pointsAddedToday": 0.0,
+              "rawScore": 0.0
+            }
+          }
+        },
+        "sound": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831359767171",
+            "setting": 1
+          }
+        },
+        "speaker_selection": {},
+        "ssl_cert_decisions": {},
+        "storage_access": {},
+        "storage_access_header_origin_trial": {},
+        "subresource_filter": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831357303008",
+            "setting": 1
+          }
+        },
+        "subresource_filter_data": {},
+        "suspicious_notification_ids": {},
+        "suspicious_notification_show_original": {},
+        "third_party_storage_partitioning": {},
+        "top_level_storage_access": {},
+        "tracking_protection": {},
+        "unused_site_permissions": {},
+        "usb_chooser_data": {},
+        "usb_guard": {},
+        "vr": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831385482432",
+            "setting": 1
+          }
+        },
+        "web_app_installation": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831376785388",
+            "setting": 1
+          }
+        },
+        "webid_api": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831387931475",
+            "setting": 1
+          }
+        },
+        "webid_auto_reauthn": {},
+        "window_placement": {
+          "isolated-app://cjmvvyipbvzrcsssdqwerai5ohqiwkuyf6jf4jonrwdzucmc3d2aaaic/,*": {
+            "last_modified": "13417831383076349",
+            "setting": 1
+          }
+        }
+      },
+      "pref_version": 1
+    },
+    "created_by_version": "145.0.7632.116",
+    "creation_time": "13417805204760271",
+    "default_content_setting_values": {
+      "has_migrated_local_network_access": true
+    },
+    "exit_type": "Normal",
+    "family_member_role": "not_in_family",
+    "last_engagement_time": "13417886580058234",
+    "last_time_obsolete_http_credentials_removed": 1773331671.982504,
+    "last_time_password_store_metrics_reported": 1773331641.981746,
+    "managed": {
+      "locally_parent_approved_extensions": {},
+      "locally_parent_approved_extensions_migration_state": 1
+    },
+    "managed_user_id": "",
+    "name": "Your Helium",
+    "password_hash_data_list": [],
+    "were_old_google_logins_removed": true
+  },
+  "safety_hub": {
+    "unused_site_permissions_revocation": {
+      "migration_completed": true
+    }
+  },
+  "saved_tab_groups": {
+    "did_enable_shared_tab_groups_in_last_session": false,
+    "specifics_to_data_migration": true
+  },
+  "segmentation_platform": {
+    "client_result_prefs": "ClIKDXNob3BwaW5nX3VzZXISQQo2DQAAAAAQrMrNycPt6hcaJAocChoNAAAAPxIMU2hvcHBpbmdVc2VyGgVPdGhlchIEEAIYBCADEM7KzcnD7eoX",
+    "device_switcher_util": {
+      "result": {
+        "labels": [
+          "NotSynced"
+        ]
+      }
+    },
+    "last_db_compaction_time": "13417747199000000",
+    "uma_in_sql_start_time": "13417805204799698"
+  },
+  "sessions": {
+    "event_log": [
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 1,
+        "time": "13417881636767089",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417881652807588",
+        "type": 0
+      },
+      {
+        "did_schedule_command": false,
+        "first_session_service": true,
+        "tab_count": 0,
+        "time": "13417881658256840",
+        "type": 2,
+        "window_count": 0
+      },
+      {
+        "crashed": false,
+        "time": "13417881702427476",
+        "type": 0
+      },
+      {
+        "did_schedule_command": false,
+        "first_session_service": true,
+        "tab_count": 0,
+        "time": "13417881711060186",
+        "type": 2,
+        "window_count": 0
+      },
+      {
+        "crashed": false,
+        "time": "13417881913757515",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 2,
+        "time": "13417881919890819",
+        "type": 2,
+        "window_count": 2
+      },
+      {
+        "crashed": false,
+        "time": "13417881923191004",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 1,
+        "time": "13417881928765626",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417881935802724",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 1,
+        "time": "13417881981330727",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417884099718322",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 2,
+        "time": "13417884150266815",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417884212038897",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 2,
+        "time": "13417884224586584",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417884225880612",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 2,
+        "time": "13417884272390405",
+        "type": 2,
+        "window_count": 1
+      },
+      {
+        "crashed": false,
+        "time": "13417886568659785",
+        "type": 0
+      },
+      {
+        "did_schedule_command": true,
+        "first_session_service": true,
+        "tab_count": 2,
+        "time": "13417886848704735",
+        "type": 2,
+        "window_count": 1
+      }
+    ],
+    "session_data_status": 5
+  },
+  "signin": {
+    "accounts_metadata_dict": {}
+  },
+  "site_search_settings": {
+    "overridden_keywords": []
+  },
+  "spellcheck": {
+    "dictionaries": [
+      "en-GB"
+    ]
+  },
+  "storage_partitions": {
+    "should_garbage_collect": false
+  },
+  "sync": {
+    "data_type_status_for_sync_to_signin": {
+      "account_setting": false,
+      "ai_thread": false,
+      "app_list": false,
+      "app_settings": false,
+      "apps": false,
+      "arc_package": false,
+      "autofill": false,
+      "autofill_profiles": false,
+      "autofill_valuable": false,
+      "autofill_valuable_metadata": false,
+      "autofill_wallet": false,
+      "autofill_wallet_credential": false,
+      "autofill_wallet_metadata": false,
+      "autofill_wallet_offer": false,
+      "autofill_wallet_usage": false,
+      "bookmarks": false,
+      "collaboration_group": false,
+      "contact_info": false,
+      "contextual_task": false,
+      "cookies": false,
+      "device_info": false,
+      "dictionary": false,
+      "extension_settings": false,
+      "extensions": false,
+      "history": false,
+      "history_delete_directives": false,
+      "incoming_password_sharing_invitation": false,
+      "managed_user_settings": false,
+      "nigori": false,
+      "os_preferences": false,
+      "os_priority_preferences": false,
+      "outgoing_password_sharing_invitation": false,
+      "passwords": false,
+      "plus_address": false,
+      "plus_address_setting": false,
+      "preferences": false,
+      "printers": false,
+      "printers_authorization_servers": false,
+      "priority_preferences": false,
+      "product_comparison": false,
+      "reading_list": false,
+      "saved_tab_group": false,
+      "search_engines": false,
+      "security_events": false,
+      "send_tab_to_self": false,
+      "sessions": false,
+      "shared_comment": false,
+      "shared_tab_group_account_data": false,
+      "shared_tab_group_data": false,
+      "sharing_message": false,
+      "skill": false,
+      "themes": false,
+      "user_consent": false,
+      "user_events": false,
+      "web_apps": false,
+      "webapks": false,
+      "webauthn_credential": false,
+      "wifi_configurations": false,
+      "workspace_desk": false
+    },
+    "encryption_bootstrap_token_per_account_migration_done": true,
+    "feature_status_for_sync_to_signin": 5
+  },
+  "syncing_theme_prefs_migrated_to_non_syncing": true,
+  "toolbar": {
+    "pinned_cast_migration_complete": true,
+    "pinned_chrome_labs_migration_complete": true
+  },
+  "total_passwords_available_for_account": 0,
+  "total_passwords_available_for_profile": 0,
+  "translate_site_blacklist": [],
+  "translate_site_blocklist_with_time": {},
+  "web_apps": {
+    "did_migrate_default_chrome_apps": [
+      "MigrateDefaultChromeAppToWebAppsGSuite",
+      "MigrateDefaultChromeAppToWebAppsNonGSuite"
+    ],
+    "last_preinstall_synchronize_version": "145"
+  },
+  "webauthn": {
+    "touchid": {
+      "metadata_secret": "RIjVWISjm/PxbFRaijgjxoua51pmjXXYIsP4GI/kSAA="
+    }
+  },
+  "zerosuggest": {
+    "cachedresults": "",
+    "cachedresults_with_url": {}
+  }
+}

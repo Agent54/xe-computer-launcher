@@ -5,6 +5,47 @@ import Testing
 
 @MainActor
 struct ContainerRuntimeWarningsTests {
+    @Test func logErrorsDriveTheMenuAndBadgeAndKeepAcknowledgementsAcrossRelaunches() throws {
+        _ = NSApplication.shared
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
+        func model() -> ContainerRuntimeWarnings {
+            ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
+                readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
+        }
+        let issue = SystemLogStore.Entry(id: 12, source: "launcher",
+            line: "Chrome process group did not exit after Browser.close (10.0s); sending SIGTERM", timestamp: Date())
+        let warnings = model()
+        warnings.update(snapshot(), logIssue: issue)
+        let warning = try #require(warnings.menuWarnings.first)
+        #expect(warnings.unignoredCount == 1)
+        #expect(warning.title == "Browser Didn't Shut Down Cleanly")
+        #expect(warning.message.contains("site data"))
+        #expect(warning.resource == nil)
+        #expect(warnings.nextAutomaticWarning == nil)
+        let alert = ContainerRuntimeWarnings.alert(for: warning)
+        #expect(alert.buttons.map(\.title) == ["Open System Logs…", "Ignore", "Dismiss"])
+        #expect(alert.informativeText.contains(issue.line))
+        warnings.ignore(warning)
+        #expect(warnings.menuWarnings.count == 1)
+        #expect(warnings.unignoredCount == 0)
+        let relaunched = model()
+        relaunched.update(snapshot(), logIssue: issue)
+        #expect(relaunched.unignoredCount == 0)
+        relaunched.dismiss(warning)
+        #expect(relaunched.menuWarnings.isEmpty)
+        relaunched.update(snapshot(), logIssue: issue)
+        #expect(relaunched.menuWarnings.isEmpty)
+        let newIssue = SystemLogStore.Entry(id: 13, source: "browser", line: "Process exited with code -1", timestamp: Date())
+        relaunched.update(snapshot(), logIssue: newIssue)
+        #expect(relaunched.unignoredCount == 1)
+        #expect(relaunched.menuWarnings.first?.title == "Browser Exited Abnormally")
+        relaunched.update(history(), logIssue: newIssue)
+        #expect(relaunched.menuWarnings.count == 3)
+        #expect(relaunched.unignoredCount == 3)
+        #expect(relaunched.nextAutomaticWarning?.kind == .outOfMemory)
+    }
+
     private func snapshot(available: UInt64 = 50, bootID: String = "boot-1", host: HostResourceSnapshot? = nil) -> ContainerRuntimeSnapshot {
         ContainerRuntimeSnapshot(
             phase: .healthy, message: "Container runtime ready", reason: nil, updatedAt: Date(),
