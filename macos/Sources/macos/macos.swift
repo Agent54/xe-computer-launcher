@@ -1105,7 +1105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         warningsItem.isEnabled = false
         menu.addItem(warningsItem)
         runtimeWarningsItem = warningsItem
-        warningsItem.submenu = warningMenuItems.menu
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -1850,22 +1849,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func renderRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
         guard !isPreparingForTermination else { return }
-        runtimeWarnings.update(snapshot)
+        runtimeWarnings.update(snapshot, logIssue: ExternalState.shared.logStore.latestIssue)
         let menuWarnings = runtimeWarnings.menuWarnings
+        let hasWarnings = !menuWarnings.isEmpty
         let count = runtimeWarnings.unignoredCount
         let critical = menuWarnings.contains { $0.isHostWarning }
         runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
-        runtimeWarningsItem?.isEnabled = !menuWarnings.isEmpty
-            || (isMenuTracking && warningMenuItems.menu.numberOfItems > 0)
-        if menuWarnings.isEmpty { runtimeWarningsItem?.title = "Warnings: None" }
         if let item = runtimeWarningsItem {
+            if !hasWarnings {
+                item.title = "Warnings: None"
+                if item.submenu != nil { item.submenu = nil }
+            }
             item.attributedTitle = NSAttributedString(string: item.title, attributes: [
                 .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
             ])
         }
         // A previously empty, disabled submenu cannot be open yet, so its
         // first warning can appear immediately without disturbing tracking.
-        let keepWarningRows = isMenuTracking && warningMenuItems.menu.numberOfItems > 0
+        let keepWarningRows = hasWarnings && isMenuTracking && warningMenuItems.menu.numberOfItems > 0
         warningMenuItems.update(keys: menuWarnings.map(\.kind), deferStructuralChanges: keepWarningRows) { kind, item in
             guard let warning = menuWarnings.first(where: { $0.kind == kind }) else { return }
             let ignored = runtimeWarnings.isIgnored(warning)
@@ -1878,15 +1879,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 item.attributedTitle = NSAttributedString(string: item.title, attributes: [.foregroundColor: NSColor.systemRed])
             }
         }
+        if let item = runtimeWarningsItem {
+            if hasWarnings && item.submenu !== warningMenuItems.menu {
+                item.submenu = warningMenuItems.menu
+            }
+            item.isEnabled = hasWarnings
+        }
         if let button = statusItem?.button {
             button.imagePosition = .imageLeft
             button.attributedTitle = NSAttributedString(string: count > 0 || critical ? " ⚠︎" : "", attributes: [
                 .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
             ])
             button.toolTip = critical ? "Xe Launcher — host resources below reserve"
-                : count > 0 ? "Xe Launcher — \(count) runtime warning(s)" : "Xe Launcher"
+                : count > 0 ? "Xe Launcher — \(count) warning(s)" : "Xe Launcher"
             button.setAccessibilityLabel(critical ? "Xe Launcher, host resource warning"
-                : count > 0 ? "Xe Launcher, \(count) runtime warnings" : "Xe Launcher status menu")
+                : count > 0 ? "Xe Launcher, \(count) warnings" : "Xe Launcher status menu")
         }
         presentNextRuntimeWarning()
     }
@@ -1956,6 +1963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             switch alert.runModal() {
             case .alertFirstButtonReturn:
                 if let resource = warning.resource { changeContainerVMResource(resource, acknowledging: warning) }
+                if warning.kind == .systemLog { logPanelController.present(showingAll: true) }
             case .alertSecondButtonReturn:
                 runtimeWarnings.ignore(warning)
                 renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)

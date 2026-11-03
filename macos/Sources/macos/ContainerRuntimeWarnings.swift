@@ -5,7 +5,7 @@ import Foundation
 @MainActor
 final class ContainerRuntimeWarnings {
     enum Kind: String, Hashable, Sendable {
-        case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk
+        case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk, systemLog
 
         var settingKey: String { "runtime_ignored_\(rawValue)_id" }
         var dismissedSettingKey: String { "runtime_dismissed_\(rawValue)_id" }
@@ -19,8 +19,10 @@ final class ContainerRuntimeWarnings {
         let occurredAt: Date?
 
         var isHostWarning: Bool { kind == .hostMemory || kind == .hostDisk }
-        var resource: ContainerVMSettings.Resource? { isHostWarning ? nil : kind == .cacheCleanup ? .disk : .memory }
-        var actionTitle: String { isHostWarning ? "OK" : kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…" }
+        var resource: ContainerVMSettings.Resource? { isHostWarning || kind == .systemLog ? nil : kind == .cacheCleanup ? .disk : .memory }
+        var actionTitle: String {
+            kind == .systemLog ? "Open System Logs…" : isHostWarning ? "OK" : kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…"
+        }
     }
 
     private let readIgnored: (Kind) -> String?
@@ -61,12 +63,12 @@ final class ContainerRuntimeWarnings {
     /// have new IDs; ignored and dismissed events stay suppressed across launcher runs.
     /// Host reserve warnings stay in the menu; only VM events open dialogs automatically.
     var nextAutomaticWarning: Warning? {
-        menuWarnings.first { !$0.isHostWarning && !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
+        menuWarnings.first { !$0.isHostWarning && $0.kind != .systemLog && !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
     }
 
     func didPresent(_ warning: Warning) { presentedIDs[warning.kind, default: []].insert(warning.id) }
 
-    func update(_ snapshot: ContainerRuntimeSnapshot) {
+    func update(_ snapshot: ContainerRuntimeSnapshot, logIssue: SystemLogStore.Entry? = nil) {
         var current: [Warning] = []
         var activeHostKinds: Set<Kind> = []
         for warning in HostResourcePolicy.warnings(for: snapshot.hostResources) {
@@ -114,6 +116,20 @@ final class ContainerRuntimeWarnings {
                 message: warning.message, occurredAt: warning.occurredAt
             ))
         }
+        if let issue = logIssue {
+            let lower = issue.line.lowercased()
+            let browserShutdown = lower.contains("chrome process group did not exit")
+            let browserExit = lower.contains("browser process exited")
+                || (issue.source == "browser" && lower.contains("process exited with code"))
+            let title = browserShutdown ? "Browser Didn't Shut Down Cleanly"
+                : browserExit ? "Browser Exited Abnormally"
+                : issue.severity == .error ? "Error in System Logs" : "Warning in System Logs"
+            let consequence = browserShutdown || browserExit
+                ? "The browser could not finish a clean shutdown. Some recent site data may not have been saved.\n\n" : ""
+            current.append(Warning(id: "log-\(issue.id)", kind: .systemLog, title: title,
+                message: consequence + "[\(issue.source)] \(issue.line)\n\nOpen System Logs for more context.",
+                occurredAt: issue.timestamp))
+        }
         warnings = current
     }
 
@@ -128,7 +144,7 @@ final class ContainerRuntimeWarnings {
         }
         let increase = alert.addButton(withTitle: actionTitle ?? warning.actionTitle)
         increase.isEnabled = blockedReason == nil
-        if !warning.isHostWarning {
+        if warning.resource != nil {
             let redMessages = hostWarnings.map(\.message) + (blockedReason.map { [$0] } ?? [])
             if !redMessages.isEmpty { alert.accessoryView = redLabel(redMessages.joined(separator: "\n\n")) }
         }

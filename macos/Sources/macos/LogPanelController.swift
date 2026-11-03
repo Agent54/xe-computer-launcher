@@ -60,7 +60,11 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         nil
     }
 
-    func present() {
+    func present(showingAll: Bool = false) {
+        if showingAll {
+            currentSources = nil
+            segmentedControl.selectedSegment = 0
+        }
         showWindow(nil)
         if let window, let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
@@ -221,9 +225,11 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
                 .foregroundColor: sourceColor
             ])
 
-            let line = NSAttributedString(string: "\(entry.line)\n", attributes: [
+            let severity = entry.severity
+            let marker = severity == .info ? "" : severity == .error ? "⛔︎ " : "⚠︎ "
+            let line = NSAttributedString(string: "\(marker)\(entry.line)\n", attributes: [
                 .font: defaultFont,
-                .foregroundColor: defaultColor
+                .foregroundColor: severity == .error ? NSColor.systemRed : severity == .warning ? NSColor.systemOrange : defaultColor
             ])
 
             attributed.append(timestamp)

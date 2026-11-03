@@ -7,6 +7,8 @@ final class SystemLogStore: @unchecked Sendable {
         let source: String
         let line: String
         let timestamp: Date
+
+        var severity: SystemLogSeverity { .classify(source: source, line: line) }
     }
 
     struct Snapshot: Sendable {
@@ -38,6 +40,8 @@ final class SystemLogStore: @unchecked Sendable {
     private var pending: [Data] = []
     private var flushScheduled = false
     private var reportedWriteFailure = false
+    private var issue: Entry?
+    private var lastIssueInRun: Entry?
     // File state is confined to writer.
     private var handle: FileHandle?
     private var fileBytes = 0
@@ -47,11 +51,25 @@ final class SystemLogStore: @unchecked Sendable {
         self.directoryURL = directoryURL
         self.configuration = configuration
         entries = Array(repeating: nil, count: configuration.memoryEntries)
+        let savedIssue = (try? Data(contentsOf: directoryURL.appendingPathComponent("last-warning.json")))
+            .flatMap { try? JSONDecoder().decode(Entry.self, from: $0) }
+        issue = savedIssue.flatMap { $0.id < UInt64(Int64.max) && $0.severity != .info ? $0 : nil }
         // Read only the journal tail at startup; older history is loaded on demand.
         let latest = (0..<configuration.fileCount).lazy.compactMap { index in
             Self.readEntries(url: directoryURL.appendingPathComponent(index == 0 ? "system.jsonl" : "system.jsonl.\(index)"), limit: 1).first?.id
         }.first ?? 0
-        nextID = latest + 1
+        nextID = max(latest, issue?.id ?? 0) + 1
+        // Import a previous crash from older log files without delaying startup.
+        // Afterwards the small warning file preserves it even after log rotation.
+        if issue == nil {
+            writer.async { [weak self] in self?.restoreLatestIssue() }
+        }
+    }
+
+    var latestIssue: Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        return issue
     }
 
     func append(_ source: String, _ line: String, timestamp: Date = Date()) {
@@ -61,6 +79,7 @@ final class SystemLogStore: @unchecked Sendable {
         let entry = Entry(id: nextID, source: String(source.prefix(64)), line: boundedLine, timestamp: timestamp)
         nextID += 1
         insert(entry)
+        recordIssue(entry)
         if var data = try? JSONEncoder().encode(entry) {
             data.append(0x0a)
             pending.append(data)
@@ -110,6 +129,37 @@ final class SystemLogStore: @unchecked Sendable {
         revision += 1
     }
 
+    /// Called with the lock held. Identical repeated errors share one warning
+    /// during this run; a new error or a recurrence after relaunch warns again.
+    private func recordIssue(_ entry: Entry) {
+        guard entry.severity != .info else { return }
+        if lastIssueInRun?.source == entry.source, lastIssueInRun?.line == entry.line { return }
+        lastIssueInRun = entry
+        issue = entry
+    }
+
+    private func restoreLatestIssue() {
+        let previous = (0..<configuration.fileCount).lazy.compactMap {
+            Self.readEntries(url: self.fileURL($0), limit: 1, minimumSeverity: .warning).first
+        }.first
+        lock.lock()
+        if let previous, previous.id > (issue?.id ?? 0) {
+            issue = previous
+            revision += 1
+        }
+        lock.unlock()
+        try? persistIssue()
+    }
+
+    private func persistIssue() throws {
+        guard let issue = latestIssue else { return }
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let url = directoryURL.appendingPathComponent("last-warning.json")
+        try JSONEncoder().encode(issue).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
     private func fileURL(_ index: Int) -> URL {
         directoryURL.appendingPathComponent(index == 0 ? "system.jsonl" : "system.jsonl.\(index)")
     }
@@ -134,12 +184,15 @@ final class SystemLogStore: @unchecked Sendable {
                 chunk.append(data)
             }
             try write(chunk)
+            try persistIssue()
         } catch {
             try? handle?.close()
             handle = nil
             lock.lock()
             if !reportedWriteFailure {
-                insert(Entry(id: nextID, source: "launcher", line: "Could not save System Logs: \(error.localizedDescription)", timestamp: Date()))
+                let entry = Entry(id: nextID, source: "launcher", line: "Could not save System Logs: \(error.localizedDescription)", timestamp: Date())
+                insert(entry)
+                recordIssue(entry)
                 nextID += 1
                 reportedWriteFailure = true
             }
@@ -193,7 +246,8 @@ final class SystemLogStore: @unchecked Sendable {
     }
 
     /// Scan backwards in small blocks and stop once the requested page is filled.
-    private static func readEntries(url: URL, before: UInt64? = nil, limit: Int, sources: Set<String>? = nil) -> [Entry] {
+    private static func readEntries(url: URL, before: UInt64? = nil, limit: Int, sources: Set<String>? = nil,
+                                    minimumSeverity: SystemLogSeverity? = nil) -> [Entry] {
         guard limit > 0, let file = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? file.close() }
         do {
@@ -212,7 +266,8 @@ final class SystemLogStore: @unchecked Sendable {
                 for line in lines.dropFirst(position == 0 ? 0 : 1).reversed() {
                     guard let entry = try? decoder.decode(Entry.self, from: Data(line)), entry.id < UInt64(Int64.max),
                           before == nil || entry.id < before!,
-                          sources == nil || sources!.contains(entry.source) else { continue }
+                          sources == nil || sources!.contains(entry.source),
+                          minimumSeverity == nil || entry.severity.rawValue >= minimumSeverity!.rawValue else { continue }
                     result.append(entry)
                     if result.count == limit { return result }
                 }
