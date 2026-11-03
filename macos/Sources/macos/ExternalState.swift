@@ -345,15 +345,9 @@ final class ExternalState: @unchecked Sendable {
         browserLifecycleLock.lock()
         _browserStackStopRequested = true
         browserLifecycleLock.unlock()
-
-        if let app = darcApp, !app.isTerminated {
-            _ = app.terminate()
-        }
-        terminateSubprocess("darc_log")
-        let processGroup = _browserPid
-        if processGroup > 0 {
-            kill(-processGroup, SIGTERM)
-        }
+        // Cancel startup without interrupting Chromium's storage helpers. The
+        // browser cleanup task closes the shim and browser in order, then waits
+        // for Chromium to flush its profile before resorting to process signals.
     }
 
     var isBrowserStackStopRequested: Bool {

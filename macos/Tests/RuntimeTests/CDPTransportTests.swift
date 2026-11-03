@@ -170,7 +170,7 @@ struct CDPTransportTests {
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["XE_TEST_BROWSER"] != nil))
-    func realBrowserPipeAndIndependentSessions() throws {
+    func realBrowserPipeAndIndependentSessions() async throws {
         let executable = try #require(ProcessInfo.processInfo.environment["XE_TEST_BROWSER"])
         let root = try directory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -199,16 +199,24 @@ struct CDPTransportTests {
         defer { environment.forEach { free($0) } }
         var envp = environment + [nil]
         var argv = strings + [nil]
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setpgroup(&attributes, 0)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
         var pid: pid_t = 0
         let status = argv.withUnsafeMutableBufferPointer {
-            posix_spawn(&pid, executable, &actions, nil, $0.baseAddress!, &envp)
+            posix_spawn(&pid, executable, &actions, &attributes, $0.baseAddress!, &envp)
         }
         try #require(status == 0)
+        let browserPID = pid
+        let completion = Task.detached { () -> Int32 in
+            var status: Int32 = 0
+            while waitpid(browserPID, &status, 0) < 0 && errno == EINTR {}
+            return status
+        }
         defer {
-            kill(pid, SIGTERM)
-            let deadline = Date().addingTimeInterval(3)
-            while waitpid(pid, nil, WNOHANG) == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-            if kill(pid, 0) == 0 { kill(pid, SIGKILL); waitpid(pid, nil, 0) }
+            kill(-browserPID, SIGKILL)
         }
         outgoing.fileHandleForReading.closeFile()
         incoming.fileHandleForWriting.closeFile()
@@ -236,5 +244,12 @@ struct CDPTransportTests {
         _ = try command("Target.detachFromTarget", ["sessionId": first])
         _ = try command("Target.detachFromTarget", ["sessionId": second])
         _ = try command("Browser.getVersion")
+        var shutdownLogs: [String] = []
+        #expect(BrowserShutdown.stop(processGroup: browserPID, transport: transport) { shutdownLogs.append($0) })
+        #expect(await completion.value == 0)
+        #expect(!shutdownLogs.contains { $0.contains("sending SIG") })
+        let preferences = try Data(contentsOf: root.appendingPathComponent("profile/Default/Preferences"))
+        let profile = try #require((JSONSerialization.jsonObject(with: preferences) as? [String: Any])?["profile"] as? [String: Any])
+        #expect(profile["exit_type"] as? String == "Normal")
     }
 }

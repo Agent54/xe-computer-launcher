@@ -187,34 +187,13 @@ extension ExternalState {
     @discardableResult
     private func terminateBrowserProcessGroup() -> Bool {
         let processGroup = _browserPid
-        guard processGroup > 0 else { return true }
-
-        Self.cdpTransport.stop()
-
-        kill(-processGroup, SIGTERM)
-        waitForBrowserProcessGroupToExit(processGroup, timeout: 3.0)
-
-        if kill(-processGroup, 0) == 0 {
-            appendLog("launcher", "Chrome process group did not exit after 3.0s; sending SIGKILL")
-            kill(-processGroup, SIGKILL)
-            waitForBrowserProcessGroupToExit(processGroup, timeout: 2.0)
+        let stopped = BrowserShutdown.stop(processGroup: processGroup, transport: Self.cdpTransport) {
+            self.appendLog("launcher", $0)
         }
-
-        let stopped = kill(-processGroup, 0) != 0 && errno == ESRCH
         if stopped && _browserPid == processGroup {
             _browserPid = 0
         }
         return stopped
-    }
-
-    private func waitForBrowserProcessGroupToExit(
-        _ processGroup: pid_t,
-        timeout: TimeInterval
-    ) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline && kill(-processGroup, 0) == 0 {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
     }
 
     /// Provision the app shim in the background.
@@ -478,9 +457,10 @@ extension ExternalState {
             var status: Int32 = 0
             waitpid(capturedPid, &status, 0)
             outputPipe.fileHandleForReading.readabilityHandler = nil
-            if self?._browserPid == capturedPid {
-                self?._browserPid = 0
-            }
+            // Retain the process group while helpers finish exiting. Clearing
+            // it when only the browser exits lets later cleanup mistake those
+            // helpers for zombies and kill them during profile writes.
+            // chromeRunning and stopChrome clear it once the group is gone.
             let exitCode = (status & 0x7f) == 0 ? Int32((status >> 8) & 0xff) : Int32(-1)
             self?.appendLog(source, "Process exited with code \(exitCode)")
             self?.appendLog("launcher", "\(source) process exited (code=\(exitCode))")
