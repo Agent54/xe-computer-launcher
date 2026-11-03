@@ -32,8 +32,8 @@ struct ComponentVersionsTests {
             .write(to: resources.appendingPathComponent("ComposeServer.lock"))
         try Data("COMPOSE_UI_RELEASE_TAG=int-8-637b350\n".utf8)
             .write(to: resources.appendingPathComponent("ComposeUI.lock"))
-        try Data(#"{"dependencies":{"workerd":"1.20260910.1"}}"#.utf8)
-            .write(to: resources.appendingPathComponent("Workerd.package.json"))
+        try Data(#"{"specifiers":{"npm:workerd@^1.20260901.0":"1.20260910.1","npm:wrangler@4.80.0":"4.80.0"}}"#.utf8)
+            .write(to: resources.appendingPathComponent("Workerd.lock"))
         try writePlist(
             version: "2.9.4",
             to: root.appendingPathComponent(

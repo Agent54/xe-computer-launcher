@@ -85,7 +85,7 @@ guest-worker: workerd
 	@test -f "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/checksums.txt" || { echo 'Provide the Linux ARM64 guest-worker CI artifact via GUEST_ROUTER_ASSET_DIR.' >&2; exit 1; }
 	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
 	@mkdir -p "$(BUILD_DIR)/guest-worker"
-	@rsync -a --delete "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
+	@rsync -a --delete --delete-excluded --include='/workerd' --include='/lib/***' --include='/licenses/***' --exclude='*' "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
 	@cp ../workerd/dist/guest-worker.bin ../workerd/docker/run.sh ../workerd/docker/stop.sh "$(BUILD_DIR)/guest-worker/"
 	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
 	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
@@ -113,12 +113,12 @@ package: test smol-runtime guest-worker
 	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
 	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"
 	@cp Sources/macos/PortHelperLaunchDaemon.plist "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
-	@cp ../workerd/package.json "$(RESOURCES)/Workerd.package.json"
+	@cp ../workerd/deno.lock "$(RESOURCES)/Workerd.lock"
 	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
 	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
 	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"
 	@cp ComposeUI.lock "$(RESOURCES)/"
-	@rm -f "$(RESOURCES)/Workerd.lock"
+	@rm -f "$(RESOURCES)/Workerd.package.json"
 	@echo "App package created at $(APP_BUNDLE)"
 
 # Sparkle contains several nested signed executables. Sign from the innermost

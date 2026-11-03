@@ -101,7 +101,7 @@ struct BrowserShutdownTests {
         let transport = CDPTransport()
         var logs: [String] = []
         #expect(BrowserShutdown.stop(processGroup: browser.pid, transport: transport,
-                                     gracefulTimeout: 0.1, terminationTimeout: 0.1, killTimeout: 2) { logs.append($0) })
+                                     gracefulTimeout: 0.1) { logs.append($0) })
         let status = await browser.completion.value
         #expect(status & 0x7f == (ignoresTermination ? SIGKILL : SIGTERM))
         #expect(logs.contains { $0.contains("sending SIGTERM") })

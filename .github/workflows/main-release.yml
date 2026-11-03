@@ -24,7 +24,7 @@ jobs:
     # bundles in addition to the normal signed/notarized release build.
     timeout-minutes: 90
     env:
-      GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist
+      GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist/guest-runtime
       NOTARY_PROFILE: notarytool-profile
       SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
       # Detect hypervisor support unless the repository variable disables it.
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: guest-worker
-          path: workerd/dist
+          path: workerd/dist/guest-runtime
 
       - name: Test release version calculation
         run: bash macos/Tests/Integration/test-release-version.sh

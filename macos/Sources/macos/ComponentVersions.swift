@@ -26,10 +26,11 @@ enum ComponentVersions {
             at: resourceURL?.appendingPathComponent("ComposeUI.lock")
         )
 
-        let workerdManifest = jsonObject(
-            at: resourceURL?.appendingPathComponent("Workerd.package.json")
+        let workerdLock = jsonObject(
+            at: resourceURL?.appendingPathComponent("Workerd.lock")
         )
-        let workerdVersion = (workerdManifest?["dependencies"] as? [String: Any])?["workerd"] as? String
+        let workerdSpecifiers = workerdLock?["specifiers"] as? [String: String]
+        let workerdVersion = workerdSpecifiers?.first { $0.key.hasPrefix("npm:workerd@") }?.value
 
         let heliumVersion = heliumAppURL.flatMap {
             plistValue(

@@ -41,5 +41,6 @@ fi
 
 /bin/bash Tests/Integration/test-install-targets.sh
 /bin/bash Tests/Integration/test-build-graph.sh
+/bin/bash Tests/Integration/test-guest-worker-package.sh
 
 /usr/bin/xcrun swift "${test_args[@]}" "$@"
