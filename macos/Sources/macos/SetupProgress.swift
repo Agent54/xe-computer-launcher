@@ -34,19 +34,21 @@ nonisolated(unsafe) private var _statusLabel: NSTextField?
 nonisolated(unsafe) private var _cancelButton: NSButton?
 nonisolated(unsafe) private var _setupActionButton: NSButton?
 nonisolated(unsafe) private var _setupActionHandler: (() -> Void)?
+nonisolated(unsafe) private var _setupPlacement: SetupProgressPlacement = .centered
 private let _cancellation = CancellationToken()
 
 private var setupAppDisplayName: String {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Launcher"
 }
 
-enum SetupProgressPlacement {
+enum SetupProgressPlacement: Equatable {
     case centered
     case topTrailing
 }
 
 @MainActor
 private func positionSetupPanel(_ panel: NSPanel, placement: SetupProgressPlacement) {
+    _setupPlacement = placement
     switch placement {
     case .centered:
         panel.level = .floating
@@ -66,6 +68,13 @@ private func positionSetupPanel(_ panel: NSPanel, placement: SetupProgressPlacem
             y: visibleFrame.maxY - panel.frame.height - margin
         ))
     }
+}
+
+/// Move only when the placement changes, preserving user positioning during a wait.
+@MainActor
+func setSetupProgressPlacement(_ placement: SetupProgressPlacement) {
+    guard let panel = _setupWindow, placement != _setupPlacement else { return }
+    positionSetupPanel(panel, placement: placement)
 }
 
 /// The shared cancellation token for the current setup. Check `isCancelled` from any thread.

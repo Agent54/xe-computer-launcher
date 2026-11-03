@@ -51,6 +51,7 @@ enum AccessibilityPermission {
             if canRelaunchInstalledApp && Date() >= nextProbeAt {
                 nextProbeAt = Date().addingTimeInterval(5)
                 if await freshProcessHasAccessibilityAccess(), !AXIsProcessTrusted() {
+                    setSetupProgressPlacement(.centered)
                     updateSetupProgress(status: "Accessibility access is enabled. Reopening Xe Launcher to continue setup…")
                     if await relaunchWithAccessibilityAccess() {
                         ExternalState.shared.appendLog("launcher", "Accessibility approval is visible to a new process; reopening to continue setup.")

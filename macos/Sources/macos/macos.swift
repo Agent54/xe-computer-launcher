@@ -393,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         if wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch {
             // The migration dialog has just closed. Keep setup visibly in
             // progress while macOS registers and activates the selected helper.
-            showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+            showSetupProgress(message: "", allowsCancellation: false)
             updateSetupProgress(status: "Configuring ports 80/443. Approve Xe Launcher in System Settings if asked; setup will continue automatically.")
             setSetupProgressIndeterminate(true)
         }
@@ -446,6 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     setSetupProgressIndeterminate(true)
                     helperProgressVisible = true
                 }
+                setSetupProgressPlacement(.topTrailing)
                 setSetupProgressAction(title: "Open System Settings") {
                     PrivilegedPortService.openSystemSettings()
                 }
@@ -497,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         acquireFailure = error.localizedDescription
                     }
                     let helperStatus = PrivilegedPortService.status
+                    setSetupProgressPlacement(helperStatus == .requiresApproval ? .topTrailing : .centered)
                     if (helperStatus == .notRegistered || helperStatus == .notFound),
                               Date() >= nextHelperRegistrationAt {
                         // Re-enabling the background item in System Settings
@@ -509,7 +511,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         continue
                     }
                     if !helperProgressVisible {
-                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                        showSetupProgress(
+                            message: "",
+                            placement: helperStatus == .requiresApproval ? .topTrailing : .centered,
+                            allowsCancellation: false
+                        )
                         setSetupProgressIndeterminate(true)
                         helperProgressVisible = true
                     }
@@ -592,7 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         return
                     }
                     if !routingProgressVisible && ContinuousClock.now >= showRoutingProgressAt {
-                        showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                        showSetupProgress(message: "", allowsCancellation: false)
                         updateSetupProgress(status: "Starting local app routing on ports 80/443…")
                         setSetupProgressIndeterminate(true)
                         routingProgressVisible = true
@@ -651,6 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             } catch {
                 installationError = error
             }
+            setSetupProgressPlacement(.centered)
             // The security tool exits after authorization, but the new user
             // trust setting can take a moment to become visible to a separate
             // Security.framework evaluation.
