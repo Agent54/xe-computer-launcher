@@ -14,33 +14,33 @@ function catalogue(env) {
 }
 
 async function cached(cache, key, read) {
-  let entry = cache.get(key);
-  if (!entry || entry.expires <= Date.now()) {
-    for (const [key, value] of cache) if (value.expires <= Date.now()) cache.delete(key);
-    if (cache.size >= 128) cache.delete(cache.keys().next().value);
-    const requestedAt = Date.now();
-    // A cancelled Workerd request can abandon its I/O without settling the
-    // shared promise. Give pending entries a finite lease as well as a deadline.
-    entry = { expires: requestedAt + discoveryTimeout, promise: null };
-    cache.set(key, entry);
-    const controller = new AbortController();
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        const error = new Error('Compose discovery timed out');
-        reject(error);
-        controller.abort(error);
-      }, discoveryTimeout);
-    });
-    entry.promise = Promise.race([read(controller.signal), timeout]).then(value => {
-      entry.expires = requestedAt + cacheLifetime;
-      return value;
-    }).catch(error => {
-      if (cache.get(key) === entry) cache.delete(key);
-      throw error;
-    }).finally(() => clearTimeout(timer));
+  const entry = cache.get(key);
+  if (entry && entry.expires > Date.now()) return entry.value;
+  // Workerd I/O and promise continuations belong to the creating request.
+  // Share only parsed snapshots; concurrent misses must own their own reads.
+  const requestedAt = Date.now();
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error('Compose discovery timed out');
+      reject(error);
+      controller.abort(error);
+    }, discoveryTimeout);
+  });
+  try {
+    const value = await Promise.race([read(controller.signal), timeout]);
+    for (const [key, entry] of cache) if (entry.expires <= Date.now()) cache.delete(key);
+    const expires = requestedAt + cacheLifetime;
+    if (expires > Date.now()) {
+      if (cache.size >= 128) cache.delete(cache.keys().next().value);
+      cache.set(key, { value, expires });
+    }
+    return value;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
   }
-  return entry.promise;
 }
 
 function projectVariants(project) {

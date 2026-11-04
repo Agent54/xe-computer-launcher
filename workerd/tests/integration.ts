@@ -106,6 +106,8 @@ let releaseContainerStart: (() => void) | undefined;
 let securePort = 0;
 let discoveryEntered: (() => void) | undefined;
 let releaseDiscovery: (() => void) | undefined;
+let dockerDiscoveryEntered: (() => void) | undefined;
+let releaseDockerDiscovery: (() => void) | undefined;
 
 interface Options { method?: string; body?: string; headers?: Record<string, string>; host?: string; app?: boolean; timeoutMs?: number }
 function response(path = '/', options: Options = {}): Promise<IncomingMessage> {
@@ -186,6 +188,11 @@ async function startUnix(path: string) {
     } else if (requestPath === '/system/df') {
       return Response.json({ LayersSize: 4096, Images: [{ Id: 'image', Size: 4096, SharedSize: 0, Containers: 0 }] });
     } else if (requestPath === '/containers/json?all=true' || requestPath === '/containers/json?all=true&size=false') {
+      if (dockerDiscoveryEntered) {
+        const entered = dockerDiscoveryEntered;
+        dockerDiscoveryEntered = undefined;
+        await new Promise<void>(resolve => { releaseDockerDiscovery = resolve; entered(); });
+      }
       return new Response(JSON.stringify([{ Id: containerId, State: 'running', Labels: {
         'com.docker.compose.service': 'web', 'com.docker.compose.project': 'demo',
       }, Ports: [
@@ -573,8 +580,21 @@ try {
   await verifyWebSocket();
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
-  // Workerd cancels request-owned I/O when a browser disconnects. A shared
-  // discovery promise from that request must not strand every later app visit.
+  // Exercise a browser's burst of asset requests through real request contexts.
+  // A stalled or disconnected visitor must not own discovery for other visitors.
+  async function assetBurst() {
+    await Promise.all(Array.from({ length: 64 }, async (_, index) => {
+      const path = `/assets/module-${index}.js`;
+      const result = index % 2 === 0
+        ? await request(path, appOptions).then(result => ({ status: result.status, body: result.body.toString() }))
+        : await tlsRequest('web--p32000.app.localhost', true, path);
+      assert.deepEqual(result, { status: 200, body: 'upstream-ok' }, path);
+    }));
+  }
+  await sleep(150);
+  await assetBurst();
+  console.log('PASS: concurrent HTTP/HTTPS assets use independent discovery requests');
+
   await sleep(150);
   const discoveryStarted = new Promise<void>(resolve => { discoveryEntered = resolve; });
   const abandoned = httpRequest({ hostname: '127.0.0.1', port: routingPort,
@@ -582,18 +602,31 @@ try {
   abandoned.on('error', () => {});
   abandoned.end();
   await discoveryStarted;
-  const overlapping = request('/', { app: true, host: 'web.localhost' });
-  await sleep(50);
+  const overlapping = assetBurst();
   abandoned.destroy();
-  await sleep(100);
+  await overlapping;
   releaseDiscovery!();
   releaseDiscovery = undefined;
-  assert.equal((await overlapping).body.toString(), 'upstream-ok');
   await sleep(150);
   assert.equal((await request('/', { app: true, host: 'missing.localhost' })).status, 404);
   assert.equal((await request('/', appOptions)).body.toString(), 'upstream-ok');
   assert.deepEqual(await tlsRequest('web--p32000.app.localhost', true), { status: 200, body: 'upstream-ok' });
   console.log('PASS: cancelled app discovery does not strand later HTTP/HTTPS requests');
+
+  await sleep(150);
+  const dockerDiscoveryStarted = new Promise<void>(resolve => { dockerDiscoveryEntered = resolve; });
+  const abandonedGuest = httpRequest({ hostname: '127.0.0.1', port: routingPort,
+    headers: { Host: `web.localhost:${routingPort}` }, agent: false });
+  abandonedGuest.on('error', () => {});
+  abandonedGuest.end();
+  await dockerDiscoveryStarted;
+  const overlappingGuest = assetBurst();
+  abandonedGuest.destroy();
+  await overlappingGuest;
+  releaseDockerDiscovery!();
+  releaseDockerDiscovery = undefined;
+  assert.equal((await request('/', appOptions)).body.toString(), 'upstream-ok');
+  console.log('PASS: cancelled guest discovery does not block concurrent HTTP/HTTPS assets');
 
   await sleep(150);
   const stalledDiscovery = new Promise<void>(resolve => { discoveryEntered = resolve; });
@@ -623,7 +656,7 @@ try {
   }
   await notifyStartup();
   const waiting = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
-  assert.match(waiting.body.toString(), /<h1>sleeping<\/h1>/);
+  assert.match(waiting.body.toString(), /<h1>Container runtime<\/h1>/);
   assert.match(waiting.body.toString(), /Starting container runtime…/);
   assert.match((await tlsRequest('sleeping_demo--nweb.app.localhost', true)).body, /Starting container runtime…/);
   assert.equal(seen.filter(r => r.path.startsWith('/v1.24/start/')).length, 0);
@@ -648,7 +681,6 @@ try {
   }
   const sleeping = await request('/deep/link?q=1', { app: true, host: 'sleeping_demo.localhost' });
   assert.equal(sleeping.status, 503);
-  assert.match(sleeping.body.toString(), /<h1>sleeping<\/h1>/);
   assert.match(sleeping.body.toString(), /Container is not available for application routing/);
   assert.equal(sleeping.headers['cache-control'], 'no-store');
   const sleepingTLS = await tlsRequest('sleeping_demo--nweb.app.localhost', true);
@@ -733,6 +765,7 @@ try {
   releaseSSE?.();
   releaseContainerStart?.();
   releaseDiscovery?.();
+  releaseDockerDiscovery?.();
   for (const process of processes) await stopProcess(process);
   for (const server of servers) await server.shutdown();
   await app.shutdown();

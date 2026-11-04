@@ -4,22 +4,21 @@ import { bridgeSocketAndWebSocket } from './socket-bridge.js';
 // resolve its live network address without exposing each port on macOS.
 let cached = null;
 let expires = 0;
-let loading = null;
 const cacheLifetime = 100;
 
 async function discover(env) {
   if (cached && Date.now() < expires) return cached;
-  if (!loading) loading = (async () => {
-    const requestedAt = Date.now();
-    const response = await env.DOCKER.fetch('http://docker/containers/json?all=true');
-    if (!response.ok) throw new Error('Docker discovery unavailable');
-    const containers = await response.json();
-    if (!Array.isArray(containers)) throw new Error('Invalid Docker response');
-    cached = containers;
-    expires = requestedAt + cacheLifetime;
-    return containers;
-  })().finally(() => { loading = null; });
-  return loading;
+  // Cache parsed data, never another request's in-flight I/O or promise.
+  const requestedAt = Date.now();
+  const response = await env.DOCKER.fetch('http://docker/containers/json?all=true', {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error('Docker discovery unavailable');
+  const containers = await response.json();
+  if (!Array.isArray(containers)) throw new Error('Invalid Docker response');
+  cached = containers;
+  expires = requestedAt + cacheLifetime;
+  return containers;
 }
 
 async function findContainer(id, env) {

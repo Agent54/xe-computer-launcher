@@ -1253,10 +1253,7 @@ Deno.test('project-scoped ps rows use only their owning checkout configuration',
   assert.deepEqual(service.ports, [{ target: 5194, published: '5194' }]);
 });
 
-Deno.test('abandoned discovery expires even when its request timer never runs', async () => {
-  const originalNow = Date.now;
-  let now = originalNow();
-  Date.now = () => now;
+Deno.test('an abandoned discovery does not block another request before its deadline', async () => {
   let release: (response: Response) => void = () => {};
   let queries = 0;
   const env = { COMPOSE: { fetch: (input: string) => {
@@ -1270,7 +1267,6 @@ Deno.test('abandoned discovery expires even when its request timer never runs', 
   } } };
   const abandoned = resolveApplicationService('app_recovered', env);
   try {
-    now += 5000;
     const recovered = await resolveApplicationService('app_recovered', env);
     assert(!(recovered instanceof Response));
     assert.equal(recovered.id, 'ready');
@@ -1278,11 +1274,10 @@ Deno.test('abandoned discovery expires even when its request timer never runs', 
   } finally {
     release(Response.json([]));
     await abandoned;
-    Date.now = originalNow;
   }
 });
 
-Deno.test('stalled discovery cancels upstream I/O, releases all waiters and retries', async () => {
+Deno.test('stalled discovery cancels each request independently and retries', async () => {
   const originalSetTimeout = globalThis.setTimeout;
   globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
     const [handler, delay, ...rest] = args;
@@ -1306,7 +1301,8 @@ Deno.test('stalled discovery cancels upstream I/O, releases all waiters and retr
       assert.rejects(() => resolveApplicationService('app_retry', env), /discovery timed out/),
       assert.rejects(() => resolveApplicationService('missing', env), /discovery timed out/),
     ]);
-    assert.equal(signals.length, 2, 'concurrent visitors share ps and config requests');
+    assert.equal(signals.length, 4, 'concurrent visitors own separate ps and config requests');
+    assert.notEqual(signals[0], signals[2], 'request cancellation is not shared');
     assert(signals.every(signal => signal.aborted));
     stalled = false;
     const recovered = await resolveApplicationService('app_retry', env);
