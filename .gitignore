@@ -10,6 +10,9 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 macos/Helpers
+macos/Helpers.zip
+# Temporary archives created by zip.
+macos/zi??????
 macos/.env
 macos/local-secrets/*
 !macos/local-secrets/README.md

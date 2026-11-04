@@ -233,15 +233,16 @@ extension ExternalState {
             // Create shims directory
             try? fm.createDirectory(at: shimApp.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-            // Verify the shim's CrAppModeUserDataDir matches our profile dir before moving
+            // Require profile ownership before moving a globally generated shim.
             let systemShimPlist = URL(fileURLWithPath: systemShimPath).appendingPathComponent("Contents/Info.plist")
-            if let plistData = try? Data(contentsOf: systemShimPlist),
-               let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
-               let shimUserDataDir = plist["CrAppModeUserDataDir"] as? String {
-                if !shimUserDataDir.hasPrefix(profileDir.path) {
-                    self.appendLog("launcher", "App shim CrAppModeUserDataDir mismatch: \(shimUserDataDir) does not start with \(profileDir.path), skipping")
-                    return
-                }
+            guard let plistData = try? Data(contentsOf: systemShimPlist),
+                  let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
+                  let shimUserDataDir = plist["CrAppModeUserDataDir"] as? String,
+                  (BrowserProcessOwnership.normalizedPath(URL(fileURLWithPath: shimUserDataDir))
+                    == BrowserProcessOwnership.normalizedPath(profileDir)
+                    || BrowserProcessOwnership.contains(shimUserDataDir, in: profileDir)) else {
+                self.appendLog("launcher", "App shim profile ownership could not be verified, skipping")
+                return
             }
 
             // Move shim to our managed location
@@ -477,26 +478,27 @@ extension ExternalState {
 extension ExternalState {
 
     /// A stale browser-related process found on the system.
-    struct ZombieProcess {
+    struct ZombieProcess: Hashable {
         let pid: pid_t
         let name: String       // e.g. "Helium", "app_mode_loader"
         let profileDir: String? // extracted from --user-data-dir if present
     }
 
     static func isPrivateBrowserExecutable(_ path: String, dataURL: URL) -> Bool {
-        let root = dataURL.path
-        return path.hasPrefix(root + "/helium/") || path.hasPrefix(root + "/Helium.app/")
+        BrowserProcessOwnership.contains(path, in: dataURL.appendingPathComponent("helium"))
+            || BrowserProcessOwnership.contains(path, in: dataURL.appendingPathComponent("Helium.app"))
     }
 
     /// Find browser and IWA processes using the launcher's private profiles and
-    /// shims. These can only belong to an earlier launcher process.
+    /// shims. An executable's installation directory alone does not establish
+    /// ownership: unrelated instances can use the same Helium installation.
     func findZombieProcesses() -> [ZombieProcess] {
         (try? findZombieProcessesChecked()) ?? []
     }
 
     func findZombieProcessesChecked() throws -> [ZombieProcess] {
         let result = try ProcessCapture.standardOutput(
-            executableURL: URL(fileURLWithPath: "/bin/ps"), arguments: ["-eo", "pid,comm"]
+            executableURL: URL(fileURLWithPath: "/bin/ps"), arguments: ["-eo", "pid,pgid,comm"]
         )
         guard result.exitCode == 0 else {
             throw MaintenanceFailure("Could not verify browser shutdown: ps exited with code \(result.exitCode).")
@@ -507,91 +509,48 @@ extension ExternalState {
             throw MaintenanceFailure("Could not decode the browser process list.")
         }
 
-        let profilesRoot = URL(fileURLWithPath: Self.profilesPath, isDirectory: true)
-            .standardizedFileURL.resolvingSymlinksInPath().path
-        let shimsRoot = Self.appDataURL.appendingPathComponent("shims", isDirectory: true)
-            .standardizedFileURL.resolvingSymlinksInPath().path
-
-        // Our own managed PIDs
-        let ownBrowserPid = _browserPid
-        let ownPid = ProcessInfo.processInfo.processIdentifier
-        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownPid=\(ownPid)")
-
-        var zombies: [ZombieProcess] = []
+        var candidates: [BrowserProcessOwnership.ProcessSnapshot] = []
 
         for line in output.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let spaceIdx = trimmed.firstIndex(of: " ") else { continue }
-            guard let pid = Int32(trimmed[trimmed.startIndex..<spaceIdx]) else { continue }
-            let comm = String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
-
-            // Log any processes that look related to Chrome/Helium/Darc
-            if comm.contains("Helium") || comm.contains("app_mode_loader") || comm.contains("Darc") {
-                appendLog("launcher", "findZombieProcesses: candidate pid=\(pid) comm='\(comm)'")
-            }
-
-            // Include private engine helpers even when their main browser has
-            // already exited or they no longer share its process group.
+            let fields = line.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3, let pid = pid_t(fields[0]), let group = pid_t(fields[1]) else { continue }
+            let comm = BrowserProcessOwnership.executableURL(pid: pid)?.path ?? String(fields[2])
             let privateEngine = Self.isPrivateBrowserExecutable(comm, dataURL: Self.appDataURL)
             let isHelium = privateEngine || ["Helium", "Chromium", "Google Chrome", "Google Chrome Canary"]
                 .contains { comm == $0 || comm.hasSuffix("/" + $0) }
             let isDarc = comm.hasSuffix("/app_mode_loader") || comm == "app_mode_loader"
 
             guard isHelium || isDarc else { continue }
-            guard pid != ownBrowserPid else { continue }
-            // Don't include our own launcher process
-            guard pid != ownPid else { continue }
-
-            let profileDir = Self.extractUserDataDir(pid: pid)
-            if isHelium && !privateEngine {
-                guard let profileDir else { continue }
-                let normalizedProfile = URL(fileURLWithPath: profileDir, isDirectory: true)
-                    .standardizedFileURL.resolvingSymlinksInPath().path
-                guard normalizedProfile == profilesRoot || normalizedProfile.hasPrefix(profilesRoot + "/") else {
-                    continue
-                }
-            } else if isDarc {
-                let executablePath = URL(fileURLWithPath: comm)
-                    .standardizedFileURL.resolvingSymlinksInPath().path
-                guard executablePath.hasPrefix(shimsRoot + "/") else { continue }
-            }
-
-            let name = isHelium ? "Helium" : "Xe Computer (app_mode_loader)"
-            zombies.append(ZombieProcess(pid: pid, name: name, profileDir: profileDir))
+            let arguments = BrowserProcessOwnership.arguments(pid: pid) ?? []
+            candidates.append(.init(pid: pid, group: group, executable: comm, arguments: arguments))
         }
 
-        return zombies
-    }
-
-    /// Extract the --user-data-dir value from a process's command line. The path
-    /// can contain spaces, so read until the following command-line flag.
-    private static func extractUserDataDir(pid: pid_t) -> String? {
-        guard let result = try? ProcessCapture.standardOutput(
-            executableURL: URL(fileURLWithPath: "/bin/ps"),
-            arguments: ["-p", "\(pid)", "-o", "args="]
-        ), result.exitCode == 0 else { return nil }
-
-        let data = result.standardOutput
-        guard let args = String(data: data, encoding: .utf8) else { return nil }
-
-        let marker = "--user-data-dir="
-        guard let markerRange = args.range(of: marker) else { return nil }
-        let value = args[markerRange.upperBound...]
-        let end = value.range(of: " --")?.lowerBound ?? value.endIndex
-        let path = value[..<end].trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
+        return BrowserProcessOwnership.staleProcesses(
+            candidates, dataURL: Self.appDataURL,
+            ownPID: ProcessInfo.processInfo.processIdentifier, browserGroup: _browserPid
+        ).map {
+            ZombieProcess(pid: $0.pid,
+                          name: $0.executable.hasSuffix("/app_mode_loader") ? "Xe Computer (app_mode_loader)" : "Helium",
+                          profileDir: BrowserProcessOwnership.userDataDirectory(arguments: $0.arguments))
+        }
     }
 
     /// Kill the given zombie processes.
     func killZombieProcesses(_ zombies: [ZombieProcess]) {
-        for z in zombies {
+        guard !zombies.isEmpty else { return }
+        // Recheck ownership before each signal phase instead of trusting an
+        // earlier PID list after processes may have exited or exec'd.
+        let verified = Set(findZombieProcesses())
+        let targets = zombies.filter { verified.contains($0) }
+        for z in targets {
             kill(z.pid, SIGTERM)
             appendLog("launcher", "Terminating zombie \(z.name) (pid=\(z.pid))")
         }
 
-        waitForZombieProcessesToExit(zombies, timeout: 2.0)
+        waitForZombieProcessesToExit(targets, timeout: 2.0)
 
-        let survivors = zombies.filter { kill($0.pid, 0) == 0 }
+        let stillOwned = Set(findZombieProcesses())
+        let survivors = targets.filter { stillOwned.contains($0) && kill($0.pid, 0) == 0 }
         for z in survivors {
             kill(z.pid, SIGKILL)
             appendLog("launcher", "Force-terminated zombie \(z.name) (pid=\(z.pid))")

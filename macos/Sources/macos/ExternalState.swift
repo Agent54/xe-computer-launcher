@@ -97,7 +97,7 @@ final class ExternalState: @unchecked Sendable {
         // is not necessarily a child of this process. In particular, Chrome can
         // launch it while initially provisioning the IWA, before startDarc() has
         // received an NSRunningApplication reference. Rediscover that independent
-        // application from the managed shim's path or bundle identifier.
+        // application from the managed shim's path.
         guard let app = findRunningDarcApplication() else { return false }
         darcApp = app
         return true
@@ -110,44 +110,17 @@ final class ExternalState: @unchecked Sendable {
         return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
     }
 
+    private func isManagedDarcApplication(_ app: NSRunningApplication, at appURL: URL) -> Bool {
+        !app.isTerminated && BrowserProcessOwnership.matchesShim(
+            bundleURL: app.bundleURL,
+            executableURL: BrowserProcessOwnership.executableURL(pid: app.processIdentifier) ?? app.executableURL,
+            expectedAppURL: appURL
+        )
+    }
+
     private func findRunningDarcApplication() -> NSRunningApplication? {
         let appURL = darcShimAppURL()
-        let executableURL = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader")
-        let expectedAppPath = appURL.standardizedFileURL.resolvingSymlinksInPath().path
-        let expectedExecutablePath = executableURL.standardizedFileURL.resolvingSymlinksInPath().path
-
-        func isExactManagedShim(_ app: NSRunningApplication) -> Bool {
-            guard !app.isTerminated else { return false }
-            if let bundlePath = app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
-               bundlePath == expectedAppPath {
-                return true
-            }
-            if let executablePath = app.executableURL?.standardizedFileURL.resolvingSymlinksInPath().path,
-               executablePath == expectedExecutablePath {
-                return true
-            }
-            return false
-        }
-
-        let runningApplications = NSWorkspace.shared.runningApplications
-        if let exactMatch = runningApplications.first(where: isExactManagedShim) {
-            return exactMatch
-        }
-
-        // Launch Services can retain the shim's pre-move bundle URL for an app
-        // that Chrome launched before provisioning moved it into our app-data
-        // directory. Its generated bundle identifier remains stable, though.
-        guard let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier else {
-            return nil
-        }
-        let identifierMatches = NSRunningApplication
-            .runningApplications(withBundleIdentifier: bundleIdentifier)
-            .filter { !$0.isTerminated }
-
-        if let exactMatch = identifierMatches.first(where: isExactManagedShim) {
-            return exactMatch
-        }
-        return identifierMatches.count == 1 ? identifierMatches[0] : nil
+        return NSWorkspace.shared.runningApplications.first { isManagedDarcApplication($0, at: appURL) }
     }
     var chromeRunning: Bool {
         // The browser and its helpers are spawned as a dedicated process group.
@@ -411,11 +384,16 @@ final class ExternalState: @unchecked Sendable {
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] app, error in
             if let error {
                 box.error = "Xe Computer open failed: \(error.localizedDescription)"
-            } else if let app {
-                if self?.isBrowserStackStopRequested == true {
+            } else if let app, let self {
+                guard self.isManagedDarcApplication(app, at: appURL) else {
+                    box.error = "Launch Services returned an application outside the managed Xe Computer shim path"
+                    semaphore.signal()
+                    return
+                }
+                if self.isBrowserStackStopRequested {
                     _ = app.terminate()
                 } else {
-                    self?.darcApp = app
+                    self.darcApp = app
                 }
             }
             semaphore.signal()
