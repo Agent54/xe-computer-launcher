@@ -1,8 +1,8 @@
 {
     "helium": {
-        "version": "0.17.2.1",
-        "chromiumVersion": "153.0.8010.52",
-        "sha256": "f1a3fecde3c08254f1b1eec30e36ecd25f98cf3799644427fbcefd6e6beafacf",
+        "version": "0.21.1.1",
+        "chromiumVersion": "157.0.8103.38",
+        "sha256": "e0be38d4b39b8ce120b7c7eeda128ecfba0e6611d5d23f2fbab2e3510c276331",
         "label": "Helium browser engine"
     },
     "darc": {

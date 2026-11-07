@@ -1,6 +1,6 @@
 {
-  "chromiumMajor": 153,
-  "snapshot": "1681086",
-  "url": "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1681086/devtools-frontend.zip",
-  "resourcesSha256": "d18c87c0e517c22445d1155c799c5a786c1ebe3b50185b2ef2cf5ae31cead669"
+  "chromiumMajor": 157,
+  "snapshot": "1717393",
+  "url": "https://storage.googleapis.com/chromium-browser-snapshots/Linux_x64/1717393/devtools-frontend.zip",
+  "resourcesSha256": "9b9cd4ed6dd543053f645aa151be8810e047d543fb70efa843dd7841ae047a09"
 }

@@ -1085,11 +1085,11 @@ sources_manifest="$INSTALLED_APP/Contents/Resources/sources.json"
 helium_version="$(plutil -extract helium.version raw "$sources_manifest")"
 helium_chromium_version="$(plutil -extract helium.chromiumVersion raw "$sources_manifest")"
 helium_sha256="$(plutil -extract helium.sha256 raw "$sources_manifest")"
-[[ "$helium_version" == "0.17.2.1" ]] \
+[[ "$helium_version" == "0.21.1.1" ]] \
     || fail "unexpected pinned Helium version: $helium_version"
-[[ "$helium_chromium_version" == "153.0.8010.52" ]] \
+[[ "$helium_chromium_version" == "157.0.8103.38" ]] \
     || fail "unexpected pinned Chromium version: $helium_chromium_version"
-[[ "$helium_sha256" == "f1a3fecde3c08254f1b1eec30e36ecd25f98cf3799644427fbcefd6e6beafacf" ]] \
+[[ "$helium_sha256" == "e0be38d4b39b8ce120b7c7eeda128ecfba0e6611d5d23f2fbab2e3510c276331" ]] \
     || fail "unexpected pinned Helium SHA-256: $helium_sha256"
 installed_helium="$APP_DATA/helium/$helium_version/Helium.app"
 log "waiting for the versioned Helium browser engine"
