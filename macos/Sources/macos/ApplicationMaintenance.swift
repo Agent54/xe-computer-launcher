@@ -72,6 +72,7 @@ extension ApplicationMaintenance {
             process.arguments = bundled ? ["-n", Bundle.main.bundleURL.path] : []
             try runBounded(process, timeout: 15, waitForExit: bundled)
         case .uninstall:
+            try LauncherLoginItem.main.apply(enabled: false)
             if let warning = PrivilegedPortService.unregisterIfRegistered() { throw MaintenanceFailure(warning) }
             let archive = try archiveData(in: data)
             do { try trashApprovedBundle(request.bundle) }

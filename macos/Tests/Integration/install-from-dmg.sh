@@ -1127,11 +1127,18 @@ if pgrep -f "${MOUNT_POINT}/.*\.app/Contents/MacOS/bin" >/dev/null; then
     fail "a copy of the app is still running from the disk image"
 fi
 
-log "waiting for the managed Xe Computer app shim"
-deadline=$((SECONDS + 240))
 managed_shim_pattern="$(printf '%s' "$MANAGED_XE_COMPUTER_APP/Contents/MacOS/app_mode_loader" \
     | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
 managed_shim_user_id="$(id -u)"
+if pgrep -u "$managed_shim_user_id" -f "^${managed_shim_pattern}( |$)" >/dev/null; then
+    fail "Xe Computer started without a user request"
+fi
+# Reopening the launcher sends the same event as clicking its Dock icon. A
+# request made during setup is queued until browser recovery finishes.
+log "opening Xe Computer through the launcher"
+open -a "$INSTALLED_APP"
+log "waiting for the managed Xe Computer app shim"
+deadline=$((SECONDS + 240))
 managed_shim_pid=""
 managed_shim_polls=0
 managed_shim_ready=false
@@ -1231,6 +1238,8 @@ if [[ "$STANDARD_USER_MODE" != true ]]; then
 fi
 open -a "$INSTALLED_APP"
 accept_startup_disclaimer
+# Xe Computer no longer starts as a side effect of launcher startup.
+open -a "$INSTALLED_APP"
 relaunch_ready=false
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do

@@ -3,6 +3,7 @@ import ApplicationServices
 import CoreGraphics
 import Sparkle
 import LauncherMaintenance
+import ServiceManagement
 
 private enum LauncherUpdateChannel: String {
     case stable
@@ -186,6 +187,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var runtimeStartupTask: Task<Void, Never>?
     private var setupStartupTask: Task<Void, Never>?
     private var browserStartupTask: Task<Void, Never>?
+    private var browserInitializationComplete = false
+    private var openXeComputerRequested = false
     private var composeServer: ComposeServer?
     private var workerdServer = WorkerdServer()
     private lazy var runtimeSupervisor = makeRuntimeSupervisor()
@@ -367,7 +370,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         applyDockIconPreference()
         setupMainMenu()
         setupStatusItem()
+        configureLoginItem()
         renderMenuLabels()
+        startStateRefreshLoop()
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self, selector: #selector(workspaceApplicationsChanged), name: name, object: nil
+            )
+        }
 
         // First-run setup and legacy settings without a port choice both need
         // a decision before Workerd starts, even without virtualization.
@@ -753,15 +763,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     "Stopped \(recoveredProcessCount) browser process(es) left by an earlier launcher"
                 )
             }
-            state.appendLog("launcher", "Restoring saved Xe Computer and browser running state")
-
-            let launchError = await Task.detached(priority: .userInitiated) {
-                state.launchBrowserStack()
-            }.value
-            guard !Task.isCancelled else { return }
-            if let launchError {
-                state.appendLog("launcher", "Xe Computer state restoration failed: \(launchError)")
-            }
+            browserInitializationComplete = true
+            state.appendLog("launcher", "Browser recovery complete; Xe Computer is ready to open on request")
+            openXeComputerIfRequested()
             renderMenuLabels()
         }
     }
@@ -804,16 +808,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        requestOpenXeComputer()
+        return false
+    }
+
+    private func requestOpenXeComputer() {
+        guard !isPreparingForTermination, !pendingServices.contains("darc") else { return }
+        openXeComputerRequested = true
+        openXeComputerIfRequested()
+    }
+
+    private func openXeComputerIfRequested() {
+        // A Dock click during setup/recovery must wait until cleanup has
+        // finished, otherwise recovery can immediately stop the new browser.
+        guard browserInitializationComplete, openXeComputerRequested,
+              !isPreparingForTermination, !pendingServices.contains("darc") else { return }
+        openXeComputerRequested = false
         // Opening a running app shim sends it the macOS reopen event. Merely
         // activating a windowless shim does not create or restore a window.
-        let state = ExternalState.shared
-        DispatchQueue.global(qos: .userInitiated).async {
+        runServiceAction("darc") {
+            let state = ExternalState.shared
             if let error = state.reopenDarc() {
                 state.appendLog("launcher", "Xe Computer reopen failed: \(error)")
             }
-            Task { @MainActor in self.renderMenuLabels() }
         }
-        return false
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -997,6 +1015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         beginShutdownPresentation()
         maintenancePreparationTask?.cancel()
         setupStartupTask?.cancel()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         stopStateRefreshLoop()
         runtimeStartupTask?.cancel()
         containerVMSettingsTask?.cancel()
@@ -1189,13 +1208,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(uninstallItem)
         self.uninstallItem = uninstallItem
 
-        let runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
-        runAtStartupItem.isHidden = true
-        menu.addItem(runAtStartupItem)
-        self.runAtStartupItem = runAtStartupItem
-
         menu.addItem(.separator())
 
+        let runAtStartupItem = NSMenuItem(title: "Start on System Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
+        runAtStartupItem.toolTip = "Starts Xe Launcher when you log in to macOS. Xe Computer opens when requested."
+        menu.addItem(runAtStartupItem)
+        self.runAtStartupItem = runAtStartupItem
         bindCapslockItem = NSMenuItem(title: "Bind to Caps Lock", action: #selector(bindCapslockAction), keyEquivalent: "")
         hideDockIconItem = NSMenuItem(title: "Hide Dock Icon", action: #selector(hideDockIconAction), keyEquivalent: "")
         if let bindCapslockItem { menu.addItem(bindCapslockItem) }
@@ -1541,7 +1559,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     func menuDidClose(_ menu: NSMenu) {
         guard menu === statusItem?.menu else { return }
         isMenuTracking = false
-        stopStateRefreshLoop()
         if let specialKeyCheck {
             NSEvent.removeMonitor(specialKeyCheck)
             self.specialKeyCheck = nil
@@ -1578,7 +1595,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         restartVMItem?.isHidden = !optionHeld
         restartXeItem?.isHidden = !optionHeld
         uninstallItem?.isHidden = !optionHeld
-        runAtStartupItem?.isHidden = !optionHeld
         updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
@@ -1616,6 +1632,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let sampledProfileMatches = serviceState.profile == state.selectedProfileName()
         let chromeRunning = sampledProfileMatches && serviceState.chromeRunning
         let darcRunning = sampledProfileMatches && serviceState.darcRunning
+        // Activation-policy changes must run after menu actions/tracking unwind.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isPreparingForTermination, !self.isMenuTracking else { return }
+            self.applyDockIconPreference()
+        }
         renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
         let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
         if settingsRestartRequired {
@@ -1677,7 +1698,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             refreshChromeMenuOptions(in: chromeSubmenu)
         }
 
-        runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
+        let loginItemStatus = LauncherLoginItem.main.status()
+        runAtStartupItem?.state = loginItemStatus == .enabled ? .on :
+            (loginItemStatus == .requiresApproval ? .mixed : .off)
+        runAtStartupItem?.title = loginItemStatus == .requiresApproval
+            ? "Start on System Startup (Approval Required)" : "Start on System Startup"
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
         hideDockIconItem?.state = state.boolSetting("hide_dock_icon", default: false) ? .on : .off
         if canUseUpdater {
@@ -1705,9 +1730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     // MARK: - Actions
 
     @objc private func darcStartAction() {
-        runServiceAction("darc") {
-            _ = ExternalState.shared.startDarc()
-        }
+        requestOpenXeComputer()
     }
 
     @objc private func darcStopAction() {
@@ -2137,9 +2160,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func runAtStartupAction() {
-        let current = ExternalState.shared.boolSetting("run_at_startup", default: false)
-        ExternalState.shared.setBoolSetting("run_at_startup", !current)
+        let state = ExternalState.shared
+        let status = LauncherLoginItem.main.status()
+        let enabled = status != .enabled && status != .requiresApproval
+        do {
+            try LauncherLoginItem.main.apply(enabled: enabled)
+            state.setBoolSetting("run_at_startup", enabled)
+            if enabled && LauncherLoginItem.main.status() == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            }
+        } catch {
+            state.appendLog("launcher", "Could not change login item: \(error.localizedDescription)")
+            DispatchQueue.main.async { NSAlert(error: error).runModal() }
+        }
         renderMenuLabels()
+    }
+
+    private func configureLoginItem() {
+        // Service Management requires an app bundle. Do not register a SwiftPM
+        // executable (or a copy still running from an installer disk image).
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              !ApplicationInstaller.isRunningFromDiskImage() else { return }
+        let state = ExternalState.shared
+        do {
+            try LauncherLoginItem.main.apply(enabled: state.boolSetting("run_at_startup", default: true))
+        } catch {
+            state.appendLog("launcher", "Could not configure login item: \(error.localizedDescription)")
+        }
     }
 
     @objc private func bindCapslockAction() {
@@ -2174,8 +2221,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func applyDockIconPreference() {
-        let shouldHide = ExternalState.shared.boolSetting("hide_dock_icon", default: false)
-        NSApp.setActivationPolicy(shouldHide ? .accessory : .regular)
+        let state = ExternalState.shared
+        let snapshot = menuServiceState.snapshot
+        let shouldHide = state.boolSetting("hide_dock_icon", default: false)
+            && snapshot.profile == state.selectedProfileName() && snapshot.darcRunning
+        let policy: NSApplication.ActivationPolicy = shouldHide ? .accessory : .regular
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }
 
     @objc private func aboutAction() {
@@ -2337,10 +2388,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     // MARK: - Background state refresh
 
+    @objc private func workspaceApplicationsChanged(_ notification: Notification) {
+        renderMenuLabels()
+    }
+
     private func startStateRefreshLoop() {
         guard stateRefreshTimer == nil else { return }
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
-            // Re-render service state while the menu is open.
+            // Keep the Dock handoff current even while the menu is closed.
             Task { @MainActor [weak self] in self?.renderMenuLabels() }
         }
         RunLoop.main.add(timer, forMode: .common)
