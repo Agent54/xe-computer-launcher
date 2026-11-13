@@ -59,9 +59,10 @@ struct BrowserShutdownTests {
     }
 
     @Test func gracefulCloseWaitsForProfileWritesWithoutSignals() async throws {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".build/shutdown-\(UUID().uuidString.prefix(8))", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // Unix socket addresses must fit sun_path even in deeply nested CI checkouts.
+        let root = URL(fileURLWithPath: "/tmp/xe-shutdown-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
         let incoming = Pipe()
         let outgoing = Pipe()

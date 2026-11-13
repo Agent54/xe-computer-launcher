@@ -1,21 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-report_runtime_tests() {
-  local status=$?
-  [[ "${GITHUB_ACTIONS:-}" == true ]] || return "$status"
-  local result="✅ Runtime tests passed"
-  if (( status != 0 )); then
-    result="❌ Runtime test command failed (exit $status). Results may be incomplete; see the logs."
-    printf '::error title=Runtime tests failed::%s\n' "$result"
-  fi
-  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf '### Runtime tests\n\n%s\n' "$result" >> "$GITHUB_STEP_SUMMARY" || true
-  fi
-  return "$status"
-}
-trap report_runtime_tests EXIT
-
 cd "$(dirname "$0")/.."
 
 swift_compiler="$(/usr/bin/xcrun --find swiftc)"
@@ -43,4 +28,14 @@ fi
 /bin/bash Tests/Integration/test-build-graph.sh
 /bin/bash Tests/Integration/test-guest-worker-package.sh
 
-/usr/bin/xcrun swift "${test_args[@]}" "$@"
+# Actions annotations highlight failures in the log and include the exact
+# diagnostic in the run's native summary. pipefail preserves Swift's exit status.
+/usr/bin/xcrun swift "${test_args[@]}" "$@" 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "${GITHUB_ACTIONS:-}" == true && ( "$line" == ✘* || "$line" == error:* || "$line" =~ ^.+:[0-9]+:[0-9]+:\ error: ) ]]; then
+    line="${line//%/%25}"
+    line="${line//$'\r'/%0D}"
+    printf '::error::%s\n' "$line"
+  else
+    printf '%s\n' "$line"
+  fi
+done
