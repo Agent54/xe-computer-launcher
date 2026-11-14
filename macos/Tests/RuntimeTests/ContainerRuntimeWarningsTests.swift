@@ -5,52 +5,11 @@ import Testing
 
 @MainActor
 struct ContainerRuntimeWarningsTests {
-    @Test func logErrorsDriveTheMenuAndBadgeAndKeepAcknowledgementsAcrossRelaunches() throws {
-        _ = NSApplication.shared
-        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
-        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
-        func model() -> ContainerRuntimeWarnings {
-            ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
-                readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
-        }
-        let issue = SystemLogStore.Entry(id: 12, source: "launcher",
-            line: "Chrome process group did not exit after Browser.close (10.0s); sending SIGTERM", timestamp: Date())
-        let warnings = model()
-        warnings.update(snapshot(), logIssue: issue)
-        let warning = try #require(warnings.menuWarnings.first)
-        #expect(warnings.unignoredCount == 1)
-        #expect(warning.title == "Browser Didn't Shut Down Cleanly")
-        #expect(warning.message.contains("site data"))
-        #expect(warning.resource == nil)
-        #expect(warnings.nextAutomaticWarning == nil)
-        let alert = ContainerRuntimeWarnings.alert(for: warning)
-        #expect(alert.buttons.map(\.title) == ["Open System Logs…", "Ignore", "Dismiss"])
-        #expect(alert.informativeText.contains(issue.line))
-        warnings.ignore(warning)
-        #expect(warnings.menuWarnings.count == 1)
-        #expect(warnings.unignoredCount == 0)
-        let relaunched = model()
-        relaunched.update(snapshot(), logIssue: issue)
-        #expect(relaunched.unignoredCount == 0)
-        relaunched.dismiss(warning)
-        #expect(relaunched.menuWarnings.isEmpty)
-        relaunched.update(snapshot(), logIssue: issue)
-        #expect(relaunched.menuWarnings.isEmpty)
-        let newIssue = SystemLogStore.Entry(id: 13, source: "browser", line: "Process exited with code -1", timestamp: Date())
-        relaunched.update(snapshot(), logIssue: newIssue)
-        #expect(relaunched.unignoredCount == 1)
-        #expect(relaunched.menuWarnings.first?.title == "Browser Exited Abnormally")
-        relaunched.update(history(), logIssue: newIssue)
-        #expect(relaunched.menuWarnings.count == 3)
-        #expect(relaunched.unignoredCount == 3)
-        #expect(relaunched.nextAutomaticWarning?.kind == .outOfMemory)
-    }
-
-    private func snapshot(available: UInt64 = 50, bootID: String = "boot-1", host: HostResourceSnapshot? = nil) -> ContainerRuntimeSnapshot {
+    private func snapshot(available: UInt64 = 50, bootID: String = "boot-1") -> ContainerRuntimeSnapshot {
         ContainerRuntimeSnapshot(
             phase: .healthy, message: "Container runtime ready", reason: nil, updatedAt: Date(),
             recoveryAttempt: nil, memoryTotalBytes: 100, memoryAvailableBytes: available,
-            oomKillCount: 0, hostResources: host, bootId: bootID
+            oomKillCount: 0, hostResources: nil, bootId: bootID
         )
     }
 
@@ -82,7 +41,6 @@ struct ContainerRuntimeWarningsTests {
         warnings.didPresent(disk)
         warnings.update(current)
         #expect(warnings.nextAutomaticWarning == nil)
-        #expect(warnings.unignoredCount == 2)
         current.lastIncident = .init(id: "oom-2", reason: "oom", message: "Another OOM",
             occurredAt: Date(), memoryLimitBytes: 4 << 30)
         warnings.update(current)
@@ -94,8 +52,6 @@ struct ContainerRuntimeWarningsTests {
         warnings.didPresent(nextOOM)
         warnings.didPresent(oom)
         #expect(warnings.nextAutomaticWarning == nil)
-        // Presentation alone keeps the tray indicator and history.
-        #expect(warnings.unignoredCount == 2)
         #expect(warnings.warnings.count == 2)
     }
 
@@ -123,67 +79,6 @@ struct ContainerRuntimeWarningsTests {
         #expect(relaunched.nextAutomaticWarning == nil)
     }
 
-    @Test func ignoreKeepsTheTrayEntryAndDismissRemovesItImmediatelyAcrossRelaunches() throws {
-        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
-        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
-        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
-            readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
-        var current = history()
-        warnings.update(current)
-        let oom = try #require(warnings.menuWarnings.first { $0.kind == .outOfMemory })
-        warnings.didPresent(oom)
-        #expect(warnings.menuWarnings.contains(oom))
-        warnings.ignore(oom)
-        #expect(warnings.menuWarnings.contains(oom))
-        #expect(warnings.unignoredCount == 1)
-        warnings.dismiss(oom)
-        #expect(!warnings.menuWarnings.contains(oom))
-        #expect(warnings.menuWarnings.count == 1)
-        warnings.update(current)
-        #expect(!warnings.menuWarnings.contains(oom))
-        let disk = try #require(warnings.menuWarnings.first)
-        warnings.dismiss(disk)
-        #expect(warnings.menuWarnings.isEmpty)
-        #expect(warnings.unignoredCount == 0)
-        #expect(warnings.nextAutomaticWarning == nil)
-        let relaunched = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 },
-            readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
-        relaunched.update(current)
-        #expect(relaunched.menuWarnings.isEmpty)
-        #expect(relaunched.nextAutomaticWarning == nil)
-        current.lastIncident = .init(id: "oom-new", reason: "oom", message: "New incident",
-            occurredAt: Date(), memoryLimitBytes: 4 << 30)
-        warnings.update(current)
-        #expect(warnings.menuWarnings.map(\.id) == ["oom-new"])
-        // Dismissing a stale menu item cannot hide a newer event.
-        warnings.dismiss(oom)
-        #expect(warnings.menuWarnings.map(\.id) == ["oom-new"])
-        #expect(warnings.nextAutomaticWarning?.id == "oom-new")
-    }
-
-    @Test func ignoredHistoryCanBeReopenedAfterRelaunchAndNewIncidentsWarnAgain() throws {
-        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
-        let read: (ContainerRuntimeWarnings.Kind) -> String? = { ignored[$0] }
-        let save: (ContainerRuntimeWarnings.Kind, String) -> Void = { ignored[$0] = $1 }
-        let warnings = ContainerRuntimeWarnings(readIgnored: read, saveIgnored: save)
-        var current = history()
-        warnings.update(current)
-        #expect(warnings.unignoredCount == 2)
-        for warning in warnings.warnings { warnings.ignore(warning) }
-        #expect(warnings.unignoredCount == 0)
-        #expect(warnings.warnings.count == 2)
-        let relaunched = ContainerRuntimeWarnings(readIgnored: read, saveIgnored: save)
-        relaunched.update(current)
-        #expect(relaunched.unignoredCount == 0)
-        #expect(relaunched.warnings.count == 2)
-        let previous = try #require(relaunched.warnings.first { $0.kind == .cacheCleanup })
-        current.cachePressureWarning = .init(id: "cache-2", message: "New cleanup", occurredAt: Date())
-        relaunched.update(current)
-        // A dialog for an older event must not acknowledge a newer cleanup.
-        relaunched.ignore(previous)
-        #expect(relaunched.unignoredCount == 1)
-    }
-
     @Test func pressureAcknowledgementLastsUntilMemoryRecoversOrTheGuestChanges() throws {
         var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
         let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
@@ -192,16 +87,35 @@ struct ContainerRuntimeWarningsTests {
         warnings.ignore(first)
         warnings.update(snapshot(available: 9))
         #expect(warnings.warnings.first?.id == first.id)
-        #expect(warnings.unignoredCount == 0)
+        #expect(warnings.nextAutomaticWarning == nil)
         warnings.update(snapshot(available: 11))
         #expect(warnings.warnings.isEmpty)
         warnings.update(snapshot(available: 5))
-        #expect(warnings.unignoredCount == 1)
         let second = try #require(warnings.warnings.first)
         #expect(second.id != first.id)
         warnings.ignore(second)
         warnings.update(snapshot(available: 5, bootID: "boot-2"))
-        #expect(warnings.unignoredCount == 1)
+        #expect(warnings.nextAutomaticWarning?.kind == .memoryPressure)
+    }
+
+    @Test func dismissedDiskDialogStaysClosedButANewEpisodeCanOpen() throws {
+        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
+        func model() -> ContainerRuntimeWarnings {
+            ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in },
+                readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
+        }
+        var current = history()
+        current.lastIncident = nil
+        let warnings = model()
+        warnings.update(current)
+        let disk = try #require(warnings.nextAutomaticWarning)
+        warnings.dismiss(disk)
+        let relaunched = model()
+        relaunched.update(current)
+        #expect(relaunched.nextAutomaticWarning == nil)
+        current.cachePressureWarning = .init(id: "cache-2", message: "Disk space is low again", occurredAt: Date())
+        relaunched.update(current)
+        #expect(relaunched.nextAutomaticWarning?.id == "cache-2")
     }
 
     @Test func dialogsOfferTheRelevantResourceSettingAndIgnore() throws {
@@ -238,63 +152,6 @@ struct ContainerRuntimeWarningsTests {
         #expect(oom.title.contains("Restarted"))
         #expect(oom.message.contains("Automatic VM restart:"))
         #expect(oom.message.contains("Container runtime ready"))
-    }
-
-    @Test func hostReserveWarningsStayInTheMenuWithoutOpeningAutomaticDialogs() throws {
-        let gib: UInt64 = 1 << 30
-        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in },
-            readDismissed: { _ in nil }, saveDismissed: { _, _ in })
-        let low = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 13 * gib,
-            memoryTotalBytes: 16 * gib, diskUsedBytes: 91 * gib, diskTotalBytes: 100 * gib)
-        for _ in 0..<2 {
-            warnings.update(snapshot(host: low))
-            #expect(warnings.menuWarnings.map(\.kind) == [.hostMemory, .hostDisk])
-            #expect(warnings.unignoredCount == 2)
-            #expect(warnings.nextAutomaticWarning == nil)
-        }
-
-        // Host warnings must not hide a VM event that still needs a dialog.
-        warnings.update(snapshot(available: 5, host: low))
-        let pressure = try #require(warnings.nextAutomaticWarning)
-        #expect(pressure.kind == .memoryPressure)
-        warnings.didPresent(pressure)
-        #expect(warnings.nextAutomaticWarning == nil)
-
-        // A new host warning episode must also remain passive.
-        warnings.update(snapshot())
-        warnings.update(snapshot(host: low))
-        #expect(warnings.menuWarnings.count == 2)
-        #expect(warnings.nextAutomaticWarning == nil)
-    }
-
-    @Test func hostReserveWarningsStayRedUntilResourcesRecoverEvenWhenIgnored() throws {
-        _ = NSApplication.shared
-        let gib: UInt64 = 1 << 30
-        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
-        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
-        let low = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 13 * gib,
-            memoryTotalBytes: 16 * gib, diskUsedBytes: 91 * gib, diskTotalBytes: 100 * gib)
-        warnings.update(snapshot(host: low))
-        #expect(warnings.warnings.count == 2)
-        for warning in warnings.warnings {
-            #expect(warning.isHostWarning)
-            #expect(warning.resource == nil)
-            let alert = ContainerRuntimeWarnings.alert(for: warning)
-            #expect(alert.alertStyle == .critical)
-            #expect((alert.accessoryView as? NSTextField)?.textColor == NSColor.systemRed)
-            #expect(alert.buttons[0].title == "OK")
-            warnings.ignore(warning)
-        }
-        #expect(warnings.unignoredCount == 0)
-        #expect(warnings.hasHostWarning)
-        let oldIDs = warnings.warnings.map(\.id)
-        let recovered = HostResourceSnapshot(cpuPercent: nil, cpuCount: 8, memoryUsedBytes: 12 * gib,
-            memoryTotalBytes: 16 * gib, diskUsedBytes: 90 * gib, diskTotalBytes: 100 * gib)
-        warnings.update(snapshot(host: recovered))
-        #expect(!warnings.hasHostWarning)
-        warnings.update(snapshot(host: low))
-        #expect(warnings.unignoredCount == 2)
-        #expect(warnings.warnings.map(\.id) != oldIDs)
     }
 
     @Test func increaseDialogShowsItsNextStepAndDisablesUnsafeIncreasesWithARedReason() throws {

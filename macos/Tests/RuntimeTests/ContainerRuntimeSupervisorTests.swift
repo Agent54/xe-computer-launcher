@@ -399,13 +399,14 @@ struct ContainerRuntimeSupervisorTests {
     @Test func startupOOMIsRecordedEvenWhenDockerNeverBecomesReady() async throws {
         let root = incidentTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
+        let logStore = SystemLogStore(directoryURL: root.appendingPathComponent("logs"))
         let supervisor = ContainerRuntimeSupervisor(
             statusStore: ContainerRuntimeStatusStore(directoryURL: root),
             startMachine: { throw SmolVMSetupError.dockerSocketUnavailable("test.sock") },
             stopMachine: {}, probeDocker: { false },
             readDiagnostics: { machine(oomKillCount: 1, workloadOOM: true) },
             resetRouter: {}, reconcileRouter: {}, readHostResources: { nil }, readVMResources: { _ in nil },
-            onStatusChanged: { _ in }, log: { _ in }
+            onStatusChanged: { _ in }, log: { logStore.append("runtime", $0) }
         )
         do {
             _ = try await supervisor.start()
@@ -416,6 +417,9 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.reason == "oom")
         #expect(snapshot.lastIncident?.reason == "oom")
         #expect(snapshot.message.contains("out of memory while starting"))
+        #expect(snapshot.menuDescription == "Container runtime unavailable")
+        let issues = await logStore.history(minimumSeverity: .warning).entries
+        #expect(issues.contains { $0.severity == .error && $0.line.contains("Linux killed a process") })
     }
 
     @Test func failedStartupKeepsHostReservesCurrentWithoutRetryingTheVM() async throws {
@@ -512,7 +516,7 @@ struct ContainerRuntimeSupervisorTests {
         #expect(snapshot.phase == .failed)
         #expect(snapshot.reason == "oom")
         #expect(snapshot.message.contains("Increase VM memory"))
-        #expect(snapshot.menuDescription.contains("repeatedly ran out of memory"))
+        #expect(snapshot.menuDescription == "Container runtime unavailable")
         #expect(snapshot.lastIncident?.reason == "oom")
         #expect(await fixture.starts == 2)
     }
@@ -737,7 +741,7 @@ struct ContainerRuntimeSupervisorTests {
         #expect(persisted.message == failure.localizedDescription)
         await logStore.flush()
         let reopened = SystemLogStore(directoryURL: logStore.directoryURL)
-        #expect(await reopened.history(sources: ["runtime"]).entries.last?.line.contains(failure.localizedDescription) == true)
+        #expect(await reopened.history(sources: ["runtime"], minimumSeverity: .warning).entries.last?.line.contains(failure.localizedDescription) == true)
     }
 
     @Test func machineStatusDecodesOldAndDiagnosticJSON() throws {

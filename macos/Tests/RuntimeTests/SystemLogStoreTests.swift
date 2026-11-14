@@ -103,22 +103,25 @@ struct SystemLogStoreTests {
         #expect(lines.first == "original failure")
         #expect(lines.last == "still running")
         #expect(lines.filter { $0.hasPrefix("Could not save System Logs:") }.count == 1)
-        #expect(store.latestIssue?.severity == .error)
+        #expect(store.latestError?.severity == .error)
     }
 
-    @Test func shutdownWarningSurvivesRelaunchAndLogRotation() async throws {
+    @Test func warningsNeverReplaceTheErrorBehindTheNoticeEvenAfterRotation() async throws {
         let directory = directory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = SystemLogStore(directoryURL: directory,
             configuration: .init(memoryEntries: 2, fileBytes: 512, fileCount: 2))
+        store.append("browser", "Process exited with code -1")
+        let error = try #require(store.latestError)
         store.append("launcher", "Chrome process group did not exit after Browser.close (10.0s); sending SIGTERM")
-        let warning = try #require(store.latestIssue)
+        #expect(store.latestError == error)
         for index in 0..<30 { store.append("launcher", "normal line \(index): " + String(repeating: "x", count: 120)) }
         await store.flush()
-        #expect(!store.snapshot().entries.contains(warning))
-        #expect(!(await store.history()).entries.contains(warning))
+        #expect(!store.snapshot().entries.contains(error))
+        #expect(!(await store.history()).entries.contains(error))
         let reopened = SystemLogStore(directoryURL: directory)
-        #expect(reopened.latestIssue == warning)
+        #expect(reopened.latestError == error)
+        #expect((await reopened.history(minimumSeverity: .warning)).entries == [error])
         #expect(try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("last-warning.json").path)[.posixPermissions] as? Int == 0o600)
     }
 
@@ -127,17 +130,17 @@ struct SystemLogStoreTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = SystemLogStore(directoryURL: directory)
         store.append("browser", "Process exited with code -1")
-        let first = try #require(store.latestIssue)
+        let first = try #require(store.latestError)
         store.append("launcher", "normal progress")
         store.append("browser", "Process exited with code -1")
-        #expect(store.latestIssue == first)
+        #expect(store.latestError == first)
         store.append("workerd", "Error: connection failed")
-        #expect(store.latestIssue?.id != first.id)
+        #expect(store.latestError?.id != first.id)
         await store.flush()
         let reopened = SystemLogStore(directoryURL: directory)
-        let previous = try #require(reopened.latestIssue)
+        let previous = try #require(reopened.latestError)
         reopened.append(previous.source, previous.line)
-        #expect(try #require(reopened.latestIssue).id > previous.id)
+        #expect(try #require(reopened.latestError).id > previous.id)
         await reopened.flush()
     }
 
@@ -154,7 +157,29 @@ struct SystemLogStoreTests {
         try data.write(to: directory.appendingPathComponent("system.jsonl"))
         let reopened = SystemLogStore(directoryURL: directory)
         await reopened.flush()
-        #expect(reopened.latestIssue == crash)
+        #expect(reopened.latestError == crash)
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("last-warning.json").path))
+    }
+
+    @Test func severityFilterAppliesBeforePagingAndToLiveLogs() async {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SystemLogStore(directoryURL: directory)
+        store.append("launcher", "Warning: low host memory")
+        store.append("runtime", "Warning: low VM disk space")
+        #expect(store.latestError == nil)
+        store.append("runtime", "Error: VM ran out of memory")
+        for index in 1...5 { store.append("runtime", "Healthy log \(index)") }
+
+        let sources: Set<String> = ["runtime"]
+        let live = store.snapshot(sources: sources, minimumSeverity: .warning).entries
+        #expect(live.map(\.severity) == [.warning, .error])
+        let newest = await store.history(limit: 1, sources: sources, minimumSeverity: .warning)
+        #expect(newest.entries == Array(live.suffix(1)))
+        #expect(newest.hasEarlier)
+        let earlier = await store.history(before: newest.entries.first?.id, limit: 1,
+                                          sources: sources, minimumSeverity: .warning)
+        #expect(earlier.entries == Array(live.prefix(1)))
+        #expect(!earlier.hasEarlier)
     }
 }

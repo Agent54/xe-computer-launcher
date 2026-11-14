@@ -10,6 +10,7 @@ enum SystemLogSeverity: Int, Sendable {
         if lower.contains("exited unexpectedly")
             || lower.contains("shutdown exceeded")
             || lower.contains("shutdown finished (stopped=false)")
+            || (source == "runtime" && lower.hasPrefix("the container vm ran out of memory"))
             || lower.hasPrefix("could not ") || lower.hasPrefix("failed to ")
             || lower.contains(" failed:") || lower.contains(" failed to start:") {
             return .error

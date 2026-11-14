@@ -1,11 +1,11 @@
 import AppKit
 import Foundation
 
-/// Launcher warning history and acknowledgements, independent of Compose UI dismissal.
+/// Automatic VM warning dialogs and acknowledgements, independent of the tray and Compose UI.
 @MainActor
 final class ContainerRuntimeWarnings {
     enum Kind: String, Hashable, Sendable {
-        case memoryPressure, outOfMemory, cacheCleanup, hostMemory, hostDisk, systemLog
+        case memoryPressure, outOfMemory, cacheCleanup
 
         var settingKey: String { "runtime_ignored_\(rawValue)_id" }
         var dismissedSettingKey: String { "runtime_dismissed_\(rawValue)_id" }
@@ -18,11 +18,8 @@ final class ContainerRuntimeWarnings {
         let message: String
         let occurredAt: Date?
 
-        var isHostWarning: Bool { kind == .hostMemory || kind == .hostDisk }
-        var resource: ContainerVMSettings.Resource? { isHostWarning || kind == .systemLog ? nil : kind == .cacheCleanup ? .disk : .memory }
-        var actionTitle: String {
-            kind == .systemLog ? "Open System Logs…" : isHostWarning ? "OK" : kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…"
-        }
+        var resource: ContainerVMSettings.Resource { kind == .cacheCleanup ? .disk : .memory }
+        var actionTitle: String { kind == .cacheCleanup ? "Increase Disk Size…" : "Increase Memory…" }
     }
 
     private let readIgnored: (Kind) -> String?
@@ -31,7 +28,6 @@ final class ContainerRuntimeWarnings {
     private let saveDismissed: (Kind, String) -> Void
     private var pressureID: String?
     private var pressureBootID: String?
-    private var hostEpisodeIDs: [Kind: String] = [:]
     private var presentedIDs: [Kind: Set<String>] = [:]
     private(set) var warnings: [Warning] = []
 
@@ -47,10 +43,6 @@ final class ContainerRuntimeWarnings {
         self.saveDismissed = saveDismissed
     }
 
-    var menuWarnings: [Warning] { warnings.filter { !isDismissed($0) } }
-    var unignoredCount: Int { menuWarnings.filter { !isIgnored($0) }.count }
-    var hasHostWarning: Bool { warnings.contains { $0.isHostWarning } }
-
     func isIgnored(_ warning: Warning) -> Bool { readIgnored(warning.kind) == warning.id }
 
     func ignore(_ warning: Warning) { saveIgnored(warning.kind, warning.id) }
@@ -61,26 +53,14 @@ final class ContainerRuntimeWarnings {
 
     /// Keep a presented dialog from reopening on every status refresh. New episodes
     /// have new IDs; ignored and dismissed events stay suppressed across launcher runs.
-    /// Host reserve warnings stay in the menu; only VM events open dialogs automatically.
     var nextAutomaticWarning: Warning? {
-        menuWarnings.first { !$0.isHostWarning && $0.kind != .systemLog && !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
+        warnings.first { !isDismissed($0) && !isIgnored($0) && !(presentedIDs[$0.kind]?.contains($0.id) ?? false) }
     }
 
     func didPresent(_ warning: Warning) { presentedIDs[warning.kind, default: []].insert(warning.id) }
 
-    func update(_ snapshot: ContainerRuntimeSnapshot, logIssue: SystemLogStore.Entry? = nil) {
+    func update(_ snapshot: ContainerRuntimeSnapshot) {
         var current: [Warning] = []
-        var activeHostKinds: Set<Kind> = []
-        for warning in HostResourcePolicy.warnings(for: snapshot.hostResources) {
-            let kind: Kind = warning.resource == .memory ? .hostMemory : .hostDisk
-            activeHostKinds.insert(kind)
-            let id = hostEpisodeIDs[kind] ?? UUID().uuidString
-            hostEpisodeIDs[kind] = id
-            current.append(Warning(id: id, kind: kind,
-                title: kind == .hostMemory ? "Host RAM Below 4 GiB Reserve" : "Host Disk Below 10 GiB Reserve",
-                message: warning.message, occurredAt: nil))
-        }
-        hostEpisodeIDs = hostEpisodeIDs.filter { activeHostKinds.contains($0.key) }
         if snapshot.phase == .healthy, let total = snapshot.memoryTotalBytes, total > 0,
            let available = snapshot.memoryAvailableBytes, available <= total / 10 {
             if pressureID == nil || pressureBootID != snapshot.bootId {
@@ -116,38 +96,22 @@ final class ContainerRuntimeWarnings {
                 message: warning.message, occurredAt: warning.occurredAt
             ))
         }
-        if let issue = logIssue {
-            let lower = issue.line.lowercased()
-            let browserShutdown = lower.contains("chrome process group did not exit")
-            let browserExit = lower.contains("browser process exited")
-                || (issue.source == "browser" && lower.contains("process exited with code"))
-            let title = browserShutdown ? "Browser Didn't Shut Down Cleanly"
-                : browserExit ? "Browser Exited Abnormally"
-                : issue.severity == .error ? "Error in System Logs" : "Warning in System Logs"
-            let consequence = browserShutdown || browserExit
-                ? "The browser could not finish a clean shutdown. Some recent site data may not have been saved.\n\n" : ""
-            current.append(Warning(id: "log-\(issue.id)", kind: .systemLog, title: title,
-                message: consequence + "[\(issue.source)] \(issue.line)\n\nOpen System Logs for more context.",
-                occurredAt: issue.timestamp))
-        }
         warnings = current
     }
 
     static func alert(for warning: Warning, actionTitle: String? = nil, blockedReason: String? = nil,
                       hostWarnings: [HostResourceReserveWarning] = []) -> NSAlert {
-        let alert = warning.isHostWarning ? hostResourceAlert(title: warning.title, message: warning.message) : NSAlert()
-        if !warning.isHostWarning { alert.alertStyle = .warning }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
         alert.messageText = warning.title
-        if !warning.isHostWarning { alert.informativeText = warning.message }
+        alert.informativeText = warning.message
         if let occurredAt = warning.occurredAt {
             alert.informativeText += "\n\nOccurred: " + occurredAt.formatted(date: .abbreviated, time: .shortened)
         }
         let increase = alert.addButton(withTitle: actionTitle ?? warning.actionTitle)
         increase.isEnabled = blockedReason == nil
-        if warning.resource != nil {
-            let redMessages = hostWarnings.map(\.message) + (blockedReason.map { [$0] } ?? [])
-            if !redMessages.isEmpty { alert.accessoryView = redLabel(redMessages.joined(separator: "\n\n")) }
-        }
+        let redMessages = hostWarnings.map(\.message) + (blockedReason.map { [$0] } ?? [])
+        if !redMessages.isEmpty { alert.accessoryView = redLabel(redMessages.joined(separator: "\n\n")) }
         alert.addButton(withTitle: "Ignore")
         alert.addButton(withTitle: "Dismiss").keyEquivalent = "\u{1b}"
         return alert

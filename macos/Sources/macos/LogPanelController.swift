@@ -5,6 +5,7 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
     private let textView = NSTextView()
     private let logStore: SystemLogStore
     private let earlierButton = NSButton()
+    private let issuesFilter = NSButton(checkboxWithTitle: "Warnings & Errors Only", target: nil, action: nil)
     private var refreshTimer: Timer?
     private var currentSources: Set<String>?
     private var lastRevision: UInt64?
@@ -60,10 +61,11 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         nil
     }
 
-    func present(showingAll: Bool = false) {
-        if showingAll {
+    func present(showingIssues: Bool = false) {
+        if showingIssues {
             currentSources = nil
             segmentedControl.selectedSegment = 0
+            issuesFilter.state = .on
         }
         showWindow(nil)
         if let window, let screen = NSScreen.main {
@@ -122,6 +124,12 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         earlierButton.isEnabled = false
         contentView.addSubview(earlierButton)
 
+        issuesFilter.target = self
+        issuesFilter.action = #selector(issuesFilterChanged)
+        issuesFilter.sendAction(on: .leftMouseDown)
+        issuesFilter.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(issuesFilter)
+
         NSLayoutConstraint.activate([
             segmentedControl.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             segmentedControl.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
@@ -131,7 +139,9 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
             scrollView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 8),
             scrollView.bottomAnchor.constraint(equalTo: earlierButton.topAnchor, constant: -8),
             earlierButton.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            earlierButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8)
+            earlierButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            issuesFilter.centerYAnchor.constraint(equalTo: earlierButton.centerYAnchor),
+            issuesFilter.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8)
         ])
     }
 
@@ -144,12 +154,17 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
 
     @objc private func loadEarlier() { loadHistory(reset: false) }
 
+    @objc private func issuesFilterChanged() { loadHistory(reset: true) }
+
+    private var minimumSeverity: SystemLogSeverity { issuesFilter.state == .on ? .warning : .info }
+
     private func loadHistory(reset: Bool) {
         historyTask?.cancel()
         historyGeneration += 1
         let generation = historyGeneration
         let before = reset ? nil : displayed.first?.id
         let sources = currentSources
+        let severity = minimumSeverity
         earlierButton.isEnabled = false
         if reset {
             displayLimit = 10_000
@@ -158,7 +173,7 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
             textView.string = ""
         }
         historyTask = Task { [weak self, logStore] in
-            let page = await logStore.history(before: before, sources: sources)
+            let page = await logStore.history(before: before, sources: sources, minimumSeverity: severity)
             guard let self, !Task.isCancelled, self.historyGeneration == generation else { return }
             if !reset { self.displayLimit += page.entries.count }
             self.displayed = page.entries + self.displayed
@@ -186,11 +201,10 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
 
     private func refreshLogs() {
         guard historyTask == nil else { return }
-        let snapshot = logStore.snapshot(sources: currentSources)
+        let snapshot = logStore.snapshot(sources: currentSources, minimumSeverity: minimumSeverity, after: displayed.last?.id ?? 0)
         guard snapshot.revision != lastRevision else { return }
         lastRevision = snapshot.revision
-        let latestID = displayed.last?.id ?? 0
-        let added = snapshot.entries.filter { $0.id > latestID }
+        let added = snapshot.entries
         guard !added.isEmpty else { return }
         let keepBottom = isScrolledNearBottom()
         displayed += added

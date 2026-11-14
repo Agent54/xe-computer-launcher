@@ -36,7 +36,16 @@ struct ContainerRuntimeSnapshot: Codable, Equatable, Sendable {
     var lastIncident: ContainerRuntimeIncident? = nil
     var cachePressureWarning: ContainerRuntimeMaintenance.CachePressureWarning? = nil
 
-    var menuDescription: String { message }
+    var menuDescription: String {
+        switch phase {
+        case .starting: "Starting container runtime…"
+        case .healthy: reason == "oom_recovered" || reason == "docker_recovered" ? "Container runtime recovered" : "Container runtime ready"
+        case .degraded, .diagnosing: "Checking container runtime…"
+        case .restarting: "Restarting container VM…"
+        case .failed: "Container runtime unavailable"
+        case .stopped: "Container runtime stopped"
+        }
+    }
 }
 
 @MainActor
@@ -161,6 +170,8 @@ actor ContainerRuntimeSupervisor {
     private var lastDiagnostics: SmolVMMachine?
     private var bootId: String?
     private var lastIncident: ContainerRuntimeIncident?
+    private var reportedMemoryPressure = false
+    private var reportedHostPressure: Set<HostResourceReserveWarning.Resource> = []
     private var didLoadIncident = false
     private var outageWasOOM = false
     private var lastPublishedAt = Date.distantPast
@@ -226,6 +237,7 @@ actor ContainerRuntimeSupervisor {
         state = .starting
         outageWasOOM = false
         bootId = UUID().uuidString
+        reportedMemoryPressure = false
         await publish(phase: restarting ? .restarting : .starting,
             message: restarting ? "Restarting container VM…" : "Starting container runtime…")
         do {
@@ -427,7 +439,7 @@ actor ContainerRuntimeSupervisor {
                 oomKillCount: diagnostics.memory?.oomKillCount
             )
             lastIncident = incident
-            log(incident.message)
+            log("Error: " + incident.message)
         }
         return newOOM
     }
@@ -471,7 +483,7 @@ actor ContainerRuntimeSupervisor {
                 reason: wasOOM ? "oom" : "recovery_exhausted",
                 memory: diagnosed.memory
             )
-            log(message)
+            log("Error: " + message)
             return
         }
 
@@ -487,10 +499,11 @@ actor ContainerRuntimeSupervisor {
             recoveryAttempt: attempt,
             memory: diagnosed.memory
         )
-        log(message)
+        log("Warning: " + message)
 
         await resetRouter()
         bootId = UUID().uuidString
+        reportedMemoryPressure = false
         await publish(
             phase: .restarting,
             message: message,
@@ -583,6 +596,7 @@ actor ContainerRuntimeSupervisor {
         let vmResources = await readVMResources(machine)
         let cachePressureWarning = await maintenance?.snapshot().cachePressureWarning
         guard bootId == publishingBootId, expectedState == nil || state == expectedState else { return }
+        logResourcePressure(phase: phase, memory: memory, host: hostResources)
         let snapshot = ContainerRuntimeSnapshot(
             phase: phase,
             message: message,
@@ -604,5 +618,25 @@ actor ContainerRuntimeSupervisor {
             log("Could not publish container runtime status: " + error.localizedDescription)
         }
         await onStatusChanged(snapshot)
+    }
+
+    private func logResourcePressure(phase: ContainerRuntimeSnapshot.Phase, memory: SmolVMMemoryStatus?,
+                                     host: HostResourceSnapshot?) {
+        let hostWarnings = HostResourcePolicy.warnings(for: host)
+        for warning in hostWarnings where !reportedHostPressure.contains(warning.resource) {
+            log("Warning: " + warning.message)
+        }
+        reportedHostPressure = Set(hostWarnings.map(\.resource))
+
+        if phase == .healthy, let memory, memory.totalBytes > 0,
+           memory.availableBytes <= memory.totalBytes / 10 {
+            if !reportedMemoryPressure {
+                log("Warning: Only 10% or less of VM memory is available. Pause builds or increase VM memory to avoid Linux killing processes.")
+                reportedMemoryPressure = true
+            }
+        } else if phase == .healthy || phase == .stopped {
+            // A later pressure episode must warn again, even in the same VM boot.
+            reportedMemoryPressure = false
+        }
     }
 }

@@ -217,7 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             onStatusChanged: { [weak self] snapshot in
                 await MainActor.run {
                     ContainerRuntimePresentation.shared.update(snapshot)
-                    self?.renderRuntimeWarnings(snapshot)
+                    self?.updateRuntimeWarnings(snapshot)
+                    self?.renderLauncherIssues()
                 }
                 await workerd.notifyRuntimeChanged()
             }
@@ -271,7 +272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var terminationHandoffTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusMessageItem: NSMenuItem?
-    private var runtimeWarningsItem: NSMenuItem?
+    private var issuesItem: NSMenuItem?
+    private let launcherIssues = LauncherIssues()
     private let runtimeWarnings = ContainerRuntimeWarnings()
     private var containerVMSettingsTask: Task<Void, Never>?
     private var isShowingRuntimeWarning = false
@@ -305,7 +307,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private let menuServiceState = MenuServiceState()
     private var isMenuTracking = false
     private var canUseUpdater = false
-    private let warningMenuItems = LiveMenuItems<ContainerRuntimeWarnings.Kind>()
 
     // Track which services have a pending operation (shows ⏳)
     private var pendingServices: Set<String> = []
@@ -1127,10 +1128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let statusMessageItem = NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: "")
         menu.addItem(statusMessageItem)
         self.statusMessageItem = statusMessageItem
-        let warningsItem = NSMenuItem(title: "Warnings: None", action: nil, keyEquivalent: "")
-        warningsItem.isEnabled = false
-        menu.addItem(warningsItem)
-        runtimeWarningsItem = warningsItem
+        let issuesItem = NSMenuItem(title: LauncherIssues.title + "…", action: #selector(openIssueLogsAction), keyEquivalent: "")
+        issuesItem.target = self
+        issuesItem.isHidden = true
+        menu.addItem(issuesItem)
+        self.issuesItem = issuesItem
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -1637,7 +1639,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             guard let self, !self.isPreparingForTermination, !self.isMenuTracking else { return }
             self.applyDockIconPreference()
         }
-        renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
+        renderLauncherIssues()
+        presentNextRuntimeWarning()
         let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
         if settingsRestartRequired {
             statusMessageItem?.title = "Status: Restart needed for settings"
@@ -1859,7 +1862,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 try await runtimeSupervisor.restart(afterMemoryIncreaseTo: increasedMemoryMiB)
                 guard !isPreparingForTermination else { return }
                 if let warning { runtimeWarnings.ignore(warning) }
-                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
                 renderMenuLabels()
                 return
             } catch is CancellationError {
@@ -1877,71 +1879,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
     }
 
-    private func renderRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
-        guard !isPreparingForTermination else { return }
-        runtimeWarnings.update(snapshot, logIssue: ExternalState.shared.logStore.latestIssue)
-        let menuWarnings = runtimeWarnings.menuWarnings
-        let hasWarnings = !menuWarnings.isEmpty
-        let count = runtimeWarnings.unignoredCount
-        let critical = menuWarnings.contains { $0.isHostWarning }
-        runtimeWarningsItem?.title = count > 0 ? "⚠︎ Warnings (\(count))" : "Warnings"
-        if let item = runtimeWarningsItem {
-            if !hasWarnings {
-                item.title = "Warnings: None"
-                if item.submenu != nil { item.submenu = nil }
-            }
-            item.attributedTitle = NSAttributedString(string: item.title, attributes: [
-                .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
-            ])
-        }
-        // A previously empty, disabled submenu cannot be open yet, so its
-        // first warning can appear immediately without disturbing tracking.
-        let keepWarningRows = hasWarnings && isMenuTracking && warningMenuItems.menu.numberOfItems > 0
-        warningMenuItems.update(keys: menuWarnings.map(\.kind), deferStructuralChanges: keepWarningRows) { kind, item in
-            guard let warning = menuWarnings.first(where: { $0.kind == kind }) else { return }
-            let ignored = runtimeWarnings.isIgnored(warning)
-            item.title = warning.title + (ignored ? " (ignored)…" : "…")
-            item.action = #selector(showRuntimeWarningAction(_:))
-            item.target = self
-            item.representedObject = warning
-            item.isEnabled = true
-            if warning.isHostWarning {
-                item.attributedTitle = NSAttributedString(string: item.title, attributes: [.foregroundColor: NSColor.systemRed])
-            }
-        }
-        if let item = runtimeWarningsItem {
-            if hasWarnings && item.submenu !== warningMenuItems.menu {
-                item.submenu = warningMenuItems.menu
-            }
-            item.isEnabled = hasWarnings
-        }
+    private func renderLauncherIssues() {
+        guard !isPreparingForTermination, let issuesItem else { return }
+        let pending = launcherIssues.pendingError(ExternalState.shared.logStore.latestError)
+        let hasIssues = pending != nil
+        let shouldHide = !hasIssues
+        if issuesItem.isHidden != shouldHide { issuesItem.isHidden = shouldHide }
         if let button = statusItem?.button {
             button.imagePosition = .imageLeft
-            button.attributedTitle = NSAttributedString(string: count > 0 || critical ? " ⚠︎" : "", attributes: [
-                .foregroundColor: critical ? NSColor.systemRed : NSColor.labelColor,
+            button.attributedTitle = NSAttributedString(string: hasIssues ? " ⚠︎" : "", attributes: [
+                .foregroundColor: NSColor.systemRed,
             ])
-            button.toolTip = critical ? "Xe Launcher — host resources below reserve"
-                : count > 0 ? "Xe Launcher — \(count) warning(s)" : "Xe Launcher"
-            button.setAccessibilityLabel(critical ? "Xe Launcher, host resource warning"
-                : count > 0 ? "Xe Launcher, \(count) warnings" : "Xe Launcher status menu")
+            button.toolTip = hasIssues ? "Xe Launcher — Issues Detected" : "Xe Launcher"
+            button.setAccessibilityLabel(hasIssues ? "Xe Launcher, issues detected" : "Xe Launcher status menu")
         }
+    }
+
+    @objc private func openIssueLogsAction() {
+        guard !isPreparingForTermination else { return }
+        if let pending = launcherIssues.pendingError(ExternalState.shared.logStore.latestError) {
+            launcherIssues.dismiss(pending)
+        }
+        logPanelController.present(showingIssues: true)
+        renderLauncherIssues()
+    }
+
+    private func updateRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
+        guard !isPreparingForTermination else { return }
+        runtimeWarnings.update(snapshot)
         presentNextRuntimeWarning()
     }
 
+    private var canPresentRuntimeWarning: Bool {
+        !isPreparingForTermination && !isMenuTracking && containerVMSettingsTask == nil && NSApp.modalWindow == nil
+    }
+
     private func presentNextRuntimeWarning() {
-        guard !isMenuTracking else { return }
-        guard let warning = runtimeWarnings.nextAutomaticWarning else { return }
-        showRuntimeWarning(warning, automatically: true)
-    }
-
-    @objc private func showRuntimeWarningAction(_ sender: NSMenuItem) {
-        guard let warning = sender.representedObject as? ContainerRuntimeWarnings.Warning else { return }
-        showRuntimeWarning(warning)
-    }
-
-    private func showRuntimeWarning(_ requestedWarning: ContainerRuntimeWarnings.Warning, automatically: Bool = false) {
-        guard !isPreparingForTermination, !isShowingRuntimeWarning,
-              containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
+        guard canPresentRuntimeWarning, !isShowingRuntimeWarning,
+              runtimeWarnings.nextAutomaticWarning != nil else { return }
         isShowingRuntimeWarning = true
         Task { @MainActor in
             defer {
@@ -1949,25 +1924,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 presentNextRuntimeWarning()
             }
             let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
-            guard !isPreparingForTermination, !isMenuTracking,
-                  containerVMSettingsTask == nil, NSApp.modalWindow == nil else { return }
-            // The event may have recovered, been ignored, or been superseded
-            // while host sampling was suspended. Present the current details.
-            let warning: ContainerRuntimeWarnings.Warning
-            if automatically {
-                guard let pending = runtimeWarnings.nextAutomaticWarning else { return }
-                warning = pending
-            } else {
-                warning = runtimeWarnings.warnings.first {
-                    $0.kind == requestedWarning.kind && $0.id == requestedWarning.id
-                } ?? requestedWarning
-            }
+            // A warning can recover or be superseded while host sampling is suspended.
+            guard canPresentRuntimeWarning, let warning = runtimeWarnings.nextAutomaticWarning else { return }
             let vm = ContainerRuntimePresentation.shared.snapshot.vmResources
             let limits = ContainerVMResources(settings: ExternalState.shared.settings.rawData)
+            let resource = warning.resource
             var title: String?
             var blocked: String?
-            if let resource = warning.resource,
-               resource == .memory || vm?.diskCapacityGiB != nil {
+            if resource == .memory || vm?.diskCapacityGiB != nil {
                 let next = resource == .memory ? HostResourcePolicy.nextMemoryMiB(after: limits.memoryMiB)
                     : HostResourcePolicy.nextDiskGiB(after: limits.diskGiB(preserving: vm?.diskCapacityGiB))
                 if let next {
@@ -1986,20 +1950,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     blocked = "The next increase exceeds the supported VM resource limit."
                 }
             }
-            NSApp.activate(ignoringOtherApps: true)
             let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: title, blockedReason: blocked,
                 hostWarnings: HostResourcePolicy.warnings(for: host))
             runtimeWarnings.didPresent(warning)
+            NSApp.activate(ignoringOtherApps: true)
             switch alert.runModal() {
             case .alertFirstButtonReturn:
-                if let resource = warning.resource { changeContainerVMResource(resource, acknowledging: warning) }
-                if warning.kind == .systemLog { logPanelController.present(showingAll: true) }
+                changeContainerVMResource(resource, acknowledging: warning)
             case .alertSecondButtonReturn:
                 runtimeWarnings.ignore(warning)
-                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
             case .alertThirdButtonReturn:
                 runtimeWarnings.dismiss(warning)
-                renderRuntimeWarnings(ContainerRuntimePresentation.shared.snapshot)
             default:
                 break
             }

@@ -40,9 +40,9 @@ final class SystemLogStore: @unchecked Sendable {
     private var pending: [Data] = []
     private var flushScheduled = false
     private var reportedWriteFailure = false
-    private var issue: Entry?
-    private var lastIssueInRun: Entry?
-    private var persistedIssueID: UInt64?
+    private var errorEntry: Entry?
+    private var lastErrorInRun: Entry?
+    private var persistedErrorID: UInt64?
     // File state is confined to writer.
     private var handle: FileHandle?
     private var fileBytes = 0
@@ -54,24 +54,24 @@ final class SystemLogStore: @unchecked Sendable {
         entries = Array(repeating: nil, count: configuration.memoryEntries)
         let savedIssue = (try? Data(contentsOf: directoryURL.appendingPathComponent("last-warning.json")))
             .flatMap { try? JSONDecoder().decode(Entry.self, from: $0) }
-        issue = savedIssue.flatMap { $0.id < UInt64(Int64.max) && $0.severity != .info ? $0 : nil }
-        persistedIssueID = issue?.id
+        errorEntry = savedIssue.flatMap { $0.id < UInt64(Int64.max) && $0.severity == .error ? $0 : nil }
+        persistedErrorID = errorEntry?.id
         // Read only the journal tail at startup; older history is loaded on demand.
         let latest = (0..<configuration.fileCount).lazy.compactMap { index in
             Self.readEntries(url: directoryURL.appendingPathComponent(index == 0 ? "system.jsonl" : "system.jsonl.\(index)"), limit: 1).first?.id
         }.first ?? 0
-        nextID = max(latest, issue?.id ?? 0) + 1
+        nextID = max(latest, savedIssue.flatMap { $0.id < UInt64(Int64.max) ? $0.id : nil } ?? 0) + 1
         // Import a previous crash from older log files without delaying startup.
-        // Afterwards the small warning file preserves it even after log rotation.
-        if issue == nil {
-            writer.async { [weak self] in self?.restoreLatestIssue() }
+        // Afterwards the small summary file preserves it even after log rotation.
+        if errorEntry == nil {
+            writer.async { [weak self] in self?.restoreLatestError() }
         }
     }
 
-    var latestIssue: Entry? {
+    var latestError: Entry? {
         lock.lock()
         defer { lock.unlock() }
-        return issue
+        return errorEntry
     }
 
     func append(_ source: String, _ line: String, timestamp: Date = Date()) {
@@ -81,7 +81,7 @@ final class SystemLogStore: @unchecked Sendable {
         let entry = Entry(id: nextID, source: String(source.prefix(64)), line: boundedLine, timestamp: timestamp)
         nextID += 1
         insert(entry)
-        recordIssue(entry)
+        recordError(entry)
         if var data = try? JSONEncoder().encode(entry) {
             data.append(0x0a)
             pending.append(data)
@@ -94,21 +94,38 @@ final class SystemLogStore: @unchecked Sendable {
         }
     }
 
-    func snapshot(sources: Set<String>? = nil) -> Snapshot {
+    func snapshot(sources: Set<String>? = nil, minimumSeverity: SystemLogSeverity = .info, after: UInt64 = 0) -> Snapshot {
         lock.lock()
-        defer { lock.unlock() }
-        let recent = (0..<count).compactMap { entries[(start + $0) % entries.count] }
-        return Snapshot(revision: revision, entries: sources.map { selected in recent.filter { selected.contains($0.source) } } ?? recent)
+        let revision = revision
+        let recent = (0..<count).compactMap { index -> Entry? in
+            guard let entry = entries[(start + index) % entries.count], entry.id > after else { return nil }
+            return entry
+        }
+        lock.unlock()
+        if sources == nil, minimumSeverity == .info { return Snapshot(revision: revision, entries: recent) }
+        return Snapshot(revision: revision, entries: recent.filter {
+            (sources?.contains($0.source) ?? true) && (minimumSeverity == .info || $0.severity.rawValue >= minimumSeverity.rawValue)
+        })
     }
 
-    func history(before: UInt64? = nil, limit: Int = 10_000, sources: Set<String>? = nil) async -> History {
+    func history(before: UInt64? = nil, limit: Int = 10_000, sources: Set<String>? = nil,
+                 minimumSeverity: SystemLogSeverity = .info) async -> History {
         await withCheckedContinuation { continuation in
             writer.async {
+                let retainedError = self.latestError
                 self.flushPending()
                 var result: [Entry] = []
                 for index in 0..<self.configuration.fileCount {
-                    result += Self.readEntries(url: self.fileURL(index), before: before, limit: limit + 1 - result.count, sources: sources)
+                    result += Self.readEntries(url: self.fileURL(index), before: before,
+                        limit: limit + 1 - result.count, sources: sources, minimumSeverity: minimumSeverity)
                     if result.count > limit { break }
+                }
+                // The error behind the tray notice can outlive the journal's rotation.
+                if minimumSeverity != .info, let error = retainedError,
+                   before.map({ error.id < $0 }) ?? true, sources?.contains(error.source) ?? true,
+                   !result.contains(where: { $0.id == error.id }) {
+                    let index = result.firstIndex { $0.id < error.id } ?? result.endIndex
+                    result.insert(error, at: index)
                 }
                 continuation.resume(returning: History(entries: Array(result.prefix(limit).reversed()), hasEarlier: result.count > limit))
             }
@@ -131,36 +148,36 @@ final class SystemLogStore: @unchecked Sendable {
         revision += 1
     }
 
-    /// Called with the lock held. Identical repeated errors share one warning
-    /// during this run; a new error or a recurrence after relaunch warns again.
-    private func recordIssue(_ entry: Entry) {
-        guard entry.severity != .info else { return }
-        if lastIssueInRun?.source == entry.source, lastIssueInRun?.line == entry.line { return }
-        lastIssueInRun = entry
-        issue = entry
+    /// Called with the lock held. Identical repeated errors share one notice
+    /// during this run; a new error or a recurrence after relaunch can notify again.
+    private func recordError(_ entry: Entry) {
+        guard entry.severity == .error else { return }
+        if lastErrorInRun?.source == entry.source, lastErrorInRun?.line == entry.line { return }
+        lastErrorInRun = entry
+        errorEntry = entry
     }
 
-    private func restoreLatestIssue() {
+    private func restoreLatestError() {
         let previous = (0..<configuration.fileCount).lazy.compactMap {
-            Self.readEntries(url: self.fileURL($0), limit: 1, minimumSeverity: .warning).first
+            Self.readEntries(url: self.fileURL($0), limit: 1, minimumSeverity: .error).first
         }.first
         lock.lock()
-        if let previous, previous.id > (issue?.id ?? 0) {
-            issue = previous
+        if let previous, previous.id > (errorEntry?.id ?? 0) {
+            errorEntry = previous
             revision += 1
         }
         lock.unlock()
-        try? persistIssue()
+        try? persistError()
     }
 
-    private func persistIssue() throws {
-        guard let issue = latestIssue, issue.id != persistedIssueID else { return }
+    private func persistError() throws {
+        guard let error = latestError, error.id != persistedErrorID else { return }
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])
         let url = directoryURL.appendingPathComponent("last-warning.json")
-        try JSONEncoder().encode(issue).write(to: url, options: .atomic)
+        try JSONEncoder().encode(error).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        persistedIssueID = issue.id
+        persistedErrorID = error.id
     }
 
     private func fileURL(_ index: Int) -> URL {
@@ -187,7 +204,7 @@ final class SystemLogStore: @unchecked Sendable {
                 chunk.append(data)
             }
             try write(chunk)
-            try persistIssue()
+            try persistError()
         } catch {
             try? handle?.close()
             handle = nil
@@ -195,7 +212,7 @@ final class SystemLogStore: @unchecked Sendable {
             if !reportedWriteFailure {
                 let entry = Entry(id: nextID, source: "launcher", line: "Could not save System Logs: \(error.localizedDescription)", timestamp: Date())
                 insert(entry)
-                recordIssue(entry)
+                recordError(entry)
                 nextID += 1
                 reportedWriteFailure = true
             }
@@ -250,7 +267,7 @@ final class SystemLogStore: @unchecked Sendable {
 
     /// Scan backwards in small blocks and stop once the requested page is filled.
     private static func readEntries(url: URL, before: UInt64? = nil, limit: Int, sources: Set<String>? = nil,
-                                    minimumSeverity: SystemLogSeverity? = nil) -> [Entry] {
+                                    minimumSeverity: SystemLogSeverity = .info) -> [Entry] {
         guard limit > 0, let file = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? file.close() }
         do {
@@ -270,7 +287,7 @@ final class SystemLogStore: @unchecked Sendable {
                     guard let entry = try? decoder.decode(Entry.self, from: Data(line)), entry.id < UInt64(Int64.max),
                           before == nil || entry.id < before!,
                           sources == nil || sources!.contains(entry.source),
-                          minimumSeverity == nil || entry.severity.rawValue >= minimumSeverity!.rawValue else { continue }
+                          minimumSeverity == .info || entry.severity.rawValue >= minimumSeverity.rawValue else { continue }
                     result.append(entry)
                     if result.count == limit { return result }
                 }

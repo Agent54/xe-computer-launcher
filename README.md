@@ -62,6 +62,12 @@ durable storage. Containers and volumes are preserved. Docker's size-budget
 build-cache GC is disabled because its overlay2 scan can exhaust VM memory;
 launcher maintenance uses age-based pruning instead.
 
+Errors add one **Issues Detected** entry to the tray. Selecting it clears the
+notice and opens **System Logs** filtered to warnings and errors from all sources.
+The launcher also opens dedicated dialogs automatically when VM memory or disk
+space runs low or the VM runs out of memory. These dialogs offer resource
+increases when the host has enough capacity.
+
 ## Local networking
 
 Compose UI and apps share HTTP/HTTPS listeners: either 80/443 or 5196/5194.
