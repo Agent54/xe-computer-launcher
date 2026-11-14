@@ -26,11 +26,9 @@ enum ComponentVersions {
             at: resourceURL?.appendingPathComponent("ComposeUI.lock")
         )
 
-        let workerdLock = jsonObject(
+        let workerdValues = lockValues(
             at: resourceURL?.appendingPathComponent("Workerd.lock")
         )
-        let workerdSpecifiers = workerdLock?["specifiers"] as? [String: String]
-        let workerdVersion = workerdSpecifiers?.first { $0.key.hasPrefix("npm:workerd@") }?.value
 
         let heliumVersion = heliumAppURL.flatMap {
             plistValue(
@@ -73,7 +71,7 @@ enum ComponentVersions {
                 name: "Compose UI",
                 version: composeUIValues["COMPOSE_UI_RELEASE_TAG"] ?? "Unknown"
             ),
-            ComponentVersion(name: "workerd", version: workerdVersion ?? "Unknown"),
+            ComponentVersion(name: "workerd", version: workerdValues["WORKERD_VERSION"] ?? "Unknown"),
             ComponentVersion(name: "Sparkle", version: sparkleVersion ?? "Unknown")
         ]
     }

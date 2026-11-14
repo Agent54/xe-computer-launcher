@@ -74,8 +74,9 @@ workerd:
 	@file ../workerd/node_modules/workerd/bin/workerd | grep -q 'Mach-O 64-bit executable arm64'
 	@mkdir -p "$(BUILD_DIR)/workerd/resources"
 	@cp ../workerd/node_modules/workerd/bin/workerd "$(WORKERD_STAGE)"
+	@version=$$(/usr/bin/plutil -extract version raw -expect string ../workerd/node_modules/workerd/package.json) && \
+		printf 'WORKERD_VERSION=%s\n' "$$version" > "$(BUILD_DIR)/workerd/Workerd.lock"
 	@rsync -a --delete ../workerd/dist/host-worker/ "$(BUILD_DIR)/workerd/resources/"
-	@cp ../workerd/node_modules/workerd/README.md "$(BUILD_DIR)/workerd/resources/WORKERD-README.md"
 
 compose-ui:
 	@/bin/bash Scripts/prepare-compose-ui.sh "$(COMPOSE_UI_STAGE)"
@@ -113,7 +114,7 @@ package: test smol-runtime guest-worker
 	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
 	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"
 	@cp Sources/macos/PortHelperLaunchDaemon.plist "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
-	@cp ../workerd/deno.lock "$(RESOURCES)/Workerd.lock"
+	@cp "$(BUILD_DIR)/workerd/Workerd.lock" "$(RESOURCES)/Workerd.lock"
 	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
 	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
 	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"
