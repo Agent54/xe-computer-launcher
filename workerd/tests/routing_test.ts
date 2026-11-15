@@ -12,6 +12,52 @@ import { resolveApplicationService } from '../app-discovery.js';
 import { applicationReady, applicationStarting, startApplication } from '../app-startup.js';
 import { ServiceStartupCoordinator } from '../service-startup.js';
 
+Deno.test('T3 Code hostname routes and launcher failures are styled at each application layer', async () => {
+  const url = 'https://t3-code_harness-t3-code.app.localhost/';
+  let mode = 'ready';
+  const env = {
+    RUNTIME_STATUS: { fetch: (input: string) => Promise.resolve(Response.json(input.endsWith('app-ports.json')
+      ? { http: 80, https: 443 } : { phase: 'healthy', message: 'Ready' })) },
+    COMPOSE: { fetch: async (input: string) => {
+      if (mode === 'discovery-failed') throw new Error('Compose discovery unavailable');
+      const path = new URL(input).pathname;
+      return Response.json(path.endsWith('/ls') ? [{ Name: 'harness-t3-code' }]
+        : path.includes('/ps/') ? [{ ID: 't3-1', Service: 't3-code', State: 'running',
+          Publishers: [{ Protocol: 'tcp', TargetPort: 3000, PublishedPort: 8080 }] }]
+        : { services: { 't3-code': { ports: [{ target: 3000, published: 8080 }] } } });
+    } },
+    ROUTER: { fetch: async (request: Request) => {
+      assert.equal(request.headers.get('x-xe-container-id'), 't3-1');
+      assert.equal(request.headers.get('x-xe-public-host'), 't3-code_harness-t3-code.app.localhost');
+      if (mode === 'router-failed') throw new Error('Guest router connection unavailable');
+      return new Response('app response', { status: mode === 'app-failed' ? 500 : 200 });
+    } },
+  };
+  const request = (address = url) => appGateway.fetch(new Request(address, { headers: { Accept: 'text/html' } }), env);
+  assert.equal(await (await request()).text(), 'app response');
+  for (const address of ['http://unrecognized.test/', 'https://missing.app.localhost/']) {
+    const response = await request(address);
+    assert.match(response.headers.get('content-type')!, /text\/html/);
+    assert.match(await response.text(), /Xe Launcher/);
+  }
+  for (mode of ['router-failed', 'app-failed']) {
+    const response = await request();
+    if (mode === 'app-failed') {
+      assert.equal(response.status, 500);
+      assert.equal(await response.text(), 'app response');
+      assert.equal(response.headers.get('x-xe-error-source'), null);
+    } else {
+      assert.equal(response.status, 503);
+      assert.match(await response.text(), /Guest router connection unavailable/);
+    }
+  }
+  mode = 'discovery-failed';
+  // A fresh Compose binding avoids using the short-lived successful snapshot.
+  const failed = await appGateway.fetch(new Request(url), { ...env, COMPOSE: { ...env.COMPOSE } });
+  assert.equal(failed.status, 503);
+  assert.match(await failed.text(), /Compose discovery unavailable/);
+});
+
 function withStartup<T extends object>(env: T) {
   if ('STARTUP' in env) return env;
   const coordinator = new ServiceStartupCoordinator();
@@ -421,7 +467,9 @@ Deno.test('browser app requests show the runtime loader until Compose and the VM
     assert.match(await (await request()).text(), /Xe Launcher will retry automatically/);
     statusAvailable = true;
     runtime = { ...runtime, phase: 'healthy', message: 'Container runtime ready', reason: null };
-    assert.match(await (await request()).text(), /Container services are unavailable/);
+    const failed = await request();
+    assert.equal(failed.headers.get('x-xe-error-source'), 'Application gateway');
+    assert.match(await failed.text(), /Compose connection refused/);
   });
   await t.step('router failures during runtime startup also show HTML and recovery reaches the app', async () => {
     composeAvailable = true;

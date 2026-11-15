@@ -36,7 +36,7 @@ actor ContainerRuntimeMaintenance {
     static let buildCacheMinimumFreeDiskPercent = 5
     static let emergencyFreeDiskPercent = 2
     static let runningBuildsCommand = [
-        "docker", "buildx", "history", "ls", "--builder", "default",
+        "docker", "buildx", "history", "ls", "--builder", ContainerBuildTools.builderName,
         "--filter", "status=running", "--format", "{{.Ref}}",
     ]
     static let cleanupInterval: TimeInterval = 4 * 60 * 60
@@ -66,7 +66,7 @@ actor ContainerRuntimeMaintenance {
         // Any nonzero space budget makes Docker 28 size *all* cache records in
         // parallel before filtering. Age-only pruning sizes deletions sequentially.
         return [
-            "docker", "buildx", "prune", "--builder", "default", "--all", "--force",
+            "docker", "buildx", "prune", "--builder", ContainerBuildTools.builderName, "--all", "--force",
             "--filter", "until=\(minimumAgeHours)h",
         ]
     }

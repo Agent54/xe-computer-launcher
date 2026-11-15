@@ -1,4 +1,5 @@
 import { bridgeSocketAndWebSocket } from './socket-bridge.js';
+import { routingErrorResponse } from './startup-response.js';
 
 // Runs inside the guest. Validate the host's exact container/port selection and
 // resolve its live network address without exposing each port on macOS.
@@ -42,6 +43,9 @@ function publishedTarget(container, port, published) {
 
 export default {
   async fetch(request, env, ctx) {
+    const error = (message, status, code, headers) => routingErrorResponse(request, message, {
+      status, code, headers, source: 'Guest router',
+    });
     const url = new URL(request.url);
     if (url.pathname === '/__xe_router_health' && url.hostname === 'localhost') {
       return new Response('ready');
@@ -53,15 +57,15 @@ export default {
       const published = Number(request.headers.get('x-xe-published-port'));
       if (!/^[a-f0-9]{64}$/.test(id || '') || !Number.isInteger(port) || port < 1 || port > 65535 ||
           !Number.isInteger(published) || published < 1 || published > 65535) {
-        return new Response('Invalid TLS tunnel target', { status: 403 });
+        return error('Invalid TLS tunnel target', 403, 'invalid_tls_target');
       }
       try {
         const container = await findContainer(id, env);
         if (!container || container.State !== 'running' || !publishedTarget(container, port, published)) {
-          return new Response('TLS target unavailable', { status: 404 });
+          return error('TLS target unavailable', 404, 'tls_target_unavailable');
         }
         const address = Object.values(container.NetworkSettings?.Networks || {}).map(n => n.IPAddress).find(ip => ip);
-        if (!address) return new Response('TLS target unavailable', { status: 503 });
+        if (!address) return error('TLS target unavailable', 503, 'tls_target_unavailable');
         const { connect } = await import('cloudflare:sockets');
         const upstream = connect({ hostname: address, port });
         await upstream.opened;
@@ -70,25 +74,25 @@ export default {
         ctx.waitUntil(bridgeSocketAndWebSocket(upstream, server));
         return new Response(null, { status: 101, webSocket: client });
       } catch {
-        return new Response('TLS target unavailable', { status: 503 });
+        return error('TLS target unavailable', 503, 'tls_target_unavailable');
       }
     }
     if (url.protocol !== 'http:' || url.port !== '' ||
         !/^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/.test(url.hostname)) {
-      return new Response('Invalid application hostname', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      return error('Invalid application hostname', 403, 'invalid_app_host');
     }
     const id = request.headers.get('x-xe-container-id');
     const port = Number(request.headers.get('x-xe-target-port'));
     const published = Number(request.headers.get('x-xe-published-port'));
     if (!id || !Number.isInteger(port) || port < 1 || port > 65535 ||
         !Number.isInteger(published) || published < 1 || published > 65535) {
-      return new Response('Invalid application target', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      return error('Invalid application target', 403, 'invalid_app_target');
     }
     try {
       const container = await findContainer(id, env);
       if (!container || container.State !== 'running') throw new Error('Container is not running');
       if (!publishedTarget(container, port, published)) {
-        return new Response('Published port not available', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+        return error('Published port not available', 404, 'published_port_unavailable');
       }
       const networks = container.NetworkSettings?.Networks || {};
       const address = Object.values(networks).map(n => n.IPAddress).find(ip => ip);
@@ -112,15 +116,20 @@ export default {
       // host. Passing the response through also preserves WebSocket upgrades.
       const response = await fetch(new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' }));
       // This header belongs to the router, never to an upstream application.
-      if (!response.headers.has('x-xe-router-unavailable')) return response;
+      if (!['x-xe-router-unavailable', 'x-xe-error-source', 'x-xe-error-code']
+        .some(name => response.headers.has(name))) return response;
       const responseHeaders = new Headers(response.headers);
       responseHeaders.delete('x-xe-router-unavailable');
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders });
-    } catch {
+      responseHeaders.delete('x-xe-error-source');
+      responseHeaders.delete('x-xe-error-code');
+      return new Response(response.body, { status: response.status, statusText: response.statusText,
+        headers: responseHeaders, ...(response.webSocket ? { webSocket: response.webSocket } : {}) });
+    } catch (cause) {
+      console.warn('Guest application route failed:', url.hostname, id, port, cause);
       cached = null;
       expires = 0;
-      return new Response('Container runtime unavailable. Retry when the VM is ready.',
-        { status: 503, headers: { 'Retry-After': '2', 'Cache-Control': 'no-store', 'x-xe-router-unavailable': 'true' } });
+      return error('Could not connect to the app container. Check that the app is running and listening on its Compose target port.',
+        503, 'container_connection_failed', { 'Retry-After': '2', 'x-xe-router-unavailable': 'true' });
     }
   },
 };

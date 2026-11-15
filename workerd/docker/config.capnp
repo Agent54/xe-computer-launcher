@@ -7,6 +7,7 @@ const config :Workerd.Config = (
       compatibilityFlags = ["experimental"],
       modules = [
         (name = "router.js", esModule = embed "../router.js"),
+        (name = "startup-response.js", esModule = embed "../startup-response.js"),
         (name = "socket-bridge.js", esModule = embed "../socket-bridge.js"),
       ],
       globalOutbound = "containers",
@@ -15,5 +16,7 @@ const config :Workerd.Config = (
     (name = "docker", external = (address = "unix:/var/run/docker.sock", http = ())),
     (name = "containers", network = (allow = ["private", "127.0.0.1/32"])),
   ],
-  sockets = [(name = "router", address = "unix:/run/xe-router/workerd.sock", http = (), service = "router")],
+  sockets = [
+    (name = "router", address = "unix:/run/xe-router/workerd.sock", http = (), service = "router"),
+  ],
 );

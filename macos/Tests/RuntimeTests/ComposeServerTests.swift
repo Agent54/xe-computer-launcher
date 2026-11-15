@@ -43,7 +43,7 @@ struct ComposeServerTests {
         let helper = root.appendingPathComponent("helper")
         try Data("#!/bin/sh\nexit 42\n".utf8).write(to: helper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
-        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
         do {
             try await server.start(dockerSocketURL: root.appendingPathComponent("docker.sock"))
             Issue.record("An exited process must not be reported as ready")
@@ -59,7 +59,7 @@ struct ComposeServerTests {
         let helper = root.appendingPathComponent("helper")
         try Data("#!/bin/sh\nexec /bin/sleep 60\n".utf8).write(to: helper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
-        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
         let task = Task { try await server.start(dockerSocketURL: root.appendingPathComponent("docker.sock")) }
         let deadline = ContinuousClock.now + .seconds(5)
         while !server.isRunning && ContinuousClock.now < deadline {
@@ -85,7 +85,7 @@ struct ComposeServerTests {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let stacks = root.appendingPathComponent("stacks", isDirectory: true)
-        let server = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
         let dockerSocket = root.appendingPathComponent("docker.sock")
         let socket = try await server.start(dockerSocketURL: dockerSocket)
         do {
@@ -94,7 +94,7 @@ struct ComposeServerTests {
             #expect(await UnixSocketHTTP.isReady(at: socket))
             #expect(try await server.start(dockerSocketURL: dockerSocket) == socket)
             // A second launcher must not unlink the first launcher's live socket.
-            let second = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
+            let second = ComposeServer(executableURL: helper, stacksURL: stacks, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
             await #expect(throws: ComposeServerError.self) { try await second.start(dockerSocketURL: dockerSocket) }
             #expect(!second.isRunning)
             #expect(await UnixSocketHTTP.isReady(at: socket))
@@ -120,7 +120,7 @@ struct ComposeServerTests {
         let server = ComposeServer(
             executableURL: helper, stacksURL: root,
             socketURL: root.appendingPathComponent("compose.sock"),
-            probe: { _ in fixture.ready }, log: { fixture.logs.append($0) }
+            probe: { _ in fixture.ready }, prepareBuilder: { _ in [:] }, log: { fixture.logs.append($0) }
         )
         let dockerSocket = root.appendingPathComponent("missing-docker.sock")
         try await server.start(dockerSocketURL: dockerSocket)
@@ -154,7 +154,7 @@ struct ComposeServerTests {
         let helper = helperURL
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), log: { _ in })
+        let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
         let socket = try await server.start(dockerSocketURL: URL(fileURLWithPath: path))
         // /ls requires the Docker backend; /_ping alone does not.
         #expect(await UnixSocketHTTP.isReady(at: socket, path: "/ls?all=true", timeout: .seconds(10)))

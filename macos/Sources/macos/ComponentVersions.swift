@@ -25,6 +25,7 @@ enum ComponentVersions {
         let composeUIValues = lockValues(
             at: resourceURL?.appendingPathComponent("ComposeUI.lock")
         )
+        let containerTools = lockValues(at: resourceURL?.appendingPathComponent("ContainerTools/ContainerTools.lock"))
 
         let workerdValues = lockValues(
             at: resourceURL?.appendingPathComponent("Workerd.lock")
@@ -72,6 +73,9 @@ enum ComponentVersions {
                 version: composeUIValues["COMPOSE_UI_RELEASE_TAG"] ?? "Unknown"
             ),
             ComponentVersion(name: "workerd", version: workerdValues["WORKERD_VERSION"] ?? "Unknown"),
+            ComponentVersion(name: "Docker Engine", version: containerTools["DOCKER_VERSION"] ?? "Unknown"),
+            ComponentVersion(name: "Buildx", version: containerTools["BUILDX_VERSION"] ?? "Unknown"),
+            ComponentVersion(name: "BuildKit", version: containerTools["BUILDKIT_VERSION"] ?? "Unknown"),
             ComponentVersion(name: "Sparkle", version: sparkleVersion ?? "Unknown")
         ]
     }

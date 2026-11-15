@@ -41,6 +41,7 @@ final class ComposeServer {
     let socketURL: URL
     private let log: @MainActor @Sendable (String) -> Void
     private let probe: @MainActor @Sendable (URL) async -> Bool
+    private let prepareBuilder: @MainActor @Sendable (URL) async throws -> [String: String]
     private var process: Process?
     private var stopping = false
     private var failedHealthChecks = 0
@@ -54,6 +55,12 @@ final class ComposeServer {
         probe: @escaping @MainActor @Sendable (URL) async -> Bool = {
             await UnixSocketHTTP.isReady(at: $0, timeout: .milliseconds(750))
         },
+        prepareBuilder: @escaping @MainActor @Sendable (URL) async throws -> [String: String] = { socket in
+            try await ContainerBuildTools.prepareHost(
+                pluginURL: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cli-plugins/docker-buildx"),
+                dockerSocketURL: socket
+            )
+        },
         log: @escaping @MainActor @Sendable (String) -> Void = {
             ExternalState.shared.appendLog("compose", $0)
         }
@@ -62,6 +69,7 @@ final class ComposeServer {
         self.stacksURL = stacksURL.resolvingSymlinksInPath()
         self.socketURL = socketURL
         self.probe = probe
+        self.prepareBuilder = prepareBuilder
         self.log = log
     }
 
@@ -107,6 +115,7 @@ final class ComposeServer {
         }
         try Task.checkCancellation()
 
+        let builderEnvironment = try await prepareBuilder(dockerSocketURL)
         let child = Process()
         child.executableURL = executableURL
         child.arguments = [
@@ -121,6 +130,7 @@ final class ComposeServer {
             environment.removeValue(forKey: key)
         }
         environment["DOCKER_HOST"] = "unix://\(dockerSocketURL.path)"
+        environment.merge(builderEnvironment) { _, managed in managed }
         environment["HOME"] = NSHomeDirectory()
         environment["STACKS_PATH"] = stacksURL.path
         environment["HOST_UID"] = String(getuid())

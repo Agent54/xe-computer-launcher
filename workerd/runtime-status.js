@@ -33,6 +33,7 @@ export async function runtimeUnavailable(env, { request, status = 503, runtime: 
   };
   return startupResponse(request, {
     name: 'Container runtime', message: runtime.message,
+    detail: 'Xe Launcher · Container runtime',
     failed: ['failed', 'stopped'].includes(runtime.phase), payload, status,
   });
 }

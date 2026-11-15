@@ -66,6 +66,11 @@ enum DockerDaemonConfiguration {
         var updated = current
         // Keep the daemon and the startup cleanup on the same fixed path.
         updated["pidfile"] = guestPIDFile
+        // Docker 29 defaults new installations to the containerd image store.
+        // Keep this VM's existing overlay2 images and volumes visible on upgrade.
+        var features = updated["features"] as? [String: Any] ?? [:]
+        features["containerd-snapshotter"] = false
+        updated["features"] = features
         // Docker 28's configuration parser applies this boolean to AutoRestart.
         // Keep service restart policies for crashes after an explicit start,
         // but let the Xe Computer scheduler decide what to start after VM boot.

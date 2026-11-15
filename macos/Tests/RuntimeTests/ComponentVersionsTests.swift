@@ -9,7 +9,7 @@ struct ComponentVersionsTests {
             heliumAppURL: nil
         )
 
-        #expect(versions.count == 8)
+        #expect(versions.count == 11)
         #expect(versions.first == ComponentVersion(name: "Xe Computer", version: "Unknown"))
         #expect(versions[1] == ComponentVersion(
             name: "Xe Computer active bundle",

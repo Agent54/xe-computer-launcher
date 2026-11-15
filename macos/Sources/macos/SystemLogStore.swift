@@ -8,7 +8,30 @@ final class SystemLogStore: @unchecked Sendable {
         let line: String
         let timestamp: Date
 
-        var severity: SystemLogSeverity { .classify(source: source, line: line) }
+        private let recordedSeverity: SystemLogSeverity?
+        var severity: SystemLogSeverity { recordedSeverity ?? .classify(source: source, line: line) }
+
+        init(id: UInt64, source: String, line: String, timestamp: Date) {
+            self.init(id: id, source: source, line: line, timestamp: timestamp,
+                      severity: .classify(source: source, line: line))
+        }
+
+        fileprivate init(id: UInt64, source: String, line: String, timestamp: Date, severity: SystemLogSeverity) {
+            self.id = id
+            self.source = source
+            self.line = line
+            self.timestamp = timestamp
+            recordedSeverity = severity
+        }
+
+        func cachingSeverity() -> Self {
+            guard recordedSeverity == nil else { return self }
+            return Self(id: id, source: source, line: line, timestamp: timestamp, severity: severity)
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.id == rhs.id && lhs.source == rhs.source && lhs.line == rhs.line && lhs.timestamp == rhs.timestamp
+        }
     }
 
     struct Snapshot: Sendable {
@@ -37,7 +60,8 @@ final class SystemLogStore: @unchecked Sendable {
     private var count = 0
     private var nextID: UInt64
     private var revision: UInt64 = 0
-    private var pending: [Data] = []
+    private var pending: [Entry] = []
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var flushScheduled = false
     private var reportedWriteFailure = false
     private var errorEntry: Entry?
@@ -61,11 +85,11 @@ final class SystemLogStore: @unchecked Sendable {
             Self.readEntries(url: directoryURL.appendingPathComponent(index == 0 ? "system.jsonl" : "system.jsonl.\(index)"), limit: 1).first?.id
         }.first ?? 0
         nextID = max(latest, savedIssue.flatMap { $0.id < UInt64(Int64.max) ? $0.id : nil } ?? 0) + 1
+        // Keep the recent journal tail ready for the first open, including after a relaunch.
+        writer.async { [weak self] in self?.warmRecentEntries() }
         // Import a previous crash from older log files without delaying startup.
         // Afterwards the small summary file preserves it even after log rotation.
-        if errorEntry == nil {
-            writer.async { [weak self] in self?.restoreLatestError() }
-        }
+        if errorEntry == nil { writer.async { [weak self] in self?.restoreLatestError() } }
     }
 
     var latestError: Entry? {
@@ -77,21 +101,75 @@ final class SystemLogStore: @unchecked Sendable {
     func append(_ source: String, _ line: String, timestamp: Date = Date()) {
         let boundedLine = line.utf8.count > 32_768
             ? String(decoding: line.utf8.prefix(32_768), as: UTF8.self) + "… [truncated]" : line
+        let source = String(source.prefix(64))
+        let severity = SystemLogSeverity.classify(source: source, line: boundedLine)
         lock.lock()
-        let entry = Entry(id: nextID, source: String(source.prefix(64)), line: boundedLine, timestamp: timestamp)
+        let entry = Entry(id: nextID, source: source, line: boundedLine, timestamp: timestamp, severity: severity)
         nextID += 1
         insert(entry)
         recordError(entry)
-        if var data = try? JSONEncoder().encode(entry) {
-            data.append(0x0a)
-            pending.append(data)
-        }
+        pending.append(entry)
         let schedule = !flushScheduled
         flushScheduled = true
+        let listeners = observers.values
         lock.unlock()
+        for listener in listeners { listener.yield(()) }
         if schedule {
             writer.asyncAfter(deadline: .now() + configuration.flushDelay) { [weak self] in self?.flushPending() }
         }
+    }
+
+    func updates() -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        lock.withLock { observers[id] = continuation }
+        continuation.onTermination = { [weak self] _ in self?.removeObserver(id) }
+        return stream
+    }
+
+    private func removeObserver(_ id: UUID) {
+        _ = lock.withLock { observers.removeValue(forKey: id) }
+    }
+
+    /// A bounded tail from memory. The cursor advances over hidden entries too.
+    func recentPage(after: UInt64 = 0, limit: Int, sources: Set<String>?,
+                    minimumSeverity: SystemLogSeverity) -> (page: History, cursor: UInt64) {
+        lock.withLock {
+            var result: [Entry] = []
+            var remainingBytes = 64 * 1024
+            let cursor = max(after, nextID - 1)
+            for offset in (0..<count).reversed() {
+                guard let entry = entries[(start + offset) % entries.count], entry.id > after else { break }
+                guard sources?.contains(entry.source) ?? true, entry.severity.rawValue >= minimumSeverity.rawValue else { continue }
+                remainingBytes -= entry.line.utf8.count + 100
+                if result.count >= limit || (remainingBytes < 0 && !result.isEmpty) {
+                    return (History(entries: result.reversed(), hasEarlier: true), cursor)
+                }
+                result.append(entry)
+            }
+            return (History(entries: result.reversed(), hasEarlier: false), cursor)
+        }
+    }
+
+    private func warmRecentEntries() {
+        let limit = min(1_000, configuration.memoryEntries)
+        var journal: [Entry] = []
+        for index in 0..<configuration.fileCount {
+            journal += Self.readEntries(url: fileURL(index), limit: limit - journal.count)
+            if journal.count == limit { break }
+        }
+        let older = journal.reversed()
+        guard !older.isEmpty else { return }
+        let listeners = lock.withLock {
+            let live = (0..<count).compactMap { entries[(start + $0) % entries.count] }
+            let combined = (older + live).suffix(entries.count)
+            for (index, entry) in combined.enumerated() { entries[index] = entry }
+            start = 0
+            count = combined.count
+            revision += 1
+            return observers.values
+        }
+        for listener in listeners { listener.yield(()) }
     }
 
     func snapshot(sources: Set<String>? = nil, minimumSeverity: SystemLogSeverity = .info, after: UInt64 = 0) -> Snapshot {
@@ -110,26 +188,38 @@ final class SystemLogStore: @unchecked Sendable {
 
     func history(before: UInt64? = nil, limit: Int = 10_000, sources: Set<String>? = nil,
                  minimumSeverity: SystemLogSeverity = .info) async -> History {
-        await withCheckedContinuation { continuation in
+        let (files, retainedError) = await withCheckedContinuation { continuation in
             writer.async {
-                let retainedError = self.latestError
                 self.flushPending()
-                var result: [Entry] = []
-                for index in 0..<self.configuration.fileCount {
-                    result += Self.readEntries(url: self.fileURL(index), before: before,
-                        limit: limit + 1 - result.count, sources: sources, minimumSeverity: minimumSeverity)
-                    if result.count > limit { break }
+                // Opening handles on the writer queue keeps each page consistent across
+                // rotation. Reading the captured byte ranges doesn't hold up the writer.
+                let files = (0..<self.configuration.fileCount).compactMap { index -> JournalFile? in
+                    guard let handle = try? FileHandle(forReadingFrom: self.fileURL(index)),
+                          let length = try? handle.seekToEnd() else { return nil }
+                    return JournalFile(handle: handle, length: length)
                 }
-                // The error behind the tray notice can outlive the journal's rotation.
-                if minimumSeverity != .info, let error = retainedError,
-                   before.map({ error.id < $0 }) ?? true, sources?.contains(error.source) ?? true,
-                   !result.contains(where: { $0.id == error.id }) {
-                    let index = result.firstIndex { $0.id < error.id } ?? result.endIndex
-                    result.insert(error, at: index)
-                }
-                continuation.resume(returning: History(entries: Array(result.prefix(limit).reversed()), hasEarlier: result.count > limit))
+                continuation.resume(returning: (files, self.latestError))
             }
         }
+        let read = Task.detached(priority: .userInitiated) {
+            defer { for file in files { try? file.handle.close() } }
+            var result: [Entry] = []
+            for file in files {
+                if Task.isCancelled { return History(entries: [], hasEarlier: false) }
+                result += Self.readEntries(file: file, before: before,
+                    limit: limit + 1 - result.count, sources: sources, minimumSeverity: minimumSeverity)
+                if result.count > limit { break }
+            }
+            // The error behind the tray notice can outlive the journal's rotation.
+            if minimumSeverity != .info, let error = retainedError,
+               before.map({ error.id < $0 }) ?? true, sources?.contains(error.source) ?? true,
+               !result.contains(where: { $0.id == error.id }) {
+                let index = result.firstIndex { $0.id < error.id } ?? result.endIndex
+                result.insert(error, at: index)
+            }
+            return History(entries: Array(result.prefix(limit).reversed()), hasEarlier: result.count > limit)
+        }
+        return await withTaskCancellationHandler { await read.value } onCancel: { read.cancel() }
     }
 
     func flush() async {
@@ -194,7 +284,10 @@ final class SystemLogStore: @unchecked Sendable {
         do {
             try openIfNeeded()
             var chunk = Data()
-            for data in batch {
+            let encoder = JSONEncoder()
+            for entry in batch {
+                var data = try encoder.encode(entry)
+                data.append(0x0a)
                 if fileBytes + chunk.count > 0 && fileBytes + chunk.count + data.count > configuration.fileBytes {
                     try write(chunk)
                     chunk.removeAll(keepingCapacity: true)
@@ -209,14 +302,17 @@ final class SystemLogStore: @unchecked Sendable {
             try? handle?.close()
             handle = nil
             lock.lock()
-            if !reportedWriteFailure {
+            let notify = !reportedWriteFailure
+            if notify {
                 let entry = Entry(id: nextID, source: "launcher", line: "Could not save System Logs: \(error.localizedDescription)", timestamp: Date())
                 insert(entry)
                 recordError(entry)
                 nextID += 1
                 reportedWriteFailure = true
             }
+            let listeners = observers.values
             lock.unlock()
+            if notify { for listener in listeners { listener.yield(()) } }
         }
     }
 
@@ -270,25 +366,40 @@ final class SystemLogStore: @unchecked Sendable {
                                     minimumSeverity: SystemLogSeverity = .info) -> [Entry] {
         guard limit > 0, let file = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? file.close() }
+        guard let length = try? file.seekToEnd() else { return [] }
+        return readEntries(file: JournalFile(handle: file, length: length), before: before, limit: limit,
+                           sources: sources, minimumSeverity: minimumSeverity)
+    }
+
+    private struct JournalFile: Sendable {
+        let handle: FileHandle
+        let length: UInt64
+    }
+
+    private static func readEntries(file: JournalFile, before: UInt64?, limit: Int, sources: Set<String>?,
+                                    minimumSeverity: SystemLogSeverity) -> [Entry] {
+        guard limit > 0 else { return [] }
         do {
-            var position = try file.seekToEnd()
+            var position = file.length
             var remainder = Data()
             var result: [Entry] = []
             let decoder = JSONDecoder()
             while position > 0 {
+                if Task.isCancelled { break }
                 let size = min(position, 65_536)
                 position -= size
-                try file.seek(toOffset: position)
-                var data = try file.read(upToCount: Int(size)) ?? Data()
+                try file.handle.seek(toOffset: position)
+                var data = try file.handle.read(upToCount: Int(size)) ?? Data()
                 data.append(remainder)
                 let lines = data.split(separator: 0x0a, omittingEmptySubsequences: false)
                 remainder = position == 0 ? Data() : Data(lines[0])
                 for line in lines.dropFirst(position == 0 ? 0 : 1).reversed() {
                     guard let entry = try? decoder.decode(Entry.self, from: Data(line)), entry.id < UInt64(Int64.max),
                           before == nil || entry.id < before!,
-                          sources == nil || sources!.contains(entry.source),
-                          minimumSeverity == .info || entry.severity.rawValue >= minimumSeverity.rawValue else { continue }
-                    result.append(entry)
+                          sources == nil || sources!.contains(entry.source) else { continue }
+                    let cached = entry.cachingSeverity()
+                    guard cached.severity.rawValue >= minimumSeverity.rawValue else { continue }
+                    result.append(cached)
                     if result.count == limit { return result }
                 }
                 // A malformed, unterminated record must not grow memory without bound.

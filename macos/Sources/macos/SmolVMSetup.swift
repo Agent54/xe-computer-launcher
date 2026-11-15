@@ -48,6 +48,7 @@ enum SmolVMSetup {
             in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true),
             diskGiB: diskGiB
         )
+        let buildTools = try ContainerBuildTools.prepareGuest()
 
         if existing == nil {
             removeStaleSocketIfPresent()
@@ -60,7 +61,7 @@ enum SmolVMSetup {
                 networkBackend: "virtio-net",
                 volumes: [
                     "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro",
-                    stacksVolume, dockerConfigurationVolume,
+                    stacksVolume, dockerConfigurationVolume, buildTools.volume,
                 ],
                 exposedSockets: [
                     "/var/run/docker.sock:\(dockerSocketURL.path)",
@@ -72,15 +73,15 @@ enum SmolVMSetup {
                     "dev.xe.computer.smolvm-release": "v1.16.2-compose_3",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ],
-                environment: DockerDaemonConfiguration.environment
+                environment: buildTools.environment
             )
             try await client.createMachine(spec)
         } else {
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
-                volumes: [stacksVolume, dockerConfigurationVolume],
-                environment: DockerDaemonConfiguration.environment
+                volumes: [stacksVolume, dockerConfigurationVolume, buildTools.volume],
+                environment: buildTools.environment
             )
         }
 
@@ -95,6 +96,11 @@ enum SmolVMSetup {
         let dockerWaitStartedAt = ContinuousClock.now
         try await waitForDocker()
         ExternalState.shared.appendLog("runtime", "Docker API ready after \(dockerWaitStartedAt.duration(to: .now)) (total startup \(startedAt.duration(to: .now)))")
+        let builder = try await client.execute(
+            in: machineName, command: ["/bin/sh", "\(buildTools.path)/start-builder.sh"], timeout: "180s"
+        )
+        ExternalState.shared.appendLog("runtime", builder.standardOutput)
+        try await ContainerBuildTools.registerHostBuilder(dockerSocketURL: dockerSocketURL)
 
         return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
     }

@@ -8,6 +8,43 @@ struct SystemLogStoreTests {
             .deletingLastPathComponent().appendingPathComponent(".build/system-log-tests/\(UUID().uuidString)")
     }
 
+    @Test func liveTailNotifiesBeforeDiskFlushAndSkipsFilteredEntries() async {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SystemLogStore(directoryURL: directory, configuration: .init(flushDelay: 60))
+        var changes = store.updates().makeAsyncIterator()
+        store.append("runtime", "Warning: low memory")
+        for index in 1...200 { store.append("runtime", "progress \(index)") }
+        await changes.next()
+        let first = store.recentPage(limit: 10, sources: ["runtime"], minimumSeverity: .warning)
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("system.jsonl").path))
+        #expect(first.page.entries.map(\.line) == ["Warning: low memory"])
+        #expect(first.cursor == 201)
+        store.append("runtime", "Error: out of memory")
+        await changes.next()
+        let next = store.recentPage(after: first.cursor, limit: 10, sources: ["runtime"], minimumSeverity: .warning)
+        #expect(next.page.entries.map(\.line) == ["Error: out of memory"])
+        #expect(next.cursor == 202)
+        await store.flush()
+    }
+
+    @Test func reopenedStoreWarmsItsBoundedTailWithoutDroppingNewLogs() async {
+        let directory = directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SystemLogStore(directoryURL: directory)
+        for index in 1...200 { store.append("runtime", "persisted \(index)") }
+        await store.flush()
+        let reopened = SystemLogStore(directoryURL: directory)
+        reopened.append("launcher", "new launch")
+        await reopened.flush()
+        let recent = reopened.recentPage(limit: 3, sources: nil, minimumSeverity: .info)
+        #expect(recent.page.entries.map(\.line) == ["persisted 199", "persisted 200", "new launch"])
+        #expect(recent.page.hasEarlier)
+        #expect(recent.cursor == 201)
+        let older = await reopened.history(before: recent.page.entries.first?.id, limit: 2)
+        #expect(older.entries.map(\.line) == ["persisted 197", "persisted 198"])
+    }
+
     @Test func revisionChangesWhenTheRecentBufferIsFull() async {
         let directory = directory()
         defer { try? FileManager.default.removeItem(at: directory) }

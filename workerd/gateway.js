@@ -1,12 +1,17 @@
 // Only the management socket can reach this worker. Backends have no listener of their own.
 import { readAppPorts } from './app-ports.js';
 import { isDarcAPIRequest, addDarcCors, darcPreflight } from './darc-api.js';
+import { routingErrorResponse } from './startup-response.js';
 
 const managementOrigin = 'http://127.0.0.1:8094';
 
-function denied(status = 403) {
-  return new Response('Forbidden', {
-    status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+function failure(request, message, status = 503) {
+  return routingErrorResponse(request, message, { status, source: 'Management gateway', code: 'management_unavailable' });
+}
+
+function denied(request) {
+  return routingErrorResponse(request, 'This request is not allowed on the management listener.', {
+    status: 403, source: 'Management gateway', code: 'management_request_forbidden',
   });
 }
 
@@ -19,7 +24,7 @@ export default {
       const darcAPIRequest = isDarcAPIRequest(request, url, origin);
       if ((origin && origin !== managementOrigin && !darcAPIRequest) ||
           (request.headers.get('Sec-Fetch-Site') === 'cross-site' && !darcAPIRequest)) {
-        return denied();
+        return denied(request);
       }
       // A browser opened on the private management UI would otherwise build
       // application links using :8094. Send navigations to the shared public
@@ -28,9 +33,7 @@ export default {
           request.headers.get('Sec-Fetch-Mode') === 'navigate') {
         const ports = await readAppPorts(env);
         if (!ports) {
-          return new Response('Xe Launcher app port configuration is unavailable.', {
-            status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-          });
+          return failure(request, 'Xe Launcher app port configuration is unavailable.');
         }
         const { http, publicHttpReady } = ports;
         if (publicHttpReady) {
@@ -42,14 +45,17 @@ export default {
             Location: publicURL.href, 'Cache-Control': 'no-store',
           } });
         }
-        return new Response(`Xe Launcher has not activated the selected HTTP port ${http}. Check the port helper in System Logs.`, {
-          status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
-        });
+        return failure(request, `Xe Launcher has not activated the selected HTTP port ${http}. Check the port helper in System Logs.`);
       }
       if (darcAPIRequest && request.method === 'OPTIONS') {
         return darcPreflight(request, url, origin);
       }
-      const response = await env.MANAGEMENT.fetch(request);
+      let response;
+      try { response = await env.MANAGEMENT.fetch(request); }
+      catch (error) {
+        console.warn('Management gateway failed:', error);
+        return failure(request, 'Could not connect to Compose. Try again or check Xe Launcher System Logs.');
+      }
       const headers = new Headers(response.headers);
       headers.set('X-Content-Type-Options', 'nosniff');
       headers.set('Referrer-Policy', 'no-referrer');
@@ -59,6 +65,6 @@ export default {
       headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
-    return denied();
+    return denied(request);
   },
 };

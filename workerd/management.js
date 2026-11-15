@@ -1,6 +1,7 @@
 import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
 import { readAppPorts } from './app-ports.js';
 import { diskUsageResponse, invalidateDiskUsage } from './disk-usage.js';
+import { routingErrorResponse } from './startup-response.js';
 
 const mimeTypes = {
   html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
@@ -12,12 +13,15 @@ const maintenanceCompletions = new WeakMap();
 
 export default {
   async fetch(request, env) {
+    const error = (message, status, headers = {}) => routingErrorResponse(request, message, {
+      status, headers, source: 'Compose gateway', code: 'compose_request_failed',
+    });
     const url = new URL(request.url);
     if (url.protocol === 'https:' &&
         (url.hostname !== 'compose-ui.localhost' ||
          (request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
          request.headers.get('Sec-Fetch-Site') === 'cross-site')) {
-      return new Response('Forbidden', { status: 403, headers: { 'Cache-Control': 'no-store' } });
+      return error('Forbidden', 403);
     }
     if (url.pathname === '/v1.24/runtime-status' && request.method === 'GET') {
       return Response.json(await readRuntimeStatus(env), { headers: { 'Cache-Control': 'no-store' } });
@@ -26,13 +30,13 @@ export default {
       const ports = await readAppPorts(env);
       return ports
         ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
-        : new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+        : error('Selected local app ports are unavailable', 503);
     }
     if (url.pathname === '/v1.24/file-descriptors') {
-      if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+      if (request.method !== 'GET') return error('Method not allowed', 405, { Allow: 'GET' });
       if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
           request.headers.get('Sec-Fetch-Site') === 'cross-site') {
-        return new Response('Forbidden', { status: 403 });
+        return error('Forbidden', 403);
       }
       const container = url.searchParams.get('container');
       if ([...url.searchParams.keys()].some(key => key !== 'container') ||
@@ -54,11 +58,11 @@ export default {
     }
     if (url.pathname === '/v1.24/disk-usage/cleanup') {
       if (!['GET', 'POST'].includes(request.method)) {
-        return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, POST' } });
+        return error('Method not allowed', 405, { Allow: 'GET, POST' });
       }
       if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
           request.headers.get('Sec-Fetch-Site') === 'cross-site') {
-        return new Response('Forbidden', { status: 403 });
+        return error('Forbidden', 403);
       }
       try {
         const response = await env.MAINTENANCE.fetch(`http://maintenance/${request.method === 'POST' ? 'cleanup' : 'status'}`, {
@@ -80,11 +84,11 @@ export default {
     if (url.pathname === '/v1.24/disk-usage' || url.pathname === '/v1.24/disk-usage/scan') {
       const scan = url.pathname.endsWith('/scan');
       const method = scan ? 'POST' : 'GET';
-      if (request.method !== method) return new Response('Method not allowed', { status: 405, headers: { Allow: method } });
+      if (request.method !== method) return error('Method not allowed', 405, { Allow: method });
       // A scan does disk work. Never allow another website to trigger it.
       if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
           request.headers.get('Sec-Fetch-Site') === 'cross-site') {
-        return new Response('Forbidden', { status: 403 });
+        return error('Forbidden', 403);
       }
       const runtime = await readRuntimeStatus(env);
       if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
@@ -113,22 +117,22 @@ export default {
       } catch { return await runtimeUnavailable(env); }
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
-      return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+      return error('Method not allowed', 405, { Allow: 'GET, HEAD' });
     }
     let path;
-    try { path = decodeURIComponent(url.pathname); } catch { return new Response('Invalid path', { status: 400 }); }
+    try { path = decodeURIComponent(url.pathname); } catch { return error('Invalid path', 400); }
     if (path.includes('\\') || path.split('/').some(part => part.startsWith('.')) || path.includes('\0')) {
-      return new Response('Not found', { status: 404 });
+      return error('Not found', 404);
     }
     if (path === '/') path = '/index.html';
     // This release has one page and uses hash navigation. Do not return HTML
     // for missing JS, API routes, or directories (disk serves directory lists).
     const extension = path.split('.').pop();
-    if (!mimeTypes[extension]) return new Response('Not found', { status: 404 });
+    if (!mimeTypes[extension]) return error('Not found', 404);
     const assetUrl = new URL('http://assets');
     assetUrl.pathname = path;
     const response = await env.ASSETS.fetch(new Request(assetUrl, { method: request.method }));
-    if (!response.ok) return new Response('Not found', { status: 404 });
+    if (!response.ok) return error('Not found', 404);
     const headers = new Headers(response.headers);
     headers.set('Content-Type', mimeTypes[extension]);
     headers.set('Cache-Control', path.startsWith('/_app/immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache');

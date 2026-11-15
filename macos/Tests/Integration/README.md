@@ -175,3 +175,19 @@ have a 103-byte UTF-8 budget, including SmolVM's internal sockets. A conflicting
 item at that alias must be resolved explicitly rather than replaced blindly.
 The Compose API socket is `~/.xe/run/compose.sock`, outside the shared project
 folder. Inspect launcher logs and the final backend error when readiness fails.
+
+### Builder and upload integrity
+
+Run `python3 macos/Tests/Integration/verify-builder-runtime.py "macos/dist/Xe Launcher.app" --upgrade`
+from the repository root on an Apple Silicon Mac with virtualization available.
+The test uses a disposable VM and leaves the installed launcher's VM untouched.
+It checks Docker upgrades preserve image and volume data; repeated plain/gzip,
+chunked/fixed-length uploads up to 64 MiB by comparing exported payload hashes;
+BuildKit transfers and image loading; VM restart; Compose builder selection using
+BuildKit-only Dockerfile syntax; and builder replacement retaining its cache volume.
+There are no retries. Logs and the stopped test VM remain under
+`macos/.build/builder-runtime-tests`. Only a short socket-path alias uses `/tmp`.
+Use `--baseline` with an older bundle to compare the old Docker upload path, or
+`--tools /absolute/path/to/macos/.build/container-tools` to test staged tools.
+Passing this test does not by itself establish the cause of an intermittent
+`unpigz: incomplete deflate data` failure on another machine.

@@ -74,6 +74,7 @@ export function applicationStarting(request, service, failed = false,
     : 'Could not start this app. Try again or check its logs in Compose.' : startingMessage;
   const response = startupResponse(request, {
     name: service.service, message, failed: Boolean(failed),
+    detail: failed ? 'Xe Launcher · App startup' : '',
     payload: { app: service.service, state: failed ? 'failed' : service.state === 'restarting' ? 'restarting' : 'starting', message },
   });
   startupResponses.add(response);

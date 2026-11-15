@@ -25,6 +25,8 @@ SMOL_RUNTIME = $(HELPERS)/SmolRuntime
 SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
 COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
 COMPOSE_SERVER = $(HELPERS)/docker-compose
+CONTAINER_TOOLS_STAGE = $(BUILD_DIR)/container-tools
+BUILDX = $(HELPERS)/cli-plugins/docker-buildx
 WORKERD_STAGE = $(BUILD_DIR)/workerd/workerd
 WORKERD = $(HELPERS)/workerd
 PORT_HELPER = $(MACOS_DIR)/port-helper
@@ -58,7 +60,7 @@ build:
 
 # One SwiftPM build produces the launcher, helpers, and tests in the same
 # configuration. Packaging below consumes that tested launcher binary.
-test: workerd compose-ui compose-server
+test: workerd compose-ui compose-server container-tools
 	@BUILD_CONFIG="$(BUILD_CONFIG)" /bin/bash Scripts/test-runtime.sh $(SWIFT_BUILD_FLAGS)
 
 smol-runtime:
@@ -66,6 +68,16 @@ smol-runtime:
 
 compose-server:
 	@/bin/bash Scripts/prepare-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
+
+.PHONY: container-tools sign-buildx verify-buildx
+container-tools:
+	@/bin/bash Scripts/prepare-container-tools.sh
+
+sign-buildx:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(BUILDX)"
+
+verify-buildx:
+	@/bin/bash Scripts/verify-container-tools.sh "$(CONTENTS)"
 
 workerd:
 	cd ../workerd && deno install --frozen
@@ -110,6 +122,9 @@ package: test smol-runtime guest-worker
 	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
+	@mkdir -p "$(HELPERS)/cli-plugins"
+	@cp "$(CONTAINER_TOOLS_STAGE)/host/docker-buildx" "$(BUILDX)"
+	@rsync -a --delete "$(CONTAINER_TOOLS_STAGE)/guest/" "$(RESOURCES)/ContainerTools/"
 	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
 	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
 	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"
@@ -175,6 +190,7 @@ bundle: package
 	@echo "Creating app bundle..."
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-buildx
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-workerd
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-port-helper
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
@@ -196,6 +212,7 @@ release-sign: package
 		fi
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-buildx
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-workerd
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-port-helper
 	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
@@ -216,6 +233,7 @@ check: release-sign
 	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)" --release
 	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
 	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
+	@/bin/bash Scripts/verify-container-tools.sh "$(CONTENTS)" --release
 	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)" --release
 	@/bin/bash Scripts/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist" --release
 

@@ -1,13 +1,14 @@
 import { readAppPorts } from './app-ports.js';
 import { invalidateApplicationService, resolveApplicationService } from './app-discovery.js';
 import { applicationReady, applicationStart, applicationStarting, isApplicationStopped, startApplication } from './app-startup.js';
+import { routingErrorResponse } from './startup-response.js';
 
 const targetHeader = 'x-xe-target-port';
 const containerHeader = 'x-xe-container-id';
 const publishedHeader = 'x-xe-published-port';
 
-function routeError(message, status = 404, headers = {}) {
-  return new Response(message, { status, headers: { ...headers, 'Cache-Control': 'no-store' } });
+function routeError(request, message, status = 404, headers = {}) {
+  return routingErrorResponse(request, message, { status, headers, code: 'app_route_unavailable' });
 }
 
 function applicationProtocol(port) {
@@ -55,16 +56,17 @@ function publishedPortFor(service, port) {
 }
 
 async function protocolResponse(request, service, port, env, canonical = false) {
+  const error = (message, status, headers) => routeError(request, message, status, headers);
   const protocol = applicationProtocol(port);
   if (!protocol || protocol === 'http') return null;
   if (protocol !== 'https') {
-    return routeError(`Unsupported Compose application protocol: ${protocol}`);
+    return error(`Unsupported Compose application protocol: ${protocol}`);
   }
   const published = publishedPortFor(service, port);
-  if (!published) return routeError('Published HTTPS port not available');
+  if (!published) return error('Published HTTPS port not available');
   const url = new URL(request.url);
   if (url.protocol === 'https:' && !url.hostname.endsWith('.app.localhost')) {
-    return routeError('HTTPS application route changed; retry', 503, { 'Retry-After': '2' });
+    return error('HTTPS application route changed; retry', 503, { 'Retry-After': '2' });
   }
   url.protocol = 'https:';
   if (url.hostname.endsWith('.app.localhost')) {
@@ -73,7 +75,7 @@ async function protocolResponse(request, service, port, env, canonical = false) 
   } else if (canonical) url.hostname = `${url.hostname.split('.')[0]}.localhost`;
   const ports = await readAppPorts(env);
   if (!ports || !ports.publicHttpReady) {
-    return new Response('Selected local app ports are unavailable', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    return error('Selected local app ports are unavailable', 503);
   }
   const { https } = ports;
   url.port = https === 443 ? '' : String(https);
@@ -89,6 +91,7 @@ function servicePorts(service) {
 }
 
 export async function routeApplication(request, env, ctx) {
+  const error = (message, status, headers) => routeError(request, message, status, headers);
   const url = new URL(request.url);
   const labels = routeLabels(url.hostname);
   const name = labels[0];
@@ -101,7 +104,9 @@ export async function routeApplication(request, env, ctx) {
   headers.delete('x-xe-origin-proto');
   headers.delete('x-xe-public-host');
   const service = await resolveApplicationService(name, env);
-  if (service instanceof Response) return service;
+  if (service instanceof Response) return routingErrorResponse(request, await service.text(), {
+    status: service.status, source: 'Service discovery', code: 'app_service_not_found',
+  });
   let selectedPort;
   let target;
   let published;
@@ -111,11 +116,11 @@ export async function routeApplication(request, env, ctx) {
     const selected = selector === undefined ? ports.slice(0, 1)
       : ports.filter(p => typeof p.name === 'string' && p.name.toLowerCase() === selector);
     if (selected.length !== 1) {
-      return routeError(selected.length ? 'Ambiguous port name' : 'Compose port not available');
+      return error(selected.length ? 'Ambiguous port name' : 'Compose port not available');
     }
     const port = selected[0].target;
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      return routeError('Invalid Compose target port');
+      return error('Invalid Compose target port');
     }
     published = publishedPortFor(service, selected[0]);
     selectedPort = selected[0];
@@ -127,7 +132,7 @@ export async function routeApplication(request, env, ctx) {
     const targets = [...new Set((service.publishedPorts || [])
       .filter(p => p.published === Number(selector)).map(p => p.target))];
     if (targets.length !== 1) {
-      return routeError(targets.length ? 'Ambiguous published port' : 'Published port not available');
+      return error(targets.length ? 'Ambiguous published port' : 'Published port not available');
     }
     target = targets[0];
     published = Number(selector);
@@ -143,7 +148,7 @@ export async function routeApplication(request, env, ctx) {
     }
   }
   if (selectedPort && !['', 'http', 'https'].includes(applicationProtocol(selectedPort))) {
-    return routeError(`Unsupported Compose application protocol: ${applicationProtocol(selectedPort)}`);
+    return error(`Unsupported Compose application protocol: ${applicationProtocol(selectedPort)}`);
   }
   if (isApplicationStopped(service)) {
     const start = await startApplication(service, env);
@@ -152,11 +157,11 @@ export async function routeApplication(request, env, ctx) {
   }
   if (service.state === 'restarting') return applicationStarting(request, service);
   if (service.state && service.state !== 'running') {
-    return routeError('Container is not available for application routing', 503);
+    return error('Container is not available for application routing', 503);
   }
   // Startup retries rediscover the allocated mapping. A running container still
   // needs a real binding, which the guest independently validates.
-  if (!published) return routeError('Published port not available');
+  if (!published) return error('Published port not available');
   if (selectedPort) {
     const response = await protocolResponse(request, service, selectedPort, env, canonical);
     if (response) return response;

@@ -30,6 +30,16 @@ The browser and container environment have independent lifecycles:
 See [gateway architecture and development](workerd/README.md) for routing,
 TLS and browser automation boundaries.
 
+Docker builds use the bundled native ARM64 Buildx client and a dedicated
+BuildKit container inside SmolVM. `macos/ContainerTools.lock` pins Docker,
+Buildx, the ARM64 BuildKit image, and their checksums. Packaging includes the
+BuildKit image, so builder startup does not depend on downloading it.
+Versioned, read-only guest tools upgrade the engine in existing VMs while
+preserving their overlay2 images and volumes. The launcher selects the `xe`
+builder explicitly and refuses to start Compose with missing or mismatched
+Buildx; it does not rely on a user-installed Docker CLI plugin. Cache maintenance
+targets that same builder. About lists all three component versions.
+
 ## Storage and trust boundaries
 
 The selected Compose folder is shared with the VM at `/stacks`. Compose file

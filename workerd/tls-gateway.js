@@ -44,14 +44,16 @@ export default {
         await bridgeSocketAndSocket(socket, upstream, buffer);
         return;
       }
-      const route = await resolveApplicationPort(hostname, env);
-      if (!route) return;
-      if (route.protocol === 'http') {
+      let route;
+      try { route = await resolveApplicationPort(hostname, env); }
+      catch (error) { console.warn('TLS application discovery failed:', hostname, error); }
+      // Finish TLS for routing failures so HTTP can explain the problem using
+      // the shared error page. Only known native HTTPS apps bypass termination.
+      if (!route || route.protocol !== 'https') {
         const upstream = await env.UI_TLS.connect('localhost:443');
         await bridgeSocketAndSocket(socket, upstream, buffer);
         return;
       }
-      if (route.protocol !== 'https') return;
       // Native HTTPS apps own their certificate. Start the exact container and
       // let the client retry its TLS connection once the application is ready.
       if (isApplicationStopped(route.service)) {

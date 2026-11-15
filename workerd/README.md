@@ -111,3 +111,9 @@ deno task test:integration --packaged node_modules/workerd/bin/workerd dist/host
 ```
 
 Guest router logs are at `/run/xe-router/workerd.log` inside the VM.
+Routing failures use the startup page's styling and identify Xe Launcher, the
+failing layer, hostname and error code. API calls and WebSocket handshakes get
+the same diagnostic fields as JSON. Errors returned by a reached application
+retain the application's response while the runtime is healthy. Native HTTPS
+passthrough apps own TLS; failures before their handshake completes cannot
+display an HTTP error page.

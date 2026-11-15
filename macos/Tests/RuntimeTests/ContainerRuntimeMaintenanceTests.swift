@@ -38,7 +38,7 @@ struct ContainerRuntimeMaintenanceTests {
         await first.value
         #expect(commands.withLock { $0 } == [
             ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"],
-            ["docker", "buildx", "prune", "--builder", "default", "--all", "--force",
+            ["docker", "buildx", "prune", "--builder", "xe", "--all", "--force",
              "--filter", "until=32h"],
             ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
         ])

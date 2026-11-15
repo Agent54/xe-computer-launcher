@@ -32,12 +32,17 @@ export async function bridgeSocketAndWebSocket(socket, webSocket, initialBytes) 
 
 // UI and HTTP-app hostnames are terminated by a separate local HTTPS Workerd
 // socket. HTTPS-app SNI names continue unmodified to their containers.
-export async function bridgeSocketAndSocket(client, upstream, initialBytes) {
+export async function bridgeSocketAndSocket(client, upstream, initialBytes, label = 'TLS') {
   const writer = upstream.writable.getWriter();
   try { await writer.write(initialBytes); } finally { writer.releaseLock(); }
-  const inbound = client.readable.pipeTo(upstream.writable).catch(error => { console.warn('TLS inbound bridge:', error); });
-  const outbound = upstream.readable.pipeTo(client.writable).catch(error => { console.warn('TLS outbound bridge:', error); });
+  let closing = false;
+  // Close both sockets together after the completed direction has flushed.
+  // Cancelling the other pipe during normal teardown is not a routing error.
+  const report = direction => error => { if (!closing) console.warn(`${label} ${direction} bridge:`, error); };
+  const inbound = client.readable.pipeTo(upstream.writable, { preventClose: true }).catch(report('inbound'));
+  const outbound = upstream.readable.pipeTo(client.writable, { preventClose: true }).catch(report('outbound'));
   await Promise.race([inbound, outbound]);
+  closing = true;
   await Promise.allSettled([client.close(), upstream.close()]);
   await Promise.allSettled([inbound, outbound]);
 }

@@ -21,7 +21,7 @@ const retryScript = `
   });
 `;
 
-export function startupResponse(request, { name, message, failed = false, payload, status = 503 }) {
+export function startupResponse(request, { name, message, failed = false, payload, status = 503, title = '', detail = '' }) {
   const headers = {
     'Cache-Control': 'no-store',
     'Retry-After': '2',
@@ -46,7 +46,7 @@ export function startupResponse(request, { name, message, failed = false, payloa
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${heading} · ${failed ? 'Unable to start' : restarting ? 'Restarting' : 'Starting'}</title>
+  <title>${escapeHTML(title || `${name} · ${failed ? 'Unable to start' : restarting ? 'Restarting' : 'Starting'}`)}</title>
   <style>
     :root { color-scheme: dark; --background: #000000; --text: #f5f5f5; --muted: #a3a3a3; --track: #262626; }
     * { box-sizing: border-box; }
@@ -69,9 +69,28 @@ export function startupResponse(request, { name, message, failed = false, payloa
     ${failed ? '' : '<div id="startup-spinner" class="loader" aria-hidden="true"></div>'}
     <h1>${heading}</h1>
     <p id="startup-status" role="status">${escapeHTML(message)}</p>
+    ${detail ? `<p>${escapeHTML(detail)}</p>` : ''}
     ${failed ? '<a href="">Try again</a>' : '<button id="startup-cancel" type="button">Cancel</button>'}
   </main>
   ${failed ? '' : `<script nonce="${nonce}">${retryScript}</script>`}
 </body>
 </html>`, { status, headers });
+}
+
+// Share the startup page's presentation and content negotiation for failures
+// before an app is reached. App responses themselves are never restyled here.
+export function routingErrorResponse(request, message, {
+  status = 503, source = 'Application gateway', code = 'app_route_unavailable', headers = {},
+} = {}) {
+  const host = request ? new URL(request.url).host : undefined;
+  const response = startupResponse(request, {
+    name: 'Unable to open app', title: 'Unable to open app · Xe Launcher', message,
+    failed: true, status, detail: `Xe Launcher · ${source}\n${host || ''}\n${status} · ${code}`,
+    payload: { ok: false, error: code, source: `Xe Launcher · ${source}`, host, message },
+  });
+  response.headers.delete('Retry-After');
+  response.headers.set('X-Xe-Error-Source', source);
+  response.headers.set('X-Xe-Error-Code', code);
+  for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
+  return response;
 }

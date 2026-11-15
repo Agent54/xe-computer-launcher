@@ -235,11 +235,20 @@ async function* files(directory: string): AsyncGenerator<string> {
 const app = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, req => {
   const url = new URL(req.url);
   if (req.headers.get('upgrade') === 'websocket') {
+    // Match T3's proxy-aware origin check: the router supplies the public host.
+    if (![req.headers.get('host'), req.headers.get('x-forwarded-host')]
+      .includes(new URL(req.headers.get('origin')!).host)) {
+      return new Response('WebSocket origin does not match Host', { status: 403 });
+    }
     const { socket, response } = Deno.upgradeWebSocket(req);
+    response.headers.set('x-xe-error-source', 'spoofed');
+    response.headers.set('x-xe-router-unavailable', 'true');
     socket.onmessage = event => socket.send(event.data);
     return response;
   }
   seen.push({ path: url.pathname + url.search, method: req.method, headers: {}, body: '' });
+  if (url.pathname === '/echo') return new Response(req.body);
+  if (url.pathname === '/application-error') return new Response('app error', { status: 502 });
   return url.pathname === '/redirect'
     ? new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1:8094/v1.24/private' } })
     : new Response('upstream-ok');
@@ -312,13 +321,17 @@ async function verifyCDPWebSocket(path: string) {
   } finally { socket.destroy(); }
 }
 
-async function verifyWebSocket() {
+async function verifyWebSocket(secure = false) {
   // A raw handshake lets the test keep production Host validation on an ephemeral port.
-  const socket = createConnection({ host: '127.0.0.1', port: routingPort });
+  const hostname = secure ? 'web.app.localhost' : 'web.localhost';
+  const port = secure ? tlsPort : routingPort;
+  const socket = secure
+    ? connectTLS({ host: '127.0.0.1', port, servername: hostname, rejectUnauthorized: false })
+    : createConnection({ host: '127.0.0.1', port });
   try {
-    await once(socket, 'connect');
+    await once(socket, secure ? 'secureConnect' : 'connect');
     socket.setTimeout(3000, () => socket.destroy(new Error('WebSocket echo timed out')));
-    socket.write(`GET /ws HTTP/1.1\r\nHost: web.localhost:${routingPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    socket.write(`GET /ws HTTP/1.1\r\nHost: ${hostname}:${port}\r\nOrigin: ${secure ? 'https' : 'http'}://${hostname}:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     let buffered = Buffer.alloc(0);
     let upgraded = false;
     for await (const chunk of socket) {
@@ -329,6 +342,7 @@ async function verifyWebSocket() {
         const headers = buffered.subarray(0, end).toString();
         assert.match(headers, /^HTTP\/1\.1 101 /);
         assert.match(headers, /s3pPLMBiTxaQ9kYGzzhZRbK\+xOo=/);
+        assert.doesNotMatch(headers, /x-xe-error-source|x-xe-router-unavailable/i);
         buffered = buffered.subarray(end + 4);
         upgraded = true;
         // Masked client text frame, payload "ping".
@@ -568,6 +582,12 @@ try {
   const appOptions = { app: true, host: 'web.localhost' };
   assert.equal((await request('/hello?q=1', appOptions)).body.toString(), 'upstream-ok');
   assert.equal(seen.at(-1)!.path, '/hello?q=1');
+  const upload = 'streamed upload'.repeat(10000);
+  assert.equal((await request('/echo', { ...appOptions, method: 'POST', body: upload })).body.toString(), upload);
+  const appError = await request('/application-error', appOptions);
+  assert.equal(appError.status, 502);
+  assert.equal(appError.body.toString(), 'app error');
+  assert.equal(appError.headers['x-xe-error-source'], undefined);
   assert.equal((await request('/redirect', appOptions)).status, 302);
   assert.equal((await request('/', { app: true, host: 'web.32000.localhost' })).status, 200);
   assert.equal((await request('/', { app: true, host: 'web.web.localhost' })).status, 200);
@@ -578,6 +598,7 @@ try {
   assert.equal(secureRedirect.headers.location, `https://web.secure.localhost:${tlsPort}/`);
   assert.deepEqual(await tlsRequest('web.secure.localhost'), { status: 200, body: 'tls-upstream-ok' });
   await verifyWebSocket();
+  await verifyWebSocket(true);
   console.log('PASS: Compose forwarding, SSE, guest private-port routing over Unix socket, WebSocket echo, and redirects');
 
   // Exercise a browser's burst of asset requests through real request contexts.

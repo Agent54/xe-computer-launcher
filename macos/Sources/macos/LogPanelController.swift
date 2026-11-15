@@ -6,13 +6,18 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
     private let logStore: SystemLogStore
     private let earlierButton = NSButton()
     private let issuesFilter = NSButton(checkboxWithTitle: "Warnings & Errors Only", target: nil, action: nil)
-    private var refreshTimer: Timer?
+    private static let pageSize = 160
+    private static let liveLimit = 480
+    private static let liveCharacterLimit = 256 * 1024
+    private var liveTask: Task<Void, Never>?
+    private var liveCursor: UInt64 = 0
+    private var liveUpdateDeferred = false
     private var currentSources: Set<String>?
-    private var lastRevision: UInt64?
     private var displayed: [SystemLogStore.Entry] = []
     private var historyTask: Task<Void, Never>?
     private var historyGeneration = 0
-    private var displayLimit = 10_000
+    private var displayLimit = liveLimit
+    private var characterLimit = liveCharacterLimit
     private var segmentedControl: NSSegmentedControl!
     private let tabSources: [Set<String>?] = [nil, ["launcher"], ["runtime", "smolvm", "docker", "maintenance", "routing", "workerd"], ["browser"], ["app_shim"], ["compose"]]
     private let tabLabels = ["All", "Xe Launcher", "Runtime", "Browser", "App Shim", "Compose"]
@@ -62,12 +67,6 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
     }
 
     func present(showingIssues: Bool = false) {
-        if showingIssues {
-            currentSources = nil
-            segmentedControl.selectedSegment = 0
-            issuesFilter.state = .on
-        }
-        showWindow(nil)
         if let window, let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
             let winSize = window.frame.size
@@ -75,14 +74,35 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
             let y = screenFrame.midY - winSize.height / 2
             window.setFrameOrigin(NSPoint(x: x, y: y))
         }
+        window?.contentView?.layoutSubtreeIfNeeded()
+        let updated = prepareContents(showingIssues: showingIssues)
+        showWindow(nil)
         window?.orderFrontRegardless()
-        startRefreshing()
-        loadHistory(reset: true)
+        if updated { textView.scrollToEndOfDocument(nil) }
+    }
+
+    @discardableResult
+    func prepareContents(showingIssues: Bool) -> Bool {
+        let filterChanged = showingIssues && (currentSources != nil || issuesFilter.state != .on)
+        if showingIssues {
+            currentSources = nil
+            segmentedControl.selectedSegment = 0
+            issuesFilter.state = .on
+        }
+        if liveTask == nil {
+            startRefreshing()
+        } else if !filterChanged {
+            return false
+        }
+        showRecentLogs()
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
-        stopRefreshing()
+        liveTask?.cancel()
+        liveTask = nil
         historyTask?.cancel()
+        historyTask = nil
         historyGeneration += 1
     }
 
@@ -110,9 +130,16 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textContainerInset = NSSize(width: 8, height: 8)
         textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
         textView.isRichText = true
         textView.usesFontPanel = false
         scrollView.documentView = textView
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrollPositionChanged),
+            name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
         contentView.addSubview(scrollView)
 
@@ -149,76 +176,114 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
         let idx = sender.selectedSegment
         guard tabSources.indices.contains(idx) else { return }
         currentSources = tabSources[idx]
-        loadHistory(reset: true)
+        showRecentLogs()
     }
 
-    @objc private func loadEarlier() { loadHistory(reset: false) }
+    @objc private func loadEarlier() { loadHistory() }
 
-    @objc private func issuesFilterChanged() { loadHistory(reset: true) }
+    @objc private func issuesFilterChanged() { showRecentLogs() }
 
     private var minimumSeverity: SystemLogSeverity { issuesFilter.state == .on ? .warning : .info }
 
-    private func loadHistory(reset: Bool) {
+    private func showRecentLogs() {
         historyTask?.cancel()
+        historyTask = nil
+        historyGeneration += 1
+        let (page, cursor) = logStore.recentPage(limit: Self.pageSize, sources: currentSources, minimumSeverity: minimumSeverity)
+        liveCursor = cursor
+        liveUpdateDeferred = false
+        displayLimit = Self.liveLimit
+        characterLimit = Self.liveCharacterLimit
+        displayed = page.entries
+        render(page.entries, edit: .replace, keepBottom: true)
+        earlierButton.isEnabled = page.hasEarlier || (displayed.first.map { $0.id > 1 } ?? (cursor > 0))
+        // Only ask disk for the first page if there was nothing to paint from memory.
+        if displayed.isEmpty && cursor > 0 { loadHistory(initial: true) }
+    }
+
+    private func loadHistory(initial: Bool = false) {
+        guard historyTask == nil else { return }
         historyGeneration += 1
         let generation = historyGeneration
-        let before = reset ? nil : displayed.first?.id
+        let before = displayed.first?.id ?? (liveCursor + 1)
         let sources = currentSources
         let severity = minimumSeverity
         earlierButton.isEnabled = false
-        if reset {
-            displayLimit = 10_000
-            displayed = []
-            lastRevision = nil
-            textView.string = ""
-        }
         historyTask = Task { [weak self, logStore] in
-            let page = await logStore.history(before: before, sources: sources, minimumSeverity: severity)
+            let page = await logStore.history(before: before, limit: Self.pageSize, sources: sources, minimumSeverity: severity)
             guard let self, !Task.isCancelled, self.historyGeneration == generation else { return }
-            if !reset { self.displayLimit += page.entries.count }
-            self.displayed = page.entries + self.displayed
-            self.earlierButton.isEnabled = page.hasEarlier
             self.historyTask = nil
-            self.render(self.displayed, replacing: true, keepBottom: reset)
-            self.lastRevision = nil
-            self.refreshLogs()
+            guard self.displayed.first.map({ $0.id >= before }) ?? true else { return }
+            var size = 0
+            let entries = page.entries.reversed().prefix { entry in
+                size += entry.line.utf8.count + 100
+                return size <= 64 * 1024
+            }.reversed()
+            let batch = Array(entries)
+            self.earlierButton.isEnabled = page.hasEarlier || batch.count < page.entries.count
+            guard !batch.isEmpty else { return }
+            self.displayLimit += batch.count
+            self.characterLimit += min(size, 64 * 1024)
+            let keepBottom = initial && self.isScrolledNearBottom()
+            self.displayed.insert(contentsOf: batch, at: 0)
+            self.render(batch, edit: .prepend, keepBottom: keepBottom)
         }
     }
 
     private func startRefreshing() {
-        guard refreshTimer == nil else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        let updates = logStore.updates()
+        liveTask = Task { [weak self] in
+            for await _ in updates {
+                guard !Task.isCancelled else { return }
                 self?.refreshLogs()
+                // Coalesce bursts to keep the main thread free between paints.
+                try? await Task.sleep(for: .milliseconds(33))
             }
         }
     }
 
-    private func stopRefreshing() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
+    @objc private func scrollPositionChanged() {
+        if liveUpdateDeferred && isScrolledNearBottom() { refreshLogs() }
     }
 
     private func refreshLogs() {
-        guard historyTask == nil else { return }
-        let snapshot = logStore.snapshot(sources: currentSources, minimumSeverity: minimumSeverity, after: displayed.last?.id ?? 0)
-        guard snapshot.revision != lastRevision else { return }
-        lastRevision = snapshot.revision
-        let added = snapshot.entries
-        guard !added.isEmpty else { return }
+        let (page, cursor) = logStore.recentPage(after: liveCursor, limit: Self.pageSize,
+                                                sources: currentSources, minimumSeverity: minimumSeverity)
+        guard !page.entries.isEmpty else {
+            liveCursor = cursor
+            liveUpdateDeferred = false
+            return
+        }
         let keepBottom = isScrolledNearBottom()
-        displayed += added
-        if keepBottom && displayed.count > displayLimit + 2_500 {
-            displayed.removeFirst(displayed.count - displayLimit)
+        let atLimit = displayed.count + page.entries.count > displayLimit + Self.pageSize
+            || (textView.textStorage?.length ?? 0) > characterLimit
+        if !keepBottom && (page.hasEarlier || atLimit) {
+            liveUpdateDeferred = true
+            return
+        }
+        liveUpdateDeferred = false
+        liveCursor = cursor
+        if page.hasEarlier || atLimit {
+            historyTask?.cancel()
+            historyTask = nil
+            historyGeneration += 1
+            displayLimit = Self.liveLimit
+            characterLimit = Self.liveCharacterLimit
+            let (tail, tailCursor) = logStore.recentPage(limit: Self.liveLimit, sources: currentSources, minimumSeverity: minimumSeverity)
+            displayed = tail.entries
+            liveCursor = tailCursor
             earlierButton.isEnabled = true
-            render(displayed, replacing: true, keepBottom: true)
+            render(displayed, edit: .replace, keepBottom: true)
         } else {
-            render(added, replacing: false, keepBottom: keepBottom)
+            displayed += page.entries
+            render(page.entries, edit: .append, keepBottom: keepBottom)
         }
     }
 
-    private func render(_ entries: [SystemLogStore.Entry], replacing: Bool, keepBottom: Bool) {
-        guard let textContainer = textView.textContainer else { return }
+    private enum Edit { case replace, append, prepend }
+
+    private func render(_ entries: [SystemLogStore.Entry], edit: Edit, keepBottom: Bool) {
+        guard let storage = textView.textStorage else { return }
         let attributed = NSMutableAttributedString()
         let defaultFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let defaultColor = NSColor.labelColor
@@ -253,13 +318,16 @@ final class LogPanelController: NSWindowController, NSWindowDelegate {
 
         let scrollView = textView.enclosingScrollView
         let origin = scrollView?.contentView.bounds.origin ?? .zero
-        let oldHeight = textView.layoutManager?.usedRect(for: textContainer).height ?? 0
-        if replacing { textView.textStorage?.setAttributedString(attributed) }
-        else { textView.textStorage?.append(attributed) }
-        textView.layoutManager?.ensureLayout(for: textContainer)
+        let oldHeight = textView.bounds.height
+        switch edit {
+        case .replace: storage.setAttributedString(attributed)
+        case .append: storage.append(attributed)
+        case .prepend: storage.insert(attributed, at: 0)
+        }
         if keepBottom { textView.scrollToEndOfDocument(nil) }
-        else if replacing, let scrollView {
-            let height = textView.layoutManager?.usedRect(for: textContainer).height ?? oldHeight
+        else if edit == .prepend, let scrollView {
+            if let container = textView.textContainer { textView.layoutManager?.ensureLayout(for: container) }
+            let height = textView.bounds.height
             scrollView.contentView.scroll(to: NSPoint(x: origin.x, y: max(0, origin.y + height - oldHeight)))
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
