@@ -178,16 +178,17 @@ folder. Inspect launcher logs and the final backend error when readiness fails.
 
 ### Builder and upload integrity
 
-Run `python3 macos/Tests/Integration/verify-builder-runtime.py "macos/dist/Xe Launcher.app" --upgrade`
+Run `python3 macos/Tests/Integration/verify-builder-runtime.py "macos/dist/Xe Launcher.app"`
 from the repository root on an Apple Silicon Mac with virtualization available.
 The test uses a disposable VM and leaves the installed launcher's VM untouched.
-It checks Docker upgrades preserve image and volume data; repeated plain/gzip,
-chunked/fixed-length uploads up to 64 MiB by comparing exported payload hashes;
-BuildKit transfers and image loading; VM restart; Compose builder selection using
-BuildKit-only Dockerfile syntax; and builder replacement retaining its cache volume.
+It checks repeated plain/gzip, chunked/fixed-length uploads up to 64 MiB by
+comparing exported payload hashes; BuildKit transfers and image loading; Compose
+builder selection using BuildKit-only syntax; and rejection of classic builds.
+Fresh startup must not import the BuildKit image or create its container. After
+a build, VM restart and cache maintenance must leave that container stopped.
 There are no retries. Logs and the stopped test VM remain under
 `macos/.build/builder-runtime-tests`. Only a short socket-path alias uses `/tmp`.
 Use `--baseline` with an older bundle to compare the old Docker upload path, or
-`--tools /absolute/path/to/macos/.build/container-tools` to test staged tools.
+`--artifact /absolute/path/to/runtime.smolmachine` to test a local image build.
 Passing this test does not by itself establish the cause of an intermittent
 `unpigz: incomplete deflate data` failure on another machine.

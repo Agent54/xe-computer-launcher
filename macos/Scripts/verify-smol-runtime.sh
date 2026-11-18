@@ -22,7 +22,7 @@ for required in \
     storage-template.ext4.zst \
     overlay-template.ext4.zst \
     docker-compose.smolmachine \
-    SmolVM.lock; do
+    SmolVM.lock Builder.lock; do
     [[ -e "$guest_runtime/$required" ]] || {
         echo "embedded SmolVM guest runtime is missing $required" >&2
         exit 1

@@ -57,7 +57,7 @@ final class ComposeServer {
         },
         prepareBuilder: @escaping @MainActor @Sendable (URL) async throws -> [String: String] = { socket in
             try await ContainerBuildTools.prepareHost(
-                pluginURL: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/cli-plugins/docker-buildx"),
+                pluginURL: ContainerBuildTools.resourceURL.appendingPathComponent("cli-plugins/docker-buildx"),
                 dockerSocketURL: socket
             )
         },

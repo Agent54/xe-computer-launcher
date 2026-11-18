@@ -66,8 +66,7 @@ enum DockerDaemonConfiguration {
         var updated = current
         // Keep the daemon and the startup cleanup on the same fixed path.
         updated["pidfile"] = guestPIDFile
-        // Docker 29 defaults new installations to the containerd image store.
-        // Keep this VM's existing overlay2 images and volumes visible on upgrade.
+        // Match the VM image's overlay2 storage backend on its persistent disk.
         var features = updated["features"] as? [String: Any] ?? [:]
         features["containerd-snapshotter"] = false
         updated["features"] = features

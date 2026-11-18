@@ -26,7 +26,7 @@ SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
 COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
 COMPOSE_SERVER = $(HELPERS)/docker-compose
 CONTAINER_TOOLS_STAGE = $(BUILD_DIR)/container-tools
-BUILDX = $(HELPERS)/cli-plugins/docker-buildx
+BUILDX = $(HELPERS)/buildx
 WORKERD_STAGE = $(BUILD_DIR)/workerd/workerd
 WORKERD = $(HELPERS)/workerd
 PORT_HELPER = $(MACOS_DIR)/port-helper
@@ -122,9 +122,9 @@ package: test smol-runtime guest-worker
 	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
-	@mkdir -p "$(HELPERS)/cli-plugins"
-	@cp "$(CONTAINER_TOOLS_STAGE)/host/docker-buildx" "$(BUILDX)"
-	@rsync -a --delete "$(CONTAINER_TOOLS_STAGE)/guest/" "$(RESOURCES)/ContainerTools/"
+	@cp "$(CONTAINER_TOOLS_STAGE)/Helpers/buildx" "$(BUILDX)"
+	@rm -f "$(HELPERS)/cli-plugins/docker-buildx"
+	@rsync -a --delete "$(CONTAINER_TOOLS_STAGE)/Resources/ContainerTools/" "$(RESOURCES)/ContainerTools/"
 	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
 	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
 	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"

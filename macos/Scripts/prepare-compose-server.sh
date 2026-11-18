@@ -8,6 +8,10 @@ source "$macos_dir/ComposeServer.lock"
 destination="${1:?usage: prepare-compose-server.sh DESTINATION}"
 source_dir="${COMPOSE_SERVER_SOURCE_DIR:-}"
 
+verify_builder_policy() {
+    "$1" version --format json | python3 -c 'import json,sys; info=json.load(sys.stdin); sys.exit(0 if info.get("builder") == "buildkit" else "Compose asset still supports classic builds; build the updated source or update the release pin")'
+}
+
 if [[ -n "$source_dir" ]]; then
     [[ -f "$source_dir/go.mod" ]] || { echo "Compose server source is missing go.mod: $source_dir" >&2; exit 1; }
     command -v go >/dev/null 2>&1 || { echo "Install Go to build COMPOSE_SERVER_SOURCE_DIR." >&2; exit 1; }
@@ -22,6 +26,7 @@ if [[ -n "$source_dir" ]]; then
             -o "$destination" ./cmd
     )
     file "$destination" | grep -q 'Mach-O 64-bit executable arm64'
+    verify_builder_policy "$destination"
     echo "Built local Compose server $source_version from $source_dir at $destination"
     exit 0
 fi
@@ -69,4 +74,5 @@ file "$asset_path" | grep -q 'Mach-O 64-bit executable arm64'
 mkdir -p "$(dirname "$destination")"
 cp "$asset_path" "$destination"
 chmod 755 "$destination"
+verify_builder_policy "$destination"
 echo "Staged Compose server $COMPOSE_SERVER_RELEASE_TAG (SHA-256 $actual) at $destination"

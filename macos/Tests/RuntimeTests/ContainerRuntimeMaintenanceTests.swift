@@ -24,7 +24,7 @@ struct ContainerRuntimeMaintenanceTests {
                 return SmolVMCommandResult(standardOutput: "4096 5242880 500000 1310720 631351", standardError: "", exitCode: 0)
             }
             return SmolVMCommandResult(
-                standardOutput: command.contains("buildx")
+                standardOutput: command.contains("/usr/local/share/xe-builder/cache.sh")
                     ? "ID\tRECLAIMABLE\tSIZE\tLAST ACCESSED\nexample\ttrue\t10MB\t24 hours ago\nTotal:\t10MB\n"
                     : "Deleted Images:\nsha256:example\nTotal reclaimed space: 10MB\n",
                 standardError: "", exitCode: 0
@@ -38,7 +38,7 @@ struct ContainerRuntimeMaintenanceTests {
         await first.value
         #expect(commands.withLock { $0 } == [
             ["docker", "image", "prune", "--all", "--force", "--filter", "until=32h"],
-            ["docker", "buildx", "prune", "--builder", "xe", "--all", "--force",
+            ["/usr/local/share/xe-builder/cache.sh", "prune", "--builder", "xe", "--all", "--force",
              "--filter", "until=32h"],
             ["stat", "-f", "-c", "%S %b %a %c %d", "/storage/docker"],
         ])
@@ -132,7 +132,7 @@ struct ContainerRuntimeMaintenanceTests {
         clock.withLock { $0.addTimeInterval(ContainerRuntimeMaintenance.cleanupInterval - 60) }
         let scheduled = try #require(await restored.reconcile(resources: lowDisk))
         await scheduled.value
-        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) }
+        #expect(commands.withLock { $0.filter { $0.contains("/usr/local/share/xe-builder/cache.sh") }.map(\.last) }
                 == ["until=32h", "until=8h", "until=1h", "until=0h"])
         #expect((await restored.snapshot()).cachePressureWarning?.id == warning.id)
     }
@@ -247,7 +247,7 @@ struct ContainerRuntimeMaintenanceTests {
                 return SmolVMCommandResult(standardOutput: "4096 5242880 500000 1310720 631351", standardError: "", exitCode: 0)
             }
             return SmolVMCommandResult(
-                standardOutput: command.contains("buildx") ? "Total:\t1.25GB\n" : "Total reclaimed space: 1.25GB\n",
+                standardOutput: command.contains("/usr/local/share/xe-builder/cache.sh") ? "Total:\t1.25GB\n" : "Total reclaimed space: 1.25GB\n",
                 standardError: "", exitCode: 0
             )
         }
@@ -288,7 +288,7 @@ struct ContainerRuntimeMaintenanceTests {
         }, log: { _ in })
         let first = try #require(await maintenance.reconcile())
         await first.value
-        let cacheCommands = commands.withLock { $0.filter { $0.contains("buildx") } }
+        let cacheCommands = commands.withLock { $0.filter { $0.contains("/usr/local/share/xe-builder/cache.sh") } }
         #expect(cacheCommands.map(\.last) == ["until=32h", "until=8h", "until=1h"])
         let snapshot = await maintenance.snapshot()
         #expect(snapshot.results.allSatisfy { $0.error == nil })
@@ -345,12 +345,12 @@ struct ContainerRuntimeMaintenanceTests {
         }, log: { _ in })
         let first = try #require(await maintenance.reconcile())
         await first.value
-        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.count } == 1)
+        #expect(commands.withLock { $0.filter { $0.contains("/usr/local/share/xe-builder/cache.sh") }.count } == 1)
         commands.withLock { $0 = [] }
         blocks.withLock { $0 *= 2 }
         let resized = try #require(await maintenance.reconcile(force: true))
         await resized.value
-        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) }
+        #expect(commands.withLock { $0.filter { $0.contains("/usr/local/share/xe-builder/cache.sh") }.map(\.last) }
                 == ["until=32h", "until=8h", "until=1h", "until=0h"])
         let snapshot = await maintenance.snapshot()
         #expect(snapshot.results.last?.error?.hasPrefix("Less than 5% disk space remains") == true)
@@ -374,7 +374,7 @@ struct ContainerRuntimeMaintenanceTests {
         }, log: { _ in })
         let running = try #require(await maintenance.reconcile())
         await running.value
-        #expect(commands.withLock { $0.filter { $0.contains("buildx") }.map(\.last) } == ["until=32h"])
+        #expect(commands.withLock { $0.filter { $0.contains("/usr/local/share/xe-builder/cache.sh") }.map(\.last) } == ["until=32h"])
         let snapshot = await maintenance.snapshot()
         #expect(snapshot.results.first?.reclaimedBytes == 0)
         #expect(snapshot.results.last?.error == "Could not read Docker filesystem capacity; skipped cleanup of younger cache.")

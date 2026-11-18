@@ -32,13 +32,17 @@ TLS and browser automation boundaries.
 
 Docker builds use the bundled native ARM64 Buildx client and a dedicated
 BuildKit container inside SmolVM. `macos/ContainerTools.lock` pins Docker,
-Buildx, the ARM64 BuildKit image, and their checksums. Packaging includes the
-BuildKit image, so builder startup does not depend on downloading it.
-Versioned, read-only guest tools upgrade the engine in existing VMs while
-preserving their overlay2 images and volumes. The launcher selects the `xe`
-builder explicitly and refuses to start Compose with missing or mismatched
-Buildx; it does not rely on a user-installed Docker CLI plugin. Cache maintenance
-targets that same builder. About lists all three component versions.
+Buildx and the expected ARM64 BuildKit image. Docker and the BuildKit archive
+are built into the SmolVM artifact by that repository's
+`examples/docker-compose/prepare-runtime.sh`; the launcher bundles only the
+host Buildx client and configuration. The Buildx entrypoint prepares the guest
+builder only for `build` or `bake`. VM startup, plugin discovery and maintenance
+do not start it, and its restart policy is `no`. The launcher selects `xe`
+explicitly and rejects missing or mismatched Buildx. Compose rejects classic
+builds. About lists all three component versions.
+
+VMs created with the former launcher-mounted engines require an explicit backup
+and recreation. This change does not migrate their storage or replace their VM.
 
 ## Storage and trust boundaries
 
@@ -124,6 +128,12 @@ pass these overrides to `make`:
 | --- | --- |
 | `COMPOSE_UI_SOURCE_DIR` | Compose UI checkout, such as `/path/to/darc-worker/svelte` |
 | `COMPOSE_SERVER_SOURCE_DIR` | Compose backend checkout; requires Go |
+| `SMOLVM_COMPOSE_ARTIFACT` | Verified `.smolmachine` from SmolVM's `EXPORT_PACK=1 examples/docker-compose/verify.sh`; its `.builder.lock` must be alongside it |
+
+The embedded-builder component releases must be published and their pins updated
+before release-only launcher builds can resume. Local builds use the explicit
+Compose source and SmolVM artifact overrides above. Packaging rejects the old
+Compose builder policy and old VM assets rather than silently using them.
 
 See [worker development](workerd/README.md), [DevTools vendoring](devtools/README.md)
 and [macOS integration testing](macos/Tests/Integration/README.md).

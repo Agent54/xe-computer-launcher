@@ -32,6 +32,11 @@ enum SmolVMSetup {
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
+        // The VM image owns its engines. An old image cannot be upgraded by
+        // mounting replacement executables from the launcher.
+        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != "embedded-buildkit-1" {
+            throw ContainerBuildTools.Failure("This VM uses an older runtime image. Back up its container data and explicitly recreate it with the bundled image; automatic migration is not supported.")
+        }
         let existingStatus = existing != nil ? try await client.machineStatus(named: machineName) : nil
         let currentDiskGiB = existingStatus?.storageGiB
         let diskGiB = configuredResources.diskGiB(preserving: currentDiskGiB)
@@ -48,7 +53,6 @@ enum SmolVMSetup {
             in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true),
             diskGiB: diskGiB
         )
-        let buildTools = try ContainerBuildTools.prepareGuest()
 
         if existing == nil {
             removeStaleSocketIfPresent()
@@ -61,7 +65,7 @@ enum SmolVMSetup {
                 networkBackend: "virtio-net",
                 volumes: [
                     "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro",
-                    stacksVolume, dockerConfigurationVolume, buildTools.volume,
+                    stacksVolume, dockerConfigurationVolume,
                 ],
                 exposedSockets: [
                     "/var/run/docker.sock:\(dockerSocketURL.path)",
@@ -70,18 +74,18 @@ enum SmolVMSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
-                    "dev.xe.computer.smolvm-release": "v1.16.2-compose_3",
+                    "dev.xe.computer.runtime-format": "embedded-buildkit-1",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ],
-                environment: buildTools.environment
+                environment: DockerDaemonConfiguration.environment
             )
             try await client.createMachine(spec)
         } else {
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
-                volumes: [stacksVolume, dockerConfigurationVolume, buildTools.volume],
-                environment: buildTools.environment
+                volumes: [stacksVolume, dockerConfigurationVolume],
+                environment: DockerDaemonConfiguration.environment
             )
         }
 
@@ -96,11 +100,6 @@ enum SmolVMSetup {
         let dockerWaitStartedAt = ContinuousClock.now
         try await waitForDocker()
         ExternalState.shared.appendLog("runtime", "Docker API ready after \(dockerWaitStartedAt.duration(to: .now)) (total startup \(startedAt.duration(to: .now)))")
-        let builder = try await client.execute(
-            in: machineName, command: ["/bin/sh", "\(buildTools.path)/start-builder.sh"], timeout: "180s"
-        )
-        ExternalState.shared.appendLog("runtime", builder.standardOutput)
-        try await ContainerBuildTools.registerHostBuilder(dockerSocketURL: dockerSocketURL)
 
         return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
     }

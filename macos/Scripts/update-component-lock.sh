@@ -224,6 +224,7 @@ if [[ "$component" == "smolvm" ]]; then
     compose_asset="smolvm-${smolvm_version}-docker-compose-darwin-arm64.smolmachine"
     release_has_asset "$release_file" "$runtime_asset"
     release_has_asset "$release_file" "$compose_asset"
+    release_has_asset "$release_file" "$compose_asset.builder.lock"
     release_has_asset "$release_file" checksums.sha256 || {
         echo "Release $release_tag does not contain checksums.sha256" >&2
         exit 1
@@ -295,12 +296,17 @@ case "$component" in
         compose_path="$(download_asset "$repository" "$release_tag" "$compose_asset")"
         runtime_checksum="$(asset_sha256 "$runtime_path")"
         compose_checksum="$(asset_sha256 "$compose_path")"
+        builder_path="$(download_asset "$repository" "$release_tag" "$compose_asset.builder.lock")"
+        builder_checksum="$(asset_sha256 "$builder_path")"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$runtime_asset" "$runtime_checksum"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset" "$compose_checksum"
+        verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset.builder.lock" "$builder_checksum"
+        python3 "$repository_root/macos/Scripts/verify-runtime-metadata.py" "$compose_path" "$builder_path" "$repository_root/macos/ContainerTools.lock"
         replace_lock_value SMOLVM_VERSION "$smolvm_version" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RELEASE_TAG "$release_tag" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RUNTIME_SHA256 "$runtime_checksum" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_COMPOSE_SHA256 "$compose_checksum" "$repository_root/$lock_file"
+        replace_lock_value SMOLVM_BUILDER_SHA256 "$builder_checksum" "$repository_root/$lock_file"
         ;;
 esac
 

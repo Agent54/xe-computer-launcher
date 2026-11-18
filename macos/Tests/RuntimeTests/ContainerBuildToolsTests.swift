@@ -31,20 +31,21 @@ struct ContainerBuildToolsTests {
         let root = macosURL.appendingPathComponent(".build/build-tools-tests/\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let tools = macosURL.appendingPathComponent(".build/container-tools")
-        let plugin = tools.appendingPathComponent("host/docker-buildx")
+        let plugin = tools.appendingPathComponent("Resources/ContainerTools/cli-plugins/docker-buildx")
         try #require(FileManager.default.isExecutableFile(atPath: plugin.path), "Run make container-tools first")
         for _ in 0..<2 {
             let environment = try await ContainerBuildTools.prepareHost(
-                pluginURL: plugin, resourceURL: tools.appendingPathComponent("guest"), clientURL: root,
+                pluginURL: plugin, resourceURL: tools.appendingPathComponent("Resources/ContainerTools"), clientURL: root,
                 sourceConfigURL: root.appendingPathComponent("absent.json"),
                 dockerSocketURL: URL(fileURLWithPath: "/missing-xe-test.sock")
             )
             #expect(environment["DOCKER_BUILDKIT"] == "1")
             #expect(environment["BUILDX_BUILDER"] == "xe")
             #expect(environment["DOCKER_HOST"] == "unix:///missing-xe-test.sock")
+            #expect(environment["XE_SMOLVM_DATA_DIR"] == RuntimeSocketPaths.shared.smolDataURL.path)
             let config = try Data(contentsOf: root.appendingPathComponent("config.json"))
             let parsed = try #require(JSONSerialization.jsonObject(with: config) as? [String: Any])
-            #expect(parsed["cliPluginsExtraDirs"] as? [String] == [tools.appendingPathComponent("host").path])
+            #expect(parsed["cliPluginsExtraDirs"] as? [String] == [plugin.deletingLastPathComponent().path])
         }
     }
 }

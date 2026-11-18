@@ -2,7 +2,7 @@
 """Exercise bundled engines and byte integrity through a disposable VM's socket.
 
 No retries: a single truncated/corrupt upload fails the run and preserves logs.
-Use --baseline to test the original bundled engine without the runtime update.
+Use --baseline to compare socket uploads against an older bundle.
 """
 import argparse
 import gzip
@@ -101,9 +101,8 @@ def check_upload(path, index):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("bundle", type=Path)
-    parser.add_argument("--tools", type=Path, help="Staged container-tools directory; defaults to bundle resources")
+    parser.add_argument("--artifact", type=Path, help="Explicit local SmolVM image to validate before packaging")
     parser.add_argument("--baseline", action="store_true")
-    parser.add_argument("--upgrade", action="store_true", help="Start the old engine first and verify data survives upgrade")
     args = parser.parse_args()
     macos = Path(__file__).resolve().parents[2]
     state = macos / ".build" / "builder-runtime-tests"
@@ -115,8 +114,8 @@ def main():
     short.symlink_to(root, target_is_directory=True)
     helpers = args.bundle / "Contents/Helpers/SmolRuntime"
     resources = args.bundle / "Contents/Resources/SmolRuntime"
-    tools = args.tools / "guest" if args.tools else args.bundle / "Contents/Resources/ContainerTools"
-    plugin = args.tools / "host/docker-buildx" if args.tools else args.bundle / "Contents/Helpers/cli-plugins/docker-buildx"
+    tools = args.bundle / "Contents/Resources/ContainerTools"
+    plugin = args.bundle / "Contents/Resources/ContainerTools/cli-plugins/docker-buildx"
     docker_socket = short / "docker.sock"
     home = root / "home"
     templates = home / ".smolvm"
@@ -154,10 +153,9 @@ def main():
         raise RuntimeError("Docker did not become ready")
 
     try:
-        arguments = ["create", "--name", "xe-builder-test", "--from", str(resources / "docker-compose.smolmachine"),
+        arguments = ["create", "--name", "xe-builder-test", "--from", str(args.artifact or resources / "docker-compose.smolmachine"),
                      "--net-backend", "virtio-net", "--mem", "6144", "--cpus", "4", "--storage", "20",
                      "--expose-socket", f"/var/run/docker.sock:{docker_socket}"]
-        upgrade_arguments = []
         if not args.baseline:
             configuration = root / "docker-config"
             configuration.mkdir()
@@ -165,29 +163,13 @@ def main():
                 "pidfile": "/run/docker.pid", "restart": False,
                 "features": {"containerd-snapshotter": False}, "builder": {"gc": {"enabled": False}},
             }))
-            upgrade_arguments = ["--volume", f"{tools}:/opt/xe/tools:ro", "--volume", f"{configuration}:/etc/docker:ro",
-                          "--env", "PATH=/opt/xe/tools/docker:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                          "--env", "XE_CONTAINER_TOOLS=/opt/xe/tools", "--env", "DOCKER_CONFIG=/storage/xe-build-client"]
-            if not args.upgrade:
-                arguments += upgrade_arguments
+            arguments += ["--volume", f"{configuration}:/etc/docker:ro"]
         machine(*arguments)
         created = True
+        started = time.monotonic()
         machine("start", "--name", "xe-builder-test")
         ready()
-        if args.upgrade:
-            old_version = json.loads(request(docker_socket, "GET", "/version"))["Version"]
-            request(docker_socket, "POST", "/v1.51/images/create?fromSrc=-&repo=xe-upgrade-probe", tar_payload(b"keep this image"))
-            before = json.loads(request(docker_socket, "GET", "/v1.51/images/xe-upgrade-probe/json"))["Id"]
-            request(docker_socket, "POST", "/v1.51/volumes/create", b'{"Name":"xe-upgrade-probe"}', {"Content-Type": "application/json"})
-            machine("exec", "--name", "xe-builder-test", "--", "/bin/sh", "-c", "printf keep > /storage/docker/volumes/xe-upgrade-probe/_data/sentinel")
-            machine("stop", "--name", "xe-builder-test")
-            machine("update", "--name", "xe-builder-test", *upgrade_arguments)
-            machine("start", "--name", "xe-builder-test")
-            ready()
-            assert json.loads(request(docker_socket, "GET", "/v1.51/images/xe-upgrade-probe/json"))["Id"] == before
-            sentinel = machine("exec", "--name", "xe-builder-test", "--", "cat", "/storage/docker/volumes/xe-upgrade-probe/_data/sentinel")
-            assert "keep" in sentinel
-            print(f"PASS upgrade from Docker {old_version}: image and volume data preserved", flush=True)
+        print(f"VM Docker ready in {time.monotonic() - started:.2f}s", flush=True)
         version = json.loads(request(docker_socket, "GET", "/version"))["Version"]
         print(f"Docker {version}; diagnostics: {root}", flush=True)
         for index in range(12):
@@ -196,21 +178,32 @@ def main():
             values = dict(line.split("=", 1) for line in (tools / "ContainerTools.lock").read_text().splitlines())
             assert version == values["DOCKER_VERSION"]
             client_env = dict(env, DOCKER_HOST=f"unix://{docker_socket}", DOCKER_CONFIG=str(root / "docker-client"),
-                              BUILDX_CONFIG=str(root / "docker-client/buildx"), DOCKER_BUILDKIT="1", BUILDX_BUILDER="xe")
+                              BUILDX_CONFIG=str(root / "docker-client/buildx"), DOCKER_BUILDKIT="1", BUILDX_BUILDER="xe",
+                              XE_SMOLVM_HOME=str(home), XE_SMOLVM_DATA_DIR=env["SMOLVM_DATA_DIR"], XE_SMOLVM_MACHINE="xe-builder-test")
             (root / "docker-client").mkdir(exist_ok=True)
             (root / "docker-client/config.json").write_text(json.dumps({"cliPluginsExtraDirs": [str(plugin.parent)]}))
-            run([plugin, "create", "--name", "xe", "--node", "xe0", "--driver", "docker-container",
-                 "--driver-opt", "image=" + values["BUILDKIT_IMAGE_ID"], "--driver-opt", "default-load=true",
-                 "--buildkitd-config", tools / "buildkitd.toml", f"unix://{docker_socket}"], environment=client_env)
+            run([plugin, "version"], environment=client_env)
+            run([plugin, "docker-cli-plugin-metadata"], environment=client_env)
+            machine("exec", "--name", "xe-builder-test", "--", "/usr/local/share/xe-builder/cache.sh", "prune", "--builder", "xe", "--force")
+            assert json.loads(request(docker_socket, "GET", "/v1.51/containers/json?all=1")) == []
+            images = json.loads(request(docker_socket, "GET", "/v1.51/images/json"))
+            assert not any(image["Id"] == values["BUILDKIT_IMAGE_ID"] for image in images)
+            print("PASS idle VM, plugin discovery and maintenance do not import or start BuildKit", flush=True)
             context = root / "context"
             context.mkdir()
             (context / "Dockerfile").write_text("FROM scratch\nCOPY payload.bin /payload.bin\n")
             for boot in range(2):
                 if boot:
                     machine("stop", "--name", "xe-builder-test")
+                    started = time.monotonic()
                     machine("start", "--name", "xe-builder-test")
                     ready()
-                machine("exec", "--name", "xe-builder-test", "--timeout", "180s", "--", "/bin/sh", "/opt/xe/tools/start-builder.sh")
+                    builder = json.loads(request(docker_socket, "GET", "/v1.51/containers/buildx_buildkit_xe0/json"))
+                    assert not builder["State"]["Running"]
+                    assert builder["HostConfig"]["RestartPolicy"]["Name"] == "no"
+                    machine("exec", "--name", "xe-builder-test", "--", "/usr/local/share/xe-builder/cache.sh", "prune", "--builder", "xe", "--force")
+                    assert not json.loads(request(docker_socket, "GET", "/v1.51/containers/buildx_buildkit_xe0/json"))["State"]["Running"]
+                    print(f"PASS restart and maintenance leave BuildKit stopped ({time.monotonic() - started:.2f}s)", flush=True)
                 for attempt in range(3):
                     payload = os.urandom(8 * 1024 * 1024 + 17)
                     (context / "payload.bin").write_bytes(payload)
@@ -228,20 +221,12 @@ def main():
             image = json.loads(request(docker_socket, "GET", "/v1.51/images/xe-compose-build-probe/json"))
             assert (image["Config"].get("Labels") or {}).get("com.docker.compose.image.builder") != "classic"
             print("PASS bundled Compose uses BuildKit", flush=True)
-            # Simulate a configuration revision and verify replacement retains cache storage.
-            original = json.loads(request(docker_socket, "GET", "/v1.51/containers/buildx_buildkit_xe0/json"))["Id"]
-            machine("exec", "--name", "xe-builder-test", "--", "/bin/sh", "-c",
-                    "docker exec buildx_buildkit_xe0 sh -c 'echo retained > /var/lib/buildkit/xe-cache-probe'; "
-                    "head -n 1 /storage/xe-build-client/xe-builder-owner > /storage/xe-build-client/xe-builder-owner.new; "
-                    "echo previous-config >> /storage/xe-build-client/xe-builder-owner.new; "
-                    "mv /storage/xe-build-client/xe-builder-owner.new /storage/xe-build-client/xe-builder-owner")
-            machine("exec", "--name", "xe-builder-test", "--timeout", "180s", "--", "/bin/sh", "/opt/xe/tools/start-builder.sh")
-            replacement = json.loads(request(docker_socket, "GET", "/v1.51/containers/buildx_buildkit_xe0/json"))["Id"]
-            assert replacement != original
-            retained = machine("exec", "--name", "xe-builder-test", "--", "/bin/sh", "-c",
-                               "docker exec buildx_buildkit_xe0 cat /var/lib/buildkit/xe-cache-probe")
-            assert "retained" in retained
-            print("PASS BuildKit container replacement preserves cache volume", flush=True)
+            actual = machine("exec", "--name", "xe-builder-test", "--", "/usr/local/bin/docker", "exec", "buildx_buildkit_xe0", "buildkitd", "--version")
+            assert f'v{values["BUILDKIT_VERSION"]} ' in actual
+            disabled = run([args.bundle / "Contents/Helpers/docker-compose", "-f", context / "compose.yaml", "build"],
+                           environment=dict(client_env, DOCKER_BUILDKIT="0"), check=False)
+            assert "classic builds are disabled" in disabled
+            print("PASS Compose rejects the classic builder", flush=True)
         print("PASS: no retries or corrupted uploads", flush=True)
     finally:
         if created:

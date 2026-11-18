@@ -82,9 +82,21 @@ verify_asset() {
 }
 
 runtime_path="$(resolve_asset "$runtime_asset")"
-compose_path="$(resolve_asset "$compose_asset")"
 verify_asset "$runtime_path" "$SMOLVM_RUNTIME_SHA256"
-verify_asset "$compose_path" "$SMOLVM_COMPOSE_SHA256"
+compose_path="${SMOLVM_COMPOSE_ARTIFACT:-}"
+if [[ -n "$compose_path" ]]; then
+    builder_metadata="$compose_path.builder.lock"
+else
+    [[ "${SMOLVM_BUILDER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || {
+        echo 'The pinned SmolVM release predates the embedded builder. Set SMOLVM_COMPOSE_ARTIFACT to the verified repository build, or update the component release pin.' >&2
+        exit 1
+    }
+    compose_path="$(resolve_asset "$compose_asset")"
+    builder_metadata="$(resolve_asset "$compose_asset.builder.lock")"
+    verify_asset "$compose_path" "$SMOLVM_COMPOSE_SHA256"
+    verify_asset "$builder_metadata" "$SMOLVM_BUILDER_SHA256"
+fi
+python3 "$script_dir/verify-runtime-metadata.py" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
 
 empty_dir="$macos_dir/.build/empty"
 mkdir -p "$destination" "$empty_dir"
@@ -108,5 +120,6 @@ done
 
 cp "$compose_path" "$runtime_source/docker-compose.smolmachine"
 cp "$macos_dir/SmolVM.lock" "$runtime_source/SmolVM.lock"
+cp "$builder_metadata" "$runtime_source/Builder.lock"
 
 echo "Staged SmolVM $SMOLVM_VERSION with Docker Compose at $destination"
