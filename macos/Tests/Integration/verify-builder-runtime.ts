@@ -10,9 +10,9 @@ import { gzipSync } from "node:zlib";
 
 const { values: options, positionals } = parseArgs({
   args: Deno.args, allowPositionals: true,
-  options: { artifact: { type: "string" }, baseline: { type: "boolean", default: false } },
+  options: { artifact: { type: "string" }, baseline: { type: "boolean", default: false }, keep: { type: "boolean", default: false } },
 });
-assert(positionals.length === 1, "Usage: verify-builder-runtime.ts BUNDLE [--artifact PATH] [--baseline]");
+assert(positionals.length === 1, "Usage: verify-builder-runtime.ts BUNDLE [--artifact PATH] [--baseline] [--keep]");
 const bundle = resolve(positionals[0]);
 const state = resolve(import.meta.dirname!, "../../.build/builder-runtime-tests");
 await Deno.mkdir(state, { recursive: true });
@@ -138,6 +138,8 @@ async function checkUpload(index: number) {
 }
 
 let created = false;
+let passed = false;
+let removed = false;
 try {
   const args = ["create", "--name", "xe-builder-test", "--from", options.artifact ?? join(resources, "docker-compose.smolmachine"),
     "--net-backend", "virtio-net", "--mem", "6144", "--cpus", "4", "--storage", "20",
@@ -167,10 +169,10 @@ try {
     await checkStorage();
     assert.equal(info.LoggingDriver, "local");
     await guest("sh", "-ec", 'test -x /opt/xe/guest-worker/workerd; ' +
-      '! grep -Eq " /(etc/docker|opt/xe/guest-worker|opt/image-router|opt/image-recipe) " /proc/self/mountinfo; ' +
+      'if grep -Eq " /(etc/docker|opt/xe/guest-worker|opt/image-router|opt/image-recipe) " /proc/self/mountinfo; then exit 1; fi; ' +
       'test "$(cat /stacks/index.html)" = host-file-before-restart; ' +
-      '! echo "$PATH" | grep -q /etc/docker/startup; ' +
-      '! grep -q "find /run /var/run" /usr/local/bin/dockerd-entrypoint.sh');
+      'if echo "$PATH" | grep -q /etc/docker/startup; then exit 1; fi; ' +
+      'if grep -q "find /run /var/run" /usr/local/bin/dockerd-entrypoint.sh; then exit 1; fi');
     console.log("PASS image-owned router and configuration; host stacks mount and both exposed sockets work");
     console.log("PASS containerd image store uses the persistent ext4 disk");
   }
@@ -199,7 +201,24 @@ try {
     }
     await Deno.copyFile(resolve(import.meta.dirname!, "../Fixtures/route-probe.capnp"), join(routeContext, "server.capnp"));
     await Deno.writeTextFile(join(routeContext, "Dockerfile"), 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\nCOPY --chmod=755 ld-musl-aarch64.so.1 /lib/ld-musl-aarch64.so.1\nCOPY server.capnp /server.capnp\nENTRYPOINT ["/runtime/lib/ld-linux-aarch64.so.1", "--library-path", "/runtime/lib", "/runtime/workerd", "serve", "/server.capnp"]\n');
-    await run([plugin, "build", "--builder", "xe", "--load", "--tag", "xe-router-probe", routeContext], clientEnv);
+    // A successful offline build alone is insufficient: Buildx can try a pull,
+    // fail, then use the local image. Reject AND count outbound attempts so that
+    // regression cannot pass simply because the network failure was quick.
+    await guest("sh", "-ec", 'iptables -N XE_BUILD_OFFLINE; ' +
+      'iptables -A XE_BUILD_OFFLINE -j REJECT; ' +
+      'iptables -I OUTPUT 1 ! -o lo -m conntrack --ctstate NEW -j XE_BUILD_OFFLINE; ' +
+      'iptables -I FORWARD 1 -m conntrack --ctstate NEW -j XE_BUILD_OFFLINE');
+    try {
+      const firstBuild = await run([plugin, "build", "--builder", "xe", "--progress", "plain", "--load", "--tag", "xe-router-probe", routeContext], clientEnv);
+      const attempts = await guest("sh", "-ec", "iptables -nvxL XE_BUILD_OFFLINE | awk '$3 == \"REJECT\" { print $1 }'");
+      assert.equal(attempts.trim(), "0", "First build attempted outbound traffic despite bundled BuildKit");
+      assert.doesNotMatch(firstBuild, /pulling image|using local image/, "Buildx must not attempt a pull and fall back to the loaded image");
+      console.log("PASS fresh first build: bundled image imported, zero outbound attempts and no pull fallback");
+    } finally {
+      await guest("sh", "-ec", 'iptables -D OUTPUT ! -o lo -m conntrack --ctstate NEW -j XE_BUILD_OFFLINE; ' +
+        'iptables -D FORWARD -m conntrack --ctstate NEW -j XE_BUILD_OFFLINE; ' +
+        'iptables -F XE_BUILD_OFFLINE; iptables -X XE_BUILD_OFFLINE');
+    }
     const routeContainer = JSON.parse((await request("POST", "/v1.51/containers/create", Buffer.from(JSON.stringify({
       Image: "xe-router-probe", ExposedPorts: { "8080/tcp": {} },
       Healthcheck: { Test: ["CMD", "/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/index.html"], Interval: 1_000_000_000, Timeout: 1_000_000_000, Retries: 5 },
@@ -289,12 +308,18 @@ try {
     console.log("PASS router failure exits the workload; VM restart restores routing without host deployment");
   }
   console.log("PASS: no retries or corrupted uploads");
+  passed = true;
 } finally {
   try {
     if (created) await machine("stop", "--name", "xe-builder-test");
+    if (passed && !options.keep) {
+      if (created) await machine("delete", "--name", "xe-builder-test", "--force");
+      await Deno.remove(root, { recursive: true });
+      removed = true;
+    }
   } finally {
     await Deno.remove(short);
     await Deno.remove(shortParent);
-    console.log(`Preserved disposable VM and diagnostics in ${root}`);
+    console.log(removed ? "Removed successful disposable VM and test outputs" : `Preserved disposable VM and diagnostics in ${root}`);
   }
 }

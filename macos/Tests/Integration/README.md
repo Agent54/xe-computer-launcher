@@ -192,8 +192,9 @@ The launcher-derived image must start its embedded router without a host resourc
 or configuration mount. A real container serves a host `/stacks` file through
 the exposed router socket, before and after restart. Only the stacks mount and
 the Docker/router sockets cross this boundary; host TLS and UI stay on the Mac.
-Uploads are never retried. Logs and the stopped test VM remain under
-`macos/.build/builder-runtime-tests`. Only a short socket-path alias uses `/tmp`.
+Uploads are never retried. Successful runs delete their disposable VM and outputs.
+Failed runs preserve logs and the stopped VM under `macos/.build/builder-runtime-tests`;
+use `--keep` to preserve a successful run too. Only a short socket-path alias uses `/tmp`.
 Use `--baseline` with an older bundle to compare the old Docker upload path, or
 `--artifact /absolute/path/to/runtime.smolmachine` to test a local image build.
 Passing this test does not by itself establish the cause of an intermittent

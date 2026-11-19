@@ -165,6 +165,7 @@ actor ContainerRuntimeSupervisor {
 
     private var state = State.idle
     private var consecutiveFailures = 0
+    private var routerFailures = 0
     private var recoveryDates: [Date] = []
     private var lastDiagnosticsAt = Date.distantPast
     private var lastDiagnostics: SmolVMMachine?
@@ -235,6 +236,7 @@ actor ContainerRuntimeSupervisor {
         await loadIncidentIfNeeded()
         let previousIncidentID = lastIncident?.id
         state = .starting
+        routerFailures = 0
         outageWasOOM = false
         bootId = UUID().uuidString
         reportedMemoryPressure = false
@@ -315,6 +317,25 @@ actor ContainerRuntimeSupervisor {
             guard bootId == checkedBootId, !lifecycleBusy,
                   state != .stopped, state != .recovering, state != .starting else { return }
             consecutiveFailures = 0
+            do {
+                try await reconcileRouter()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard bootId == checkedBootId, !lifecycleBusy,
+                      state != .stopped, state != .recovering, state != .starting else { return }
+                routerFailures += 1
+                if routerFailures >= configuration.failureThreshold {
+                    state = .degraded
+                    await publish(phase: .degraded,
+                        message: "Application routing is unavailable; Docker is responding. Check the runtime log.",
+                        reason: "router_unavailable", memory: lastDiagnostics?.memory)
+                }
+                return
+            }
+            guard bootId == checkedBootId, !lifecycleBusy,
+                  state != .stopped, state != .recovering, state != .starting else { return }
+            routerFailures = 0
             if state == .degraded || state == .failed {
                 state = .healthy
                 await publish(
@@ -333,6 +354,8 @@ actor ContainerRuntimeSupervisor {
         }
 
         await maintenance?.pause()
+
+        routerFailures = 0
 
         // A timed-out startup or exhausted recovery can still finish later.
         // Observe it without scheduling another restart.

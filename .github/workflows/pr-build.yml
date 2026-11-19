@@ -152,6 +152,9 @@ jobs:
           fi
           make BUILD_CONFIG=release
 
+      - name: Verify packaged VM routing and builds
+        run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
+
       - name: Verify Sparkle bundle integration
         run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
 

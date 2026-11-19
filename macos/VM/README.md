@@ -32,7 +32,9 @@ The host boundary remains:
 
 Image assembly uses only local inputs. Its cache key includes the verified base
 metadata, router checksums and recipe, so unchanged inputs reuse the packed
-image. The VM's labels record this input identity; a changed recipe, base or
+image. Changes to the host derivation script also invalidate the build cache,
+but leave the guest input identity unchanged. The VM's labels record the guest
+input identity; a changed recipe, base or
 router cannot silently reuse an old persistent VM. Build state remains under
 `.build/launcher-vm`; only a temporary short
 socket-path symlink uses `/tmp`. The build does not boot Docker or import

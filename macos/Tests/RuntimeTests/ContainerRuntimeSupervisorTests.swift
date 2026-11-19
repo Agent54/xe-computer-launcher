@@ -33,6 +33,40 @@ private actor RuntimeFixture {
 
 @Suite(.serialized)
 struct ContainerRuntimeSupervisorTests {
+    @Test func routerOutageDegradesStatusWithoutRestartingDocker() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../.build/router-status-tests/\(UUID().uuidString)").standardizedFileURL
+        defer { try? FileManager.default.removeItem(at: root) }
+        let attempts = Mutex(0)
+        let starts = Mutex(0)
+        let supervisor = ContainerRuntimeSupervisor(
+            statusStore: ContainerRuntimeStatusStore(directoryURL: root),
+            startMachine: {
+                starts.withLock { $0 += 1 }
+                return SmolVMStartupResult(machineName: "test", dockerSocketURL: root.appendingPathComponent("docker.sock"))
+            }, stopMachine: {}, probeDocker: { true },
+            readDiagnostics: { self.machine(oomKillCount: 0) }, resetRouter: {},
+            reconcileRouter: {
+                if attempts.withLock({ attempt in attempt += 1; return attempt <= 3 }) {
+                    throw GuestRouterError.unavailable
+                }
+            }, readHostResources: { nil }, readVMResources: { _ in nil },
+            onStatusChanged: { _ in }, log: { _ in }
+        )
+        try await supervisor.start()
+        await supervisor.reconcile()
+        #expect(await supervisor.snapshot().phase == .healthy)
+        await supervisor.reconcile()
+        await supervisor.reconcile()
+        let degraded = await supervisor.snapshot()
+        #expect(degraded.phase == .degraded)
+        #expect(degraded.reason == "router_unavailable")
+        #expect(starts.withLock { $0 } == 1)
+        await supervisor.reconcile()
+        #expect(await supervisor.snapshot().phase == .healthy)
+        #expect(starts.withLock { $0 } == 1)
+    }
+
     private func machine(oomKillCount: UInt64, workloadOOM: Bool = false, workloadExited: Bool = false,
                          pid: Int32 = 123, memoryMiB: UInt64 = 4096) -> SmolVMMachine {
         SmolVMMachine(

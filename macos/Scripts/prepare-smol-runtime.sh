@@ -81,14 +81,12 @@ verify_asset() {
     echo "Verified $(basename "$path"): $size bytes, SHA-256 $actual" >&2
 }
 
-runtime_path="$(resolve_asset "$runtime_asset")"
-verify_asset "$runtime_path" "$SMOLVM_RUNTIME_SHA256"
 compose_path="${SMOLVM_COMPOSE_ARTIFACT:-}"
 if [[ -n "$compose_path" ]]; then
     builder_metadata="$compose_path.builder.lock"
 else
     [[ "${SMOLVM_BUILDER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || {
-        echo 'The pinned SmolVM release predates the embedded builder. Set SMOLVM_COMPOSE_ARTIFACT to the verified repository build, or update the component release pin.' >&2
+        echo 'The pinned SmolVM release has no verified embedded-builder artifact. Publish the containerd-buildkit-2 base with its .builder.lock and update SmolVM.lock before CI/release builds. Local builds require an explicit SMOLVM_COMPOSE_ARTIFACT.' >&2
         exit 1
     }
     compose_path="$(resolve_asset "$compose_asset")"
@@ -97,6 +95,8 @@ else
     verify_asset "$builder_metadata" "$SMOLVM_BUILDER_SHA256"
 fi
 deno run --no-config --allow-read "$script_dir/verify-runtime-metadata.ts" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
+runtime_path="$(resolve_asset "$runtime_asset")"
+verify_asset "$runtime_path" "$SMOLVM_RUNTIME_SHA256"
 
 empty_dir="$macos_dir/.build/empty"
 mkdir -p "$destination" "$empty_dir"

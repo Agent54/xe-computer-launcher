@@ -8,13 +8,14 @@ recipe="$macos_dir/VM"
 base="$runtime/docker-compose.smolmachine"
 deno run --no-config --allow-read "$macos_dir/Scripts/verify-runtime-metadata.ts" "$base" "$runtime/Builder.lock" "$macos_dir/ContainerTools.lock"
 (cd "$router" && shasum -a 256 --check checksums.txt)
-key="$(
+revision="$(
     {
         cat "$runtime/Builder.lock" "$router/checksums.txt"
         cd "$macos_dir"
-        shasum -a 256 Scripts/derive-launcher-runtime.sh VM/*.sh VM/launcher.smolfile VM/daemon.json
+        shasum -a 256 VM/*.sh VM/launcher.smolfile VM/daemon.json
     } | shasum -a 256 | awk '{print $1}'
 )"
+key="$(printf '%s\n' "$revision" "$(shasum -a 256 "$0" | awk '{print $1}')" | shasum -a 256 | awk '{print $1}')"
 state="$macos_dir/.build/launcher-vm/$key"
 artifact="$state/launcher.smolmachine"
 metadata="$artifact.builder.lock"
@@ -50,7 +51,7 @@ if [[ ! -f "$artifact" || ! -f "$metadata" ]]; then
     {
         sed '/^SMOLVM_COMPOSE_SHA256=/d' "$runtime/Builder.lock"
         printf 'SMOLVM_COMPOSE_SHA256=%s\n' "$(shasum -a 256 "$artifact" | awk '{print $1}')"
-        printf 'XE_RUNTIME_FORMAT=xe-launcher-1\nXE_RUNTIME_INPUT_SHA256=%s\n' "$key"
+        printf 'XE_RUNTIME_FORMAT=xe-launcher-1\nXE_RUNTIME_INPUT_SHA256=%s\n' "$revision"
     } > "$metadata"
     "$smolvm" machine delete --name "$machine" --force
 fi

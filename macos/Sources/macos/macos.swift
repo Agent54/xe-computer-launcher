@@ -797,9 +797,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     catch is CancellationError { break }
                     catch { ExternalState.shared.appendLog("compose", error.localizedDescription) }
                 }
-                do { try await GuestRouter.shared.reconcile() }
-                catch is CancellationError { break }
-                catch { ExternalState.shared.appendLog("routing", error.localizedDescription) }
                 await RuntimeLogCollector.shared.collect()
                 await runtimeSupervisor.reconcile()
                 await workerdServer.notifyRuntimeChanged()
