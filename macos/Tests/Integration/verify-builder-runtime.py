@@ -18,6 +18,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from urllib.parse import quote
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -161,7 +162,7 @@ def main():
             configuration.mkdir()
             (configuration / "daemon.json").write_text(json.dumps({
                 "pidfile": "/run/docker.pid", "restart": False,
-                "features": {"containerd-snapshotter": False}, "builder": {"gc": {"enabled": False}},
+                "features": {"containerd-snapshotter": True}, "builder": {"gc": {"enabled": False}},
             }))
             arguments += ["--volume", f"{configuration}:/etc/docker:ro"]
         machine(*arguments)
@@ -172,10 +173,21 @@ def main():
         print(f"VM Docker ready in {time.monotonic() - started:.2f}s", flush=True)
         version = json.loads(request(docker_socket, "GET", "/version"))["Version"]
         print(f"Docker {version}; diagnostics: {root}", flush=True)
+        if not args.baseline:
+            info = json.loads(request(docker_socket, "GET", "/info"))
+            assert info["Driver"] == "overlayfs", info["Driver"]
+            assert dict(info["DriverStatus"])["driver-type"] == "io.containerd.snapshotter.v1"
+            machine("exec", "--name", "xe-builder-test", "--", "sh", "-ec",
+                    'grep -Eq " /storage .* - ext4 " /proc/self/mountinfo; '
+                    'test -d /storage/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots; '
+                    'test "$(stat -c %d /storage/docker/containerd/daemon)" = "$(stat -c %d /storage)"')
+            print("PASS containerd image store uses the persistent ext4 disk", flush=True)
         for index in range(12):
             check_upload(docker_socket, index)
         if not args.baseline:
             values = dict(line.split("=", 1) for line in (tools / "ContainerTools.lock").read_text().splitlines())
+            runtime_values = dict(line.split("=", 1) for line in (resources / "Builder.lock").read_text().splitlines())
+            values["BUILDKIT_IMAGE_ID"] = runtime_values["BUILDKIT_IMAGE_ID"]
             assert version == values["DOCKER_VERSION"]
             client_env = dict(env, DOCKER_HOST=f"unix://{docker_socket}", DOCKER_CONFIG=str(root / "docker-client"),
                               BUILDX_CONFIG=str(root / "docker-client/buildx"), DOCKER_BUILDKIT="1", BUILDX_BUILDER="xe",
@@ -198,6 +210,14 @@ def main():
                     started = time.monotonic()
                     machine("start", "--name", "xe-builder-test")
                     ready()
+                    for architecture in ["arm64", "amd64"]:
+                        platform = quote(json.dumps({"os": "linux", "architecture": architecture}))
+                        persisted = json.loads(request(docker_socket, "GET", f"/v1.51/images/xe-persistence-probe/json?platform={platform}"))
+                        assert persisted["Architecture"] == architecture
+                    print("PASS both platforms of the loaded image survive VM restart", flush=True)
+                    machine("exec", "--name", "xe-builder-test", "--", "sh", "-ec",
+                            'test -d /storage/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots; '
+                            'test "$(stat -c %d /storage/docker/containerd/daemon)" = "$(stat -c %d /storage)"')
                     builder = json.loads(request(docker_socket, "GET", "/v1.51/containers/buildx_buildkit_xe0/json"))
                     assert not builder["State"]["Running"]
                     assert builder["HostConfig"]["RestartPolicy"]["Name"] == "no"
@@ -211,6 +231,10 @@ def main():
                     run([plugin, "build", "--builder", "xe", "--progress", "plain", "--output", f"type=local,dest={output}", context], environment=client_env)
                     assert (output / "payload.bin").read_bytes() == payload, "BuildKit output is corrupted"
                     print(f"PASS BuildKit upload, boot={boot}, attempt={attempt}", flush=True)
+                if boot == 0:
+                    run([plugin, "build", "--builder", "xe", "--platform", "linux/arm64,linux/amd64",
+                         "--provenance=mode=min", "--load", "--tag", "xe-persistence-probe", context], environment=client_env)
+                    print("PASS multi-platform image with provenance loaded into containerd", flush=True)
             run([plugin, "build", "--builder", "xe", "--load", "--tag", "xe-builder-probe", context], environment=client_env)
             request(docker_socket, "GET", "/v1.51/images/xe-builder-probe/json")
             print("PASS BuildKit result loaded into Docker", flush=True)

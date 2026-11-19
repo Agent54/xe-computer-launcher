@@ -66,11 +66,11 @@ enum DockerDaemonConfiguration {
         var updated = current
         // Keep the daemon and the startup cleanup on the same fixed path.
         updated["pidfile"] = guestPIDFile
-        // Match the VM image's overlay2 storage backend on its persistent disk.
+        // Docker's managed containerd keeps its image store under the persistent data-root.
         var features = updated["features"] as? [String: Any] ?? [:]
-        features["containerd-snapshotter"] = false
+        features["containerd-snapshotter"] = true
         updated["features"] = features
-        // Docker 28's configuration parser applies this boolean to AutoRestart.
+        // Docker's configuration parser applies this boolean to AutoRestart.
         // Keep service restart policies for crashes after an explicit start,
         // but let the Xe Computer scheduler decide what to start after VM boot.
         updated["restart"] = false
@@ -80,8 +80,8 @@ enum DockerDaemonConfiguration {
 
         var builder = updated["builder"] as? [String: Any] ?? [:]
         var gc = builder["gc"] as? [String: Any] ?? [:]
-        // Docker's space-budget GC sizes all unknown cache records in parallel,
-        // which can exhaust VM memory on overlay2. Use launcher age-based passes.
+        // Launcher age-based maintenance owns cache retention, including the
+        // dedicated BuildKit container; don't run a competing daemon GC policy.
         gc["enabled"] = false
         for key in ["policy", "defaultKeepStorage", "defaultMaxUsedSpace",
                     "defaultReservedSpace", "defaultMinFreeSpace"] {

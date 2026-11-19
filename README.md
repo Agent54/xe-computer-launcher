@@ -41,7 +41,12 @@ do not start it, and its restart policy is `no`. The launcher selects `xe`
 explicitly and rejects missing or mismatched Buildx. Compose rejects classic
 builds. About lists all three component versions.
 
-VMs created with the former launcher-mounted engines require an explicit backup
+Docker uses the containerd image store. This bundled Docker starts and manages
+containerd itself, storing its image contents and snapshots at
+`/storage/docker/containerd/daemon` on the VM's persistent disk. No separate
+containerd service or additional startup mounts are needed.
+
+VMs created with the former engines or overlay2 image store require an explicit backup
 and recreation. This change does not migrate their storage or replace their VM.
 
 ## Storage and trust boundaries
@@ -73,8 +78,8 @@ can start services without bringing up unrelated replicas or dependencies.
 The launcher automatically prunes unused images and build cache, including
 more recent cache under critical disk pressure. Unused tagged images are not
 durable storage. Containers and volumes are preserved. Docker's size-budget
-build-cache GC is disabled because its overlay2 scan can exhaust VM memory;
-launcher maintenance uses age-based pruning instead.
+build-cache GC is disabled so launcher maintenance owns the age-based pruning
+policy for both Docker and the dedicated BuildKit builder.
 
 Errors add one **Issues Detected** entry to the tray. Selecting it clears the
 notice and opens **System Logs** filtered to warnings and errors from all sources.

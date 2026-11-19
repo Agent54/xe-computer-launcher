@@ -2,6 +2,7 @@
 """Reject old VM artifacts and mismatched builder metadata before packaging."""
 import hashlib
 from pathlib import Path
+import re
 import sys
 
 
@@ -19,11 +20,13 @@ def values(path):
 artifact, metadata_path, expected_path = sys.argv[1:]
 metadata = values(metadata_path)
 expected = values(expected_path)
-if metadata.get("SMOLVM_RUNTIME_FORMAT") != "embedded-buildkit-1":
-    raise ValueError("SmolVM image does not contain the required embedded builder")
-for key in ["DOCKER_VERSION", "BUILDX_VERSION", "BUILDKIT_VERSION", "BUILDKIT_IMAGE_ID"]:
+if metadata.get("SMOLVM_RUNTIME_FORMAT") != "containerd-buildkit-1":
+    raise ValueError("SmolVM image does not contain the required containerd store and embedded builder")
+for key in ["DOCKER_VERSION", "BUILDX_VERSION", "BUILDKIT_VERSION", "BUILDKIT_CONFIG_ID"]:
     if metadata.get(key) != expected[key]:
         raise ValueError(f"SmolVM image differs from the launcher requirement: {key}")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata.get("BUILDKIT_IMAGE_ID", "")):
+    raise ValueError("SmolVM artifact is missing its BuildKit manifest identity")
 digest = hashlib.sha256()
 with open(artifact, "rb") as source:
     for chunk in iter(lambda: source.read(1024 * 1024), b""):

@@ -34,7 +34,7 @@ enum SmolVMSetup {
         let existing = machines.first { $0.name == machineName }
         // The VM image owns its engines. An old image cannot be upgraded by
         // mounting replacement executables from the launcher.
-        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != "embedded-buildkit-1" {
+        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != "containerd-buildkit-1" {
             throw ContainerBuildTools.Failure("This VM uses an older runtime image. Back up its container data and explicitly recreate it with the bundled image; automatic migration is not supported.")
         }
         let existingStatus = existing != nil ? try await client.machineStatus(named: machineName) : nil
@@ -74,7 +74,7 @@ enum SmolVMSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
-                    "dev.xe.computer.runtime-format": "embedded-buildkit-1",
+                    "dev.xe.computer.runtime-format": "containerd-buildkit-1",
                     GuestRouter.configurationLabel: GuestRouter.configurationVersion,
                 ],
                 environment: DockerDaemonConfiguration.environment

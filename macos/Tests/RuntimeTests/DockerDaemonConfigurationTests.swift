@@ -162,7 +162,7 @@ struct DockerDaemonConfigurationTests {
         #expect(parsed["data-root"] as? String == "/storage/docker")
         #expect(parsed["pidfile"] as? String == DockerDaemonConfiguration.guestPIDFile)
         #expect(parsed["restart"] as? Bool == false)
-        #expect((parsed["features"] as? [String: Bool])?["containerd-snapshotter"] == false)
+        #expect((parsed["features"] as? [String: Bool])?["containerd-snapshotter"] == true)
         let builder = try #require(parsed["builder"] as? [String: Any])
         #expect(builder["history"] as? [String: Int] == ["maxEntries": 100])
         #expect(builder["entitlements"] as? [String: Bool] == ["network-host": false])

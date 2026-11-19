@@ -184,6 +184,8 @@ The test uses a disposable VM and leaves the installed launcher's VM untouched.
 It checks repeated plain/gzip, chunked/fixed-length uploads up to 64 MiB by
 comparing exported payload hashes; BuildKit transfers and image loading; Compose
 builder selection using BuildKit-only syntax; and rejection of classic builds.
+It verifies the containerd snapshotter stores data on the persistent disk, then
+loads an ARM64/AMD64 image with provenance and checks both platforms after restart.
 Fresh startup must not import the BuildKit image or create its container. After
 a build, VM restart and cache maintenance must leave that container stopped.
 There are no retries. Logs and the stopped test VM remain under

@@ -18,6 +18,10 @@ case "${1:-}" in
         ;;
     __xe_prepare)
         . "$resources/ContainerTools.lock"
+        # The artifact records its imported manifest identity; configuration
+        # identity alone is not an image reference in the containerd store.
+        BUILDKIT_IMAGE_ID="$(sed -n 's/^BUILDKIT_IMAGE_ID=//p' "$resources/../SmolRuntime/Builder.lock")"
+        : "${BUILDKIT_IMAGE_ID:?Missing bundled BuildKit manifest identity}"
         : "${XE_SMOLVM_DATA_DIR:?Missing managed VM data directory}"
         : "${XE_SMOLVM_HOME:?Missing managed VM home}"
         : "${XE_SMOLVM_MACHINE:?Missing managed VM name}"
