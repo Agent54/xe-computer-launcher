@@ -22,7 +22,6 @@ printf 'unrelated build output\n' > "$TEST_ROOT/assets/guest-runtime.ldd"
 printf 'stale host source\n' > "$TEST_ROOT/build/guest-worker/host-worker/config.capnp"
 printf 'fresh guest config\n' > "$TEST_ROOT/workerd/dist/guest-worker.bin"
 printf 'fresh run script\n' > "$TEST_ROOT/workerd/docker/run.sh"
-printf 'fresh stop script\n' > "$TEST_ROOT/workerd/docker/stop.sh"
 (
     cd "$TEST_ROOT/assets"
     shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
@@ -41,7 +40,7 @@ cmp "$TEST_ROOT/assets/lib/libc.so.6" "$stage/lib/libc.so.6"
 cmp "$TEST_ROOT/assets/licenses/workerd-README.md" "$stage/licenses/workerd-README.md"
 cmp "$TEST_ROOT/workerd/dist/guest-worker.bin" "$stage/guest-worker.bin"
 cmp "$TEST_ROOT/workerd/docker/run.sh" "$stage/run.sh"
-cmp "$TEST_ROOT/workerd/docker/stop.sh" "$stage/stop.sh"
+[[ ! -e "$stage/stop.sh" ]]
 [[ -x "$stage/workerd" && -x "$stage/lib/ld-linux-aarch64.so.1" ]]
 (
     cd "$stage"

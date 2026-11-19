@@ -10,7 +10,7 @@ destination=dist/guest-runtime
 mkdir -p "$destination/lib" "$destination/licenses"
 cp node_modules/workerd/bin/workerd "$destination/workerd"
 cp dist/guest-worker.bin "$destination/guest-worker.bin"
-cp docker/run.sh docker/stop.sh "$destination/"
+cp docker/run.sh "$destination/"
 cp node_modules/workerd/README.md "$destination/licenses/workerd-README.md"
 # Include the shared libraries and loader used by this exact Linux executable.
 ldd "$destination/workerd" > dist/guest-runtime.ldd
@@ -27,4 +27,4 @@ done
 chmod 755 "$destination/workerd" "$destination/lib/ld-linux-aarch64.so.1"
 "$destination/lib/ld-linux-aarch64.so.1" --library-path "$destination/lib" "$destination/workerd" --version
 cd "$destination"
-sha256sum workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
+sha256sum workerd guest-worker.bin lib/* licenses/* run.sh > checksums.txt

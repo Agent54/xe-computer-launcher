@@ -99,12 +99,16 @@ guest-worker: workerd
 	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
 	@mkdir -p "$(BUILD_DIR)/guest-worker"
 	@rsync -a --delete --delete-excluded --include='/workerd' --include='/lib/***' --include='/licenses/***' --exclude='*' "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
-	@cp ../workerd/dist/guest-worker.bin ../workerd/docker/run.sh ../workerd/docker/stop.sh "$(BUILD_DIR)/guest-worker/"
+	@cp ../workerd/dist/guest-worker.bin ../workerd/docker/run.sh "$(BUILD_DIR)/guest-worker/"
 	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
-	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh > checksums.txt
 	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 --check checksums.txt
 
-package: test smol-runtime guest-worker
+.PHONY: launcher-runtime
+launcher-runtime: smol-runtime guest-worker
+	@/bin/bash Scripts/derive-launcher-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(BUILD_DIR)/guest-worker"
+
+package: test launcher-runtime
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
@@ -131,7 +135,7 @@ package: test smol-runtime guest-worker
 	@cp Sources/macos/PortHelperLaunchDaemon.plist "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
 	@cp "$(BUILD_DIR)/workerd/Workerd.lock" "$(RESOURCES)/Workerd.lock"
 	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
-	@rsync -a --delete "$(BUILD_DIR)/guest-worker/" "$(RESOURCES)/GuestWorker/"
+	@rm -rf "$(RESOURCES)/GuestWorker"
 	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"
 	@cp ComposeUI.lock "$(RESOURCES)/"
 	@rm -f "$(RESOURCES)/Workerd.package.json"

@@ -21,6 +21,7 @@ for configuration in release debug; do
     assert_once 'Scripts/prepare-compose-server.sh'
     assert_once 'Scripts/prepare-container-tools.sh'
     assert_once 'Scripts/prepare-smol-runtime.sh'
+    assert_once 'Scripts/derive-launcher-runtime.sh'
     assert_once "BUILD_CONFIG=\"$configuration\" /bin/bash Scripts/test-runtime.sh"
     assert_once "cp \".build/$configuration/macos\""
     if printf '%s\n' "$plan" | grep -q 'swift build'; then

@@ -14,9 +14,15 @@ function values(path: string): Record<string, string> {
   return result;
 }
 
-const [artifact, metadataPath, expectedPath] = Deno.args;
+const [artifact, metadataPath, expectedPath, launcherFormat] = Deno.args;
 const metadata = values(metadataPath);
 const expected = values(expectedPath);
+if (launcherFormat && metadata.XE_RUNTIME_FORMAT !== launcherFormat) {
+  throw new Error("VM image does not contain the required launcher services");
+}
+if (launcherFormat && !/^[0-9a-f]{64}$/.test(metadata.XE_RUNTIME_INPUT_SHA256 ?? "")) {
+  throw new Error("VM image is missing its launcher input identity");
+}
 if (metadata.SMOLVM_RUNTIME_FORMAT !== "containerd-buildkit-2") {
   throw new Error("SmolVM image does not contain the required containerd store and embedded builder");
 }

@@ -12,6 +12,18 @@ enum SmolVMSetup {
     static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
     static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
     static let guestStacksDirectory = "/stacks"
+    static let runtimeFormat = "xe-launcher-1"
+
+    static func imageRevision(from metadata: String) throws -> String {
+        let prefix = "XE_RUNTIME_INPUT_SHA256="
+        let revisions = metadata.split(whereSeparator: \.isNewline)
+            .filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+        guard revisions.count == 1, let revision = revisions.first,
+              revision.count == 64, revision.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+            throw ContainerBuildTools.Failure("The bundled VM image identity is missing or invalid.")
+        }
+        return revision
+    }
 
     static var stacksURL: URL {
         let configured = ExternalState.shared.stringSetting("compose_storage_path")
@@ -32,16 +44,20 @@ enum SmolVMSetup {
         let machines = try await client.listMachines()
         try Task.checkCancellation()
         let existing = machines.first { $0.name == machineName }
+        let bundledRevision = try imageRevision(from: String(
+            contentsOf: SmolVMPaths.composeArtifactURL.deletingLastPathComponent().appendingPathComponent("Builder.lock"),
+            encoding: .utf8
+        ))
         // The VM image owns its engines. An old image cannot be upgraded by
         // mounting replacement executables from the launcher.
-        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != "containerd-buildkit-2" {
-            throw ContainerBuildTools.Failure("This VM uses an older runtime image. Back up its container data and explicitly recreate it with the bundled image; automatic migration is not supported.")
+        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != runtimeFormat ||
+            existing.labels?["dev.xe.computer.runtime-image"] != bundledRevision {
+            throw ContainerBuildTools.Failure("This VM uses a different runtime image. Back up its container data and explicitly recreate it with the bundled image; automatic migration is not supported.")
         }
         let existingStatus = existing != nil ? try await client.machineStatus(named: machineName) : nil
         let currentDiskGiB = existingStatus?.storageGiB
         let diskGiB = configuredResources.diskGiB(preserving: currentDiskGiB)
         // Host reserves gate resize actions, never startup with saved limits.
-        try await GuestRouter.shared.prepare()
 
         if existing != nil {
             // Restart a surviving VM with the runtime and mounts owned by this app.
@@ -49,10 +65,6 @@ enum SmolVMSetup {
             removeStaleSocketIfPresent()
         }
         try Task.checkCancellation()
-        let dockerConfigurationVolume = try DockerDaemonConfiguration.prepare(
-            in: SmolVMPaths.dataURL.appendingPathComponent("docker-config", isDirectory: true),
-            diskGiB: diskGiB
-        )
 
         if existing == nil {
             removeStaleSocketIfPresent()
@@ -63,10 +75,7 @@ enum SmolVMSetup {
                 cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
                 networkBackend: "virtio-net",
-                volumes: [
-                    "\(GuestRouter.sharedURL.path):\(GuestRouter.guestDirectory):ro",
-                    stacksVolume, dockerConfigurationVolume,
-                ],
+                volumes: [stacksVolume],
                 exposedSockets: [
                     "/var/run/docker.sock:\(dockerSocketURL.path)",
                     "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
@@ -74,18 +83,16 @@ enum SmolVMSetup {
                 labels: [
                     "dev.xe.computer.owner": "launcher",
                     "dev.xe.computer.purpose": "runtime",
-                    "dev.xe.computer.runtime-format": "containerd-buildkit-2",
-                    GuestRouter.configurationLabel: GuestRouter.configurationVersion,
-                ],
-                environment: DockerDaemonConfiguration.environment
+                    "dev.xe.computer.runtime-format": runtimeFormat,
+                    "dev.xe.computer.runtime-image": bundledRevision,
+                ]
             )
             try await client.createMachine(spec)
         } else {
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
-                volumes: [stacksVolume, dockerConfigurationVolume],
-                environment: DockerDaemonConfiguration.environment
+                volumes: [stacksVolume]
             )
         }
 

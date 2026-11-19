@@ -188,7 +188,11 @@ It verifies the containerd snapshotter stores data on the persistent disk, then
 loads an ARM64/AMD64 image with provenance and checks both platforms after restart.
 Fresh startup must not import the BuildKit image or create its container. After
 a build, VM restart and cache maintenance must leave that container stopped.
-There are no retries. Logs and the stopped test VM remain under
+The launcher-derived image must start its embedded router without a host resource
+or configuration mount. A real container serves a host `/stacks` file through
+the exposed router socket, before and after restart. Only the stacks mount and
+the Docker/router sockets cross this boundary; host TLS and UI stay on the Mac.
+Uploads are never retried. Logs and the stopped test VM remain under
 `macos/.build/builder-runtime-tests`. Only a short socket-path alias uses `/tmp`.
 Use `--baseline` with an older bundle to compare the old Docker upload path, or
 `--artifact /absolute/path/to/runtime.smolmachine` to test a local image build.

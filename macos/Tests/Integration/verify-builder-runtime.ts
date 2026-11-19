@@ -26,6 +26,10 @@ const resources = join(bundle, "Contents/Resources/SmolRuntime");
 const tools = join(bundle, "Contents/Resources/ContainerTools");
 const plugin = join(tools, "cli-plugins/docker-buildx");
 const socketPath = join(short, "docker.sock");
+const routerSocket = join(short, "workerd.sock");
+const stacks = join(root, "stacks");
+await Deno.mkdir(stacks);
+await Deno.writeTextFile(join(stacks, "index.html"), "host-file-before-restart");
 const home = join(root, "home");
 await Deno.mkdir(join(home, ".smolvm"), { recursive: true });
 for (const name of ["storage-template.ext4.zst", "overlay-template.ext4.zst"]) {
@@ -61,11 +65,19 @@ async function request(method: string, path: string, body?: Buffer | Iterable<Bu
   return data;
 }
 const json = async (path: string) => JSON.parse((await request("GET", path)).toString());
+// Workerd requires origin-form HTTP requests. Curl's Unix transport sends that
+// form, matching the launcher; Deno's proxy transport sends absolute-form URLs.
+const routerRequest = (path: string, headers: Record<string, string> = {}, origin = "http://localhost") =>
+  run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "120", "--unix-socket", routerSocket,
+    ...Object.entries(headers).flatMap(([key, value]) => ["--header", `${key}: ${value}`]), `${origin}${path}`]);
 async function ready() {
   let lastError: unknown;
   for (let attempt = 0; attempt < 90; attempt++) {
     try {
-      if ((await request("GET", "/_ping")).toString() === "OK") return;
+      if ((await request("GET", "/_ping")).toString() === "OK") {
+        if (!options.baseline) assert.equal(await routerRequest("/__xe_router_health"), "ready");
+        return;
+      }
     } catch (error) {
       // Fetch reports connection failures as TypeError while Docker starts.
       // Uploads themselves are never retried; preserve the readiness error.
@@ -131,13 +143,10 @@ try {
     "--net-backend", "virtio-net", "--mem", "6144", "--cpus", "4", "--storage", "20",
     "--expose-socket", `/var/run/docker.sock:${socketPath}`];
   if (!options.baseline) {
-    const configuration = join(root, "docker-config");
-    await Deno.mkdir(configuration);
-    await Deno.writeTextFile(join(configuration, "daemon.json"), JSON.stringify({
-      pidfile: "/run/docker.pid", restart: false,
-      features: { "containerd-snapshotter": true }, builder: { gc: { enabled: false } },
-    }));
-    args.push("--volume", `${configuration}:/etc/docker:ro`);
+    args.push("--volume", `${stacks}:/stacks:rw`, "--expose-socket", `/run/xe-router/workerd.sock:${routerSocket}`);
+    const metadata = await Deno.readTextFile(options.artifact ? `${options.artifact}.builder.lock` : join(resources, "Builder.lock"));
+    assert(metadata.includes("XE_RUNTIME_FORMAT=xe-launcher-1\n"), "Expected the launcher-derived image");
+    if (!options.artifact) await assert.rejects(() => Deno.stat(join(bundle, "Contents/Resources/GuestWorker")), Deno.errors.NotFound);
   }
   await machine(...args);
   created = true;
@@ -156,6 +165,13 @@ try {
     assert.equal(info.Driver, "overlayfs");
     assert.equal(Object.fromEntries(info.DriverStatus)["driver-type"], "io.containerd.snapshotter.v1");
     await checkStorage();
+    assert.equal(info.LoggingDriver, "local");
+    await guest("sh", "-ec", 'test -x /opt/xe/guest-worker/workerd; ' +
+      '! grep -Eq " /(etc/docker|opt/xe/guest-worker|opt/image-router|opt/image-recipe) " /proc/self/mountinfo; ' +
+      'test "$(cat /stacks/index.html)" = host-file-before-restart; ' +
+      '! echo "$PATH" | grep -q /etc/docker/startup; ' +
+      '! grep -q "find /run /var/run" /usr/local/bin/dockerd-entrypoint.sh');
+    console.log("PASS image-owned router and configuration; host stacks mount and both exposed sockets work");
     console.log("PASS containerd image store uses the persistent ext4 disk");
   }
   for (let index = 0; index < 12; index++) await checkUpload(index);
@@ -174,15 +190,50 @@ try {
     assert.deepEqual(await json("/v1.51/containers/json?all=1"), []);
     assert.deepEqual(await json("/v1.51/images/json"), []);
     console.log("PASS idle VM, plugin discovery and maintenance do not import or start BuildKit");
+    // Serve a real host-mounted file through Docker's container network and the
+    // exposed router socket. All binaries come from the guest; no registry pull.
+    const routeContext = join(root, "route-context");
+    await Deno.mkdir(routeContext);
+    for (const [source, name] of [["/bin/busybox", "busybox"], ["/lib/ld-musl-aarch64.so.1", "ld-musl-aarch64.so.1"]]) {
+      await machine("cp", `xe-builder-test:${source}`, join(routeContext, name));
+    }
+    await Deno.copyFile(resolve(import.meta.dirname!, "../Fixtures/route-probe.capnp"), join(routeContext, "server.capnp"));
+    await Deno.writeTextFile(join(routeContext, "Dockerfile"), 'FROM scratch\nCOPY --chmod=755 busybox /bin/busybox\nCOPY --chmod=755 ld-musl-aarch64.so.1 /lib/ld-musl-aarch64.so.1\nCOPY server.capnp /server.capnp\nENTRYPOINT ["/runtime/lib/ld-linux-aarch64.so.1", "--library-path", "/runtime/lib", "/runtime/workerd", "serve", "/server.capnp"]\n');
+    await run([plugin, "build", "--builder", "xe", "--load", "--tag", "xe-router-probe", routeContext], clientEnv);
+    const routeContainer = JSON.parse((await request("POST", "/v1.51/containers/create", Buffer.from(JSON.stringify({
+      Image: "xe-router-probe", ExposedPorts: { "8080/tcp": {} },
+      Healthcheck: { Test: ["CMD", "/bin/busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/index.html"], Interval: 1_000_000_000, Timeout: 1_000_000_000, Retries: 5 },
+      Labels: { "com.docker.compose.project": "route-probe", "com.docker.compose.service": "probe" },
+      HostConfig: { Binds: ["/stacks:/www:ro", "/opt/xe/guest-worker:/runtime:ro"], PortBindings: { "8080/tcp": [{ HostPort: "18080" }] } },
+    })), { "Content-Type": "application/json" })).toString()).Id;
+    const checkRoute = async (expected: string) => {
+      await request("POST", `/v1.51/containers/${routeContainer}/start`);
+      let healthy = false;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        const container = await json(`/v1.51/containers/${routeContainer}/json`);
+        if (container.State.Health?.Status === "healthy") { healthy = true; break; }
+        if (!container.State.Running || container.State.Health?.Status === "unhealthy") break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      assert(healthy, await guest("docker", "logs", routeContainer));
+      assert.equal(await routerRequest("/index.html", {
+        "x-xe-container-id": routeContainer, "x-xe-target-port": "8080", "x-xe-published-port": "18080",
+      }, "http://probe.localhost"), expected);
+      console.log("PASS host → router socket → container → host-mounted file");
+    };
+    await checkRoute("host-file-before-restart");
     const context = join(root, "context");
     await Deno.mkdir(context);
     await Deno.writeTextFile(join(context, "Dockerfile"), "FROM scratch\nCOPY payload.bin /payload.bin\n");
     for (let boot = 0; boot < 2; boot++) {
       if (boot) {
+        await Deno.writeTextFile(join(stacks, "index.html"), "host-file-after-restart");
         await machine("stop", "--name", "xe-builder-test");
         started = performance.now();
         await machine("start", "--name", "xe-builder-test");
         await ready();
+        assert.equal((await json(`/v1.51/containers/${routeContainer}/json`)).State.Running, false);
+        await checkRoute("host-file-after-restart");
         for (const architecture of ["arm64", "amd64"]) {
           const platform = encodeURIComponent(JSON.stringify({ os: "linux", architecture }));
           assert.equal((await json(`/v1.51/images/xe-persistence-probe/json?platform=${platform}`)).Architecture, architecture);
@@ -223,6 +274,19 @@ try {
     assert((await guest("/usr/local/bin/docker", "exec", "buildx_buildkit_xe0", "buildkitd", "--version")).includes(`v${values.BUILDKIT_VERSION} `));
     assert((await run(compose, { ...clientEnv, DOCKER_BUILDKIT: "0" }, false)).includes("classic builds are disabled"));
     console.log("PASS Compose rejects the classic builder");
+    await guest("pkill", "-TERM", "-f", "^/opt/xe/guest-worker/lib/ld-linux-aarch64.so.1 ");
+    let exited = false;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const status = JSON.parse(await machine("status", "--name", "xe-builder-test", "--json"));
+      if (status.workload?.state === "exited") { exited = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    assert(exited, "Router failure must stop the workload for the host supervisor to observe");
+    await machine("stop", "--name", "xe-builder-test");
+    await machine("start", "--name", "xe-builder-test");
+    await ready();
+    assert.equal((await json("/v1.51/containers/buildx_buildkit_xe0/json")).State.Running, false);
+    console.log("PASS router failure exits the workload; VM restart restores routing without host deployment");
   }
   console.log("PASS: no retries or corrupted uploads");
 } finally {
