@@ -178,7 +178,7 @@ folder. Inspect launcher logs and the final backend error when readiness fails.
 
 ### Builder and upload integrity
 
-Run `python3 macos/Tests/Integration/verify-builder-runtime.py "macos/dist/Xe Launcher.app"`
+Run `deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"`
 from the repository root on an Apple Silicon Mac with virtualization available.
 The test uses a disposable VM and leaves the installed launcher's VM untouched.
 It checks repeated plain/gzip, chunked/fixed-length uploads up to 64 MiB by

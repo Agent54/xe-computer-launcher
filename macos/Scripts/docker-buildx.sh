@@ -18,29 +18,22 @@ case "${1:-}" in
         ;;
     __xe_prepare)
         . "$resources/ContainerTools.lock"
-        # The artifact records its imported manifest identity; configuration
-        # identity alone is not an image reference in the containerd store.
-        BUILDKIT_IMAGE_ID="$(sed -n 's/^BUILDKIT_IMAGE_ID=//p' "$resources/../SmolRuntime/Builder.lock")"
-        : "${BUILDKIT_IMAGE_ID:?Missing bundled BuildKit manifest identity}"
         : "${XE_SMOLVM_DATA_DIR:?Missing managed VM data directory}"
         : "${XE_SMOLVM_HOME:?Missing managed VM home}"
         : "${XE_SMOLVM_MACHINE:?Missing managed VM name}"
-        HOME="$XE_SMOLVM_HOME" SMOLVM_DATA_DIR="$XE_SMOLVM_DATA_DIR" \
+        image_id="$(HOME="$XE_SMOLVM_HOME" SMOLVM_DATA_DIR="$XE_SMOLVM_DATA_DIR" \
             SMOLVM_LIB_DIR="$helpers/SmolRuntime/lib" \
             DYLD_LIBRARY_PATH="$helpers/SmolRuntime/lib" \
             SMOLVM_AGENT_ROOTFS_TAR="$helpers/../Resources/SmolRuntime/agent-rootfs.tar" \
             "$helpers/SmolRuntime/smolvm-bin" machine exec --name "$XE_SMOLVM_MACHINE" --timeout 180s -- \
-            /usr/local/share/xe-builder/prepare-builder.sh "$DOCKER_VERSION" "$BUILDKIT_IMAGE_ID" </dev/null >&2
+            /usr/local/share/xe-builder/prepare-builder.sh "$DOCKER_VERSION" "$BUILDKIT_IMAGE" </dev/null)"
+        : "${image_id:?Guest Docker did not return a BuildKit image ID}"
         # Buildx owns locking and atomic writes of its node configuration.
-        if [ -f "$BUILDX_CONFIG/instances/xe" ]; then
-            "$buildx" create --name xe --node xe0 --append --driver docker-container \
-                --driver-opt "image=$BUILDKIT_IMAGE_ID" --driver-opt restart-policy=no \
-                --driver-opt default-load=true --buildkitd-config "$resources/buildkitd.toml" "$DOCKER_HOST" </dev/null >&2
-        else
-            "$buildx" create --name xe --node xe0 --driver docker-container \
-                --driver-opt "image=$BUILDKIT_IMAGE_ID" --driver-opt restart-policy=no \
-                --driver-opt default-load=true --buildkitd-config "$resources/buildkitd.toml" "$DOCKER_HOST" </dev/null >&2
-        fi
+        set --
+        if [ -f "$BUILDX_CONFIG/instances/xe" ]; then set -- --append; fi
+        "$buildx" create --name xe --node xe0 "$@" --driver docker-container \
+            --driver-opt "image=$image_id" --driver-opt restart-policy=no \
+            --driver-opt default-load=true --buildkitd-config "$resources/buildkitd.toml" "$DOCKER_HOST" </dev/null >&2
         exit 0
         ;;
 esac

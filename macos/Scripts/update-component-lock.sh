@@ -301,7 +301,7 @@ case "$component" in
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$runtime_asset" "$runtime_checksum"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset" "$compose_checksum"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset.builder.lock" "$builder_checksum"
-        python3 "$repository_root/macos/Scripts/verify-runtime-metadata.py" "$compose_path" "$builder_path" "$repository_root/macos/ContainerTools.lock"
+        deno run --no-config --allow-read "$repository_root/macos/Scripts/verify-runtime-metadata.ts" "$compose_path" "$builder_path" "$repository_root/macos/ContainerTools.lock"
         replace_lock_value SMOLVM_VERSION "$smolvm_version" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RELEASE_TAG "$release_tag" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RUNTIME_SHA256 "$runtime_checksum" "$repository_root/$lock_file"

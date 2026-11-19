@@ -96,7 +96,7 @@ else
     verify_asset "$compose_path" "$SMOLVM_COMPOSE_SHA256"
     verify_asset "$builder_metadata" "$SMOLVM_BUILDER_SHA256"
 fi
-python3 "$script_dir/verify-runtime-metadata.py" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
+deno run --no-config --allow-read "$script_dir/verify-runtime-metadata.ts" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
 
 empty_dir="$macos_dir/.build/empty"
 mkdir -p "$destination" "$empty_dir"

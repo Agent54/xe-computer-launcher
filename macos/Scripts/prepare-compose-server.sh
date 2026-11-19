@@ -9,7 +9,7 @@ destination="${1:?usage: prepare-compose-server.sh DESTINATION}"
 source_dir="${COMPOSE_SERVER_SOURCE_DIR:-}"
 
 verify_builder_policy() {
-    "$1" version --format json | python3 -c 'import json,sys; info=json.load(sys.stdin); sys.exit(0 if info.get("builder") == "buildkit" else "Compose asset still supports classic builds; build the updated source or update the release pin")'
+    "$1" version --format json | deno run --no-config "$script_dir/verify-compose-builder.ts"
 }
 
 if [[ -n "$source_dir" ]]; then
