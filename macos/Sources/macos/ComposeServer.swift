@@ -119,7 +119,7 @@ final class ComposeServer {
         let child = Process()
         child.executableURL = executableURL
         child.arguments = [
-            "serve", "--socket", socketURL.path,
+            "--no-classic-builder", "serve", "--socket", socketURL.path,
             "--guest-stacks-path", SmolVMSetup.guestStacksDirectory, stacksURL.path,
         ]
         child.currentDirectoryURL = stacksURL

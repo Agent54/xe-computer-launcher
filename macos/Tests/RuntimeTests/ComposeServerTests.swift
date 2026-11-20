@@ -41,7 +41,8 @@ struct ComposeServerTests {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let helper = root.appendingPathComponent("helper")
-        try Data("#!/bin/sh\nexit 42\n".utf8).write(to: helper)
+        // The policy is a root flag and must precede the serve subcommand.
+        try Data("#!/bin/sh\n[ \"$1\" = --no-classic-builder ] && [ \"$2\" = serve ] || exit 43\nexit 42\n".utf8).write(to: helper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
         let server = ComposeServer(executableURL: helper, stacksURL: root, socketURL: root.appendingPathComponent("compose.sock"), prepareBuilder: { _ in [:] }, log: { _ in })
         do {

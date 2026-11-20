@@ -285,13 +285,13 @@ try {
     // COPY --link requires BuildKit, giving positive evidence beyond optional labels.
     await Deno.writeTextFile(join(context, "Dockerfile"), "FROM scratch\nCOPY --link payload.bin /payload.bin\n");
     await Deno.writeTextFile(join(context, "compose.yaml"), "name: xe-build-probe\nservices:\n  probe:\n    build: .\n    image: xe-compose-build-probe\n");
-    const compose = [join(bundle, "Contents/Helpers/docker-compose"), "-f", join(context, "compose.yaml"), "build"];
+    const compose = [join(bundle, "Contents/Helpers/docker-compose"), "--no-classic-builder", "-f", join(context, "compose.yaml"), "build"];
     await run(compose, clientEnv);
     const image = await json("/v1.51/images/xe-compose-build-probe/json");
     assert.notEqual(image.Config.Labels?.["com.docker.compose.image.builder"], "classic");
     console.log("PASS bundled Compose uses BuildKit");
     assert((await guest("/usr/local/bin/docker", "exec", "buildx_buildkit_xe0", "buildkitd", "--version")).includes(`v${values.BUILDKIT_VERSION} `));
-    assert((await run(compose, { ...clientEnv, DOCKER_BUILDKIT: "0" }, false)).includes("classic builds are disabled"));
+    assert((await run(compose, { ...clientEnv, DOCKER_BUILDKIT: "0" }, false)).includes("BuildKit is required by --no-classic-builder"));
     console.log("PASS Compose rejects the classic builder");
     await guest("pkill", "-TERM", "-f", "^/opt/xe/guest-worker/lib/ld-linux-aarch64.so.1 ");
     let exited = false;
