@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-macos_dir="$(cd "$(dirname "$0")/.." && pwd)"
+macos_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$macos_dir/ComposeUI.lock"
-destination="${1:?usage: prepare-compose-ui.sh DESTINATION}"
+destination="${1:?usage: stage-compose-ui.sh DESTINATION}"
 if [[ -n "${COMPOSE_UI_SOURCE_DIR:-}" ]]; then
     [[ -z "${COMPOSE_UI_ASSET_DIR:-}" ]] || {
         echo "Set either COMPOSE_UI_SOURCE_DIR or COMPOSE_UI_ASSET_DIR, not both." >&2; exit 1;

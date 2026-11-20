@@ -5,7 +5,7 @@ set -euo pipefail
 component="${1:?usage: update-component-lock.sh COMPONENT [RELEASE_TAG]}"
 requested_tag="${2:-}"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-repository_root="${XE_LAUNCHER_ROOT:-$(cd "$script_dir/../.." && pwd)}"
+repository_root="${XE_LAUNCHER_ROOT:-$(cd "$script_dir/../../.." && pwd)}"
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf "$temporary_dir"' EXIT
 
@@ -301,7 +301,7 @@ case "$component" in
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$runtime_asset" "$runtime_checksum"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset" "$compose_checksum"
         verify_published_checksum "$repository" "$release_tag" checksums.sha256 "$compose_asset.builder.lock" "$builder_checksum"
-        deno run --no-config --allow-read "$repository_root/macos/Scripts/verify-runtime-metadata.ts" "$compose_path" "$builder_path" "$repository_root/macos/ContainerTools.lock"
+        deno run --no-config --allow-read "$repository_root/macos/Build/mac/verify-vm-artifact.ts" "$compose_path" "$builder_path" "$repository_root/macos/ContainerTools.lock"
         replace_lock_value SMOLVM_VERSION "$smolvm_version" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RELEASE_TAG "$release_tag" "$repository_root/$lock_file"
         replace_lock_value SMOLVM_RUNTIME_SHA256 "$runtime_checksum" "$repository_root/$lock_file"

@@ -25,7 +25,7 @@ struct VMImageTests {
     /// Run the image's actual cleanup script with only its fixed PID path
     /// redirected to a workspace fixture. Never touch the host's /run.
     private func cleanup(in directory: URL, pidFile: URL) throws -> Int32 {
-        let script = try String(contentsOf: macosURL.appendingPathComponent("VM/cleanup-docker-pid.sh"), encoding: .utf8)
+        let script = try String(contentsOf: macosURL.appendingPathComponent("Runtime/vm/cleanup-docker-pid.sh"), encoding: .utf8)
             .replacingOccurrences(of: "/run/docker.pid", with: #""$TEST_DOCKER_PID_FILE""#)
         let wrapper = directory.appendingPathComponent("cleanup.sh")
         try Data(script.utf8).write(to: wrapper)
@@ -87,7 +87,7 @@ struct VMImageTests {
     }
 
     @Test func imageDefaultsMatchLauncherMaintenancePolicy() throws {
-        let data = try Data(contentsOf: macosURL.appendingPathComponent("VM/daemon.json"))
+        let data = try Data(contentsOf: macosURL.appendingPathComponent("Runtime/vm/daemon.json"))
         let config = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(config["pidfile"] as? String == "/run/docker.pid")
         #expect(config["restart"] as? Bool == false)

@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-source_runtime="${1:?usage: install-smol-runtime.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
-helpers_destination="${2:?usage: install-smol-runtime.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
-resources_destination="${3:?usage: install-smol-runtime.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
+source_runtime="${1:?usage: copy-smol-into-app.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
+helpers_destination="${2:?usage: copy-smol-into-app.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
+resources_destination="${3:?usage: copy-smol-into-app.sh SOURCE HELPERS_DESTINATION RESOURCES_DESTINATION}"
 
 helpers_suffix="/Contents/Helpers/SmolRuntime"
 resources_suffix="/Contents/Resources/SmolRuntime"

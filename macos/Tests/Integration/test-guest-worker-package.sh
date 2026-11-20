@@ -6,7 +6,7 @@ mkdir -p "$MACOS_DIR/.build"
 TEST_ROOT="$(mktemp -d "$MACOS_DIR/.build/guest-worker-package-tests.XXXXXX")"
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
-mkdir -p "$TEST_ROOT/macos" "$TEST_ROOT/workerd/dist" "$TEST_ROOT/workerd/docker" \
+mkdir -p "$TEST_ROOT/macos" "$TEST_ROOT/workerd/dist" "$TEST_ROOT/workerd/Runtime/vm" \
     "$TEST_ROOT/assets/lib" "$TEST_ROOT/assets/licenses" "$TEST_ROOT/assets/host-worker/devtools" \
     "$TEST_ROOT/build/guest-worker/host-worker"
 printf 'linux runtime\n' > "$TEST_ROOT/assets/workerd"
@@ -21,7 +21,7 @@ printf 'host devtools\n' > "$TEST_ROOT/assets/host-worker/devtools/inspector.htm
 printf 'unrelated build output\n' > "$TEST_ROOT/assets/guest-runtime.ldd"
 printf 'stale host source\n' > "$TEST_ROOT/build/guest-worker/host-worker/config.capnp"
 printf 'fresh guest config\n' > "$TEST_ROOT/workerd/dist/guest-worker.bin"
-printf 'fresh run script\n' > "$TEST_ROOT/workerd/docker/run.sh"
+printf 'fresh run script\n' > "$TEST_ROOT/workerd/Runtime/vm/start-router.sh"
 (
     cd "$TEST_ROOT/assets"
     shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh stop.sh > checksums.txt
@@ -39,8 +39,8 @@ cmp "$TEST_ROOT/assets/workerd" "$stage/workerd"
 cmp "$TEST_ROOT/assets/lib/libc.so.6" "$stage/lib/libc.so.6"
 cmp "$TEST_ROOT/assets/licenses/workerd-README.md" "$stage/licenses/workerd-README.md"
 cmp "$TEST_ROOT/workerd/dist/guest-worker.bin" "$stage/guest-worker.bin"
-cmp "$TEST_ROOT/workerd/docker/run.sh" "$stage/run.sh"
-[[ ! -e "$stage/stop.sh" ]]
+cmp "$TEST_ROOT/workerd/Runtime/vm/start-router.sh" "$stage/start-router.sh"
+[[ ! -e "$stage/run.sh" && ! -e "$stage/stop.sh" ]]
 [[ -x "$stage/workerd" && -x "$stage/lib/ld-linux-aarch64.so.1" ]]
 (
     cd "$stage"

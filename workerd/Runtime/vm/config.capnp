@@ -6,9 +6,9 @@ const config :Workerd.Config = (
       compatibilityDate = "2026-04-05",
       compatibilityFlags = ["experimental"],
       modules = [
-        (name = "router.js", esModule = embed "../router.js"),
-        (name = "startup-response.js", esModule = embed "../startup-response.js"),
-        (name = "socket-bridge.js", esModule = embed "../socket-bridge.js"),
+        (name = "router.js", esModule = embed "../../router.js"),
+        (name = "startup-response.js", esModule = embed "../../startup-response.js"),
+        (name = "socket-bridge.js", esModule = embed "../../socket-bridge.js"),
       ],
       globalOutbound = "containers",
       bindings = [(name = "DOCKER", service = "docker")],

@@ -117,3 +117,9 @@ the same diagnostic fields as JSON. Errors returned by a reached application
 retain the application's response while the runtime is healthy. Native HTTPS
 passthrough apps own TLS; failures before their handshake completes cannot
 display an HTTP error page.
+## Script execution locations
+
+`Build/mac/` contains host-worker packaging scripts for the build Mac.
+`Build/linux/` packages the Linux ARM64 guest worker on CI.
+`Runtime/vm/` contains the guest router's startup script and configuration,
+which are baked into the VM image. Tests remain under `tests/`.

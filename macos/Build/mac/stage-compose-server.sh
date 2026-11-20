@@ -2,10 +2,10 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-macos_dir="$(dirname "$script_dir")"
+macos_dir="$(cd "$script_dir/../.." && pwd)"
 source "$macos_dir/ComposeServer.lock"
 
-destination="${1:?usage: prepare-compose-server.sh DESTINATION}"
+destination="${1:?usage: stage-compose-server.sh DESTINATION}"
 source_dir="${COMPOSE_SERVER_SOURCE_DIR:-}"
 
 verify_builder_policy() {

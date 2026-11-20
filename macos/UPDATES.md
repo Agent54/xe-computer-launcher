@@ -170,7 +170,7 @@ incompatible or the patch would not be meaningfully smaller than the full DMG.
 Verify a locally assembled application bundle:
 
 ```sh
-macos/Tests/Integration/verify-sparkle.sh \
+macos/Build/mac/verify-sparkle.sh \
   "macos/dist/Xe Launcher.app"
 ```
 
@@ -181,7 +181,7 @@ settings, and all nested code signatures.
 Verify a generated or published appcast:
 
 ```sh
-macos/Tests/Integration/verify-appcast.sh \
+macos/Build/mac/verify-appcast.sh \
   /path/to/appcast.xml \
   EXPECTED_BUILD_VERSION \
   https://github.com/Agent54/xe-darc-launcher/releases/download/RELEASE/Xe-Launcher.dmg \

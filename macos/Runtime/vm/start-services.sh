@@ -13,7 +13,7 @@ stop() {
     wait "$docker_pid" 2>/dev/null || :
 }
 trap 'stop; exit 0' TERM INT
-/opt/xe/guest-worker/run.sh &
+/opt/xe/guest-worker/start-router.sh &
 router_pid=$!
 /usr/local/bin/dockerd-entrypoint.sh "$@" &
 docker_pid=$!

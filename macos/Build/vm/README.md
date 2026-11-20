@@ -8,6 +8,15 @@ Docker/BuildKit image and VM machinery.
 Assembly requires virtualization on the Apple Silicon build Mac; unchanged
 inputs reuse the cached image without booting a build VM.
 
+`../mac/build-launcher-image.sh` orchestrates assembly on the build Mac.
+`install-launcher-files.sh` runs once inside the temporary assembly VM.
+`launcher.smolfile` declares the resulting machine's startup configuration.
+The files shipped for normal VM operation live in `../../Runtime/vm/`;
+the router startup script lives in `../../../workerd/Runtime/vm/`.
+The assembly VM mounts these inputs separately at `/opt/image-recipe`,
+`/opt/image-runtime`, and `/opt/image-router`. Those build mounts are not part
+of the installed machine.
+
 The build installs the compiled guest router, its Linux workerd executable and
 libraries, and the fixed Docker daemon configuration. It replaces DinD's
 recursive PID cleanup with cleanup of `/run/docker.pid`. Docker's upstream

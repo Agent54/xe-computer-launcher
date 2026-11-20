@@ -335,7 +335,7 @@ jobs:
         run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
 
       - name: Verify Sparkle bundle integration
-        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel "${{ steps.version.outputs.update_channel }}"
+        run: macos/Build/mac/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel "${{ steps.version.outputs.update_channel }}"
 
       - name: Run launcher integration test (Standard user)
         env:
@@ -490,7 +490,7 @@ jobs:
             echo "::warning::Sparkle did not produce an efficient compatible delta from the available base archives."
           fi
 
-          macos/Tests/Integration/verify-appcast.sh \
+          macos/Build/mac/verify-appcast.sh \
             "$update_dir/appcast.xml" \
             "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg" \
@@ -597,7 +597,7 @@ jobs:
           max_attempts=30
           for ((attempt = 1; attempt <= max_attempts; attempt++)); do
             feed_url="$feed_base_url?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$attempt"
-            if macos/Tests/Integration/verify-appcast.sh \
+            if macos/Build/mac/verify-appcast.sh \
               "$feed_url" \
               "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
               "$asset_url" \

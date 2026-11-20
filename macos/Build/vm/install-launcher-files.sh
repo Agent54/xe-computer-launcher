@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 mkdir -p /opt/xe/runtime /opt/xe/guest-worker /etc/docker
-cp /opt/image-recipe/start.sh /opt/image-recipe/cleanup-docker-pid.sh /opt/xe/runtime/
-cp /opt/image-recipe/daemon.json /etc/docker/daemon.json
+cp /opt/image-runtime/start-services.sh /opt/image-runtime/cleanup-docker-pid.sh /opt/xe/runtime/
+cp /opt/image-runtime/daemon.json /etc/docker/daemon.json
 cp -R /opt/image-router/. /opt/xe/guest-worker/
-chmod 755 /opt/xe/runtime/*.sh /opt/xe/guest-worker/run.sh
+chmod 755 /opt/xe/runtime/*.sh /opt/xe/guest-worker/start-router.sh
 cd /opt/xe/guest-worker
 sha256sum -c checksums.txt
 ./lib/ld-linux-aarch64.so.1 --library-path ./lib ./workerd --version

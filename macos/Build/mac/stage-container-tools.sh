@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 source ContainerTools.lock
 stage="$PWD/.build/container-tools"
 downloads="$stage/downloads"
@@ -23,7 +23,7 @@ fetch() {
 fetch "buildx-v$BUILDX_VERSION.darwin-arm64" \
     "https://github.com/docker/buildx/releases/download/v$BUILDX_VERSION/buildx-v$BUILDX_VERSION.darwin-arm64" "$BUILDX_DARWIN_ARM64_SHA256"
 cp "$downloads/buildx-v$BUILDX_VERSION.darwin-arm64" "$stage/Helpers/buildx"
-cp Scripts/docker-buildx.sh "$stage/Resources/ContainerTools/cli-plugins/docker-buildx"
+cp Runtime/mac/docker-buildx.sh "$stage/Resources/ContainerTools/cli-plugins/docker-buildx"
 cp ContainerTools.lock ContainerTools/buildkitd.toml "$stage/Resources/ContainerTools/"
 chmod 755 "$stage/Helpers/buildx" "$stage/Resources/ContainerTools/cli-plugins/docker-buildx"
 file "$stage/Helpers/buildx" | grep -q 'Mach-O 64-bit executable arm64'

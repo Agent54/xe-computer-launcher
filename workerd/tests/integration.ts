@@ -420,7 +420,7 @@ try {
     '--external-addr', `maintenance=unix:${join(root, 'maintenance.sock')}`,
     '--external-addr', `cdp=unix:${cdpPath}`,
     '--external-addr', `ui-tls=unix:${uiSocketPath}`]);
-  const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'docker/config.capnp');
+  const guestPath = packaged ? join(root, 'guest-worker.bin') : join(workerDir, 'Runtime/vm/config.capnp');
   if (packaged) await Deno.copyFile(guestConfig!, guestPath);
   const startRouter = () => startProcess(binary, ['serve', '--experimental', ...(packaged ? ['--binary'] : []), guestPath,
     '--socket-addr', `router=unix:${routerPath}`, '--external-addr', `docker=unix:${dockerPath}`]);

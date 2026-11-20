@@ -95,7 +95,7 @@ jobs:
           GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN || github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
-        run: bash macos/Scripts/update-component-lock.sh '${{ matrix.component }}' "$RELEASE_TAG"
+        run: bash macos/Build/mac/update-component-lock.sh '${{ matrix.component }}' "$RELEASE_TAG"
 
       - name: Verify updated component
         if: steps.update.outputs.updated == 'true'

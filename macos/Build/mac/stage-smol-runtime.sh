@@ -3,10 +3,10 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-macos_dir="$(dirname "$script_dir")"
+macos_dir="$(cd "$script_dir/../.." && pwd)"
 source "$macos_dir/SmolVM.lock"
 
-destination="${1:?usage: prepare-smol-runtime.sh DESTINATION}"
+destination="${1:?usage: stage-smol-runtime.sh DESTINATION}"
 expected_destination="$macos_dir/.build/smol-runtime/SmolRuntime"
 if [[ "$destination" == ".build/smol-runtime/SmolRuntime" ]]; then
     destination="$expected_destination"
@@ -94,7 +94,7 @@ else
     verify_asset "$compose_path" "$SMOLVM_COMPOSE_SHA256"
     verify_asset "$builder_metadata" "$SMOLVM_BUILDER_SHA256"
 fi
-deno run --no-config --allow-read "$script_dir/verify-runtime-metadata.ts" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
+deno run --no-config --allow-read "$script_dir/verify-vm-artifact.ts" "$compose_path" "$builder_metadata" "$macos_dir/ContainerTools.lock"
 runtime_path="$(resolve_asset "$runtime_asset")"
 verify_asset "$runtime_path" "$SMOLVM_RUNTIME_SHA256"
 

@@ -169,7 +169,7 @@ try {
     await checkStorage();
     assert.equal(info.LoggingDriver, "local");
     await guest("sh", "-ec", 'test -x /opt/xe/guest-worker/workerd; ' +
-      'if grep -Eq " /(etc/docker|opt/xe/guest-worker|opt/image-router|opt/image-recipe) " /proc/self/mountinfo; then exit 1; fi; ' +
+      'if grep -Eq " /(etc/docker|opt/xe/guest-worker|opt/image-router|opt/image-recipe|opt/image-runtime) " /proc/self/mountinfo; then exit 1; fi; ' +
       'test "$(cat /stacks/index.html)" = host-file-before-restart; ' +
       'if echo "$PATH" | grep -q /etc/docker/startup; then exit 1; fi; ' +
       'if grep -q "find /run /var/run" /usr/local/bin/dockerd-entrypoint.sh; then exit 1; fi');

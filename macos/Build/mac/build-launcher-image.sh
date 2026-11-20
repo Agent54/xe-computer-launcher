@@ -1,18 +1,19 @@
 #!/bin/bash
 # Derive the app image from SmolVM's generic Compose artifact, entirely offline.
 set -euo pipefail
-macos_dir="$(cd "$(dirname "$0")/.." && pwd -P)"
-runtime="$(cd "${1:?usage: derive-launcher-runtime.sh STAGED_RUNTIME ROUTER}" && pwd -P)"
+macos_dir="$(cd "$(dirname "$0")/../.." && pwd -P)"
+runtime="$(cd "${1:?usage: build-launcher-image.sh STAGED_RUNTIME ROUTER}" && pwd -P)"
 router="$(cd "${2:?Missing staged router}" && pwd -P)"
-recipe="$macos_dir/VM"
+recipe="$macos_dir/Build/vm"
+guest_runtime="$macos_dir/Runtime/vm"
 base="$runtime/docker-compose.smolmachine"
-deno run --no-config --allow-read "$macos_dir/Scripts/verify-runtime-metadata.ts" "$base" "$runtime/Builder.lock" "$macos_dir/ContainerTools.lock"
+deno run --no-config --allow-read "$macos_dir/Build/mac/verify-vm-artifact.ts" "$base" "$runtime/Builder.lock" "$macos_dir/ContainerTools.lock"
 (cd "$router" && shasum -a 256 --check checksums.txt)
 revision="$(
     {
         cat "$runtime/Builder.lock" "$router/checksums.txt"
         cd "$macos_dir"
-        shasum -a 256 VM/*.sh VM/launcher.smolfile VM/daemon.json
+        shasum -a 256 Build/vm/*.sh Build/vm/launcher.smolfile Runtime/vm/*.sh Runtime/vm/daemon.json
     } | shasum -a 256 | awk '{print $1}'
 )"
 key="$(printf '%s\n' "$revision" "$(shasum -a 256 "$0" | awk '{print $1}')" | shasum -a 256 | awk '{print $1}')"
@@ -39,11 +40,12 @@ if [[ ! -f "$artifact" || ! -f "$metadata" ]]; then
     }
     trap cleanup EXIT
     "$smolvm" machine create --name "$machine" --from "$base" \
-        --volume "$recipe:/opt/image-recipe:ro" --volume "$router:/opt/image-router:ro" \
+        --volume "$recipe:/opt/image-recipe:ro" --volume "$guest_runtime:/opt/image-runtime:ro" \
+        --volume "$router:/opt/image-router:ro" \
         -- /bin/sh -c 'sleep 2147483647'
     created=1
     "$smolvm" machine start --name "$machine"
-    "$smolvm" machine exec --name "$machine" --timeout 180s -- /bin/sh /opt/image-recipe/install.sh
+    "$smolvm" machine exec --name "$machine" --timeout 180s -- /bin/sh /opt/image-recipe/install-launcher-files.sh
     "$smolvm" machine stop --name "$machine"
     created=0
     "$smolvm" pack create --from-vm "$machine" --smolfile "$recipe/launcher.smolfile" \
@@ -55,7 +57,7 @@ if [[ ! -f "$artifact" || ! -f "$metadata" ]]; then
     } > "$metadata"
     "$smolvm" machine delete --name "$machine" --force
 fi
-deno run --no-config --allow-read "$macos_dir/Scripts/verify-runtime-metadata.ts" "$artifact" "$metadata" "$macos_dir/ContainerTools.lock" xe-launcher-1
+deno run --no-config --allow-read "$macos_dir/Build/mac/verify-vm-artifact.ts" "$artifact" "$metadata" "$macos_dir/ContainerTools.lock" xe-launcher-1
 cp "$artifact" "$runtime/docker-compose.smolmachine"
 cp "$metadata" "$runtime/Builder.lock"
 echo "Staged launcher VM image $key (router and fixed Docker configuration embedded)"

@@ -76,7 +76,7 @@ normal signed, notarized release and its configured credentials:
 
 ```sh
 make -C macos release
-macos/Tests/Integration/verify-sparkle.sh \
+macos/Build/mac/verify-sparkle.sh \
   "macos/dist/Xe Launcher.app" --release
 ```
 

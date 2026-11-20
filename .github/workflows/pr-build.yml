@@ -41,7 +41,7 @@ jobs:
 
       - name: Verify Sparkle delta appcast fixture
         run: |
-          macos/Tests/Integration/verify-appcast.sh \
+          macos/Build/mac/verify-appcast.sh \
             macos/Tests/Fixtures/appcast.xml \
             123.1 \
             https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/Xe-Launcher.dmg \
@@ -156,7 +156,7 @@ jobs:
         run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
 
       - name: Verify Sparkle bundle integration
-        run: macos/Tests/Integration/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
+        run: macos/Build/mac/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
 
       - name: Run launcher integration test (Standard user)
         env:

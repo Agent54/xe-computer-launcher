@@ -61,23 +61,23 @@ build:
 # One SwiftPM build produces the launcher, helpers, and tests in the same
 # configuration. Packaging below consumes that tested launcher binary.
 test: workerd compose-ui compose-server container-tools
-	@BUILD_CONFIG="$(BUILD_CONFIG)" /bin/bash Scripts/test-runtime.sh $(SWIFT_BUILD_FLAGS)
+	@BUILD_CONFIG="$(BUILD_CONFIG)" /bin/bash Tests/run-tests.sh $(SWIFT_BUILD_FLAGS)
 
 smol-runtime:
-	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Scripts/prepare-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
+	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Build/mac/stage-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
 
 compose-server:
-	@/bin/bash Scripts/prepare-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
+	@/bin/bash Build/mac/stage-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
 
 .PHONY: container-tools sign-buildx verify-buildx
 container-tools:
-	@/bin/bash Scripts/prepare-container-tools.sh
+	@/bin/bash Build/mac/stage-container-tools.sh
 
 sign-buildx:
 	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(BUILDX)"
 
 verify-buildx:
-	@/bin/bash Scripts/verify-container-tools.sh "$(CONTENTS)"
+	@/bin/bash Build/mac/verify-container-tools.sh "$(CONTENTS)"
 
 workerd:
 	cd ../workerd && deno install --frozen
@@ -91,7 +91,7 @@ workerd:
 	@rsync -a --delete ../workerd/dist/host-worker/ "$(BUILD_DIR)/workerd/resources/"
 
 compose-ui:
-	@/bin/bash Scripts/prepare-compose-ui.sh "$(COMPOSE_UI_STAGE)"
+	@/bin/bash Build/mac/stage-compose-ui.sh "$(COMPOSE_UI_STAGE)"
 
 .PHONY: guest-worker
 guest-worker: workerd
@@ -99,14 +99,14 @@ guest-worker: workerd
 	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
 	@mkdir -p "$(BUILD_DIR)/guest-worker"
 	@rsync -a --delete --delete-excluded --include='/workerd' --include='/lib/***' --include='/licenses/***' --exclude='*' "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
-	@cp ../workerd/dist/guest-worker.bin ../workerd/docker/run.sh "$(BUILD_DIR)/guest-worker/"
+	@cp ../workerd/dist/guest-worker.bin ../workerd/Runtime/vm/start-router.sh "$(BUILD_DIR)/guest-worker/"
 	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
-	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* run.sh > checksums.txt
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* start-router.sh > checksums.txt
 	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 --check checksums.txt
 
 .PHONY: launcher-runtime
 launcher-runtime: smol-runtime guest-worker
-	@/bin/bash Scripts/derive-launcher-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(BUILD_DIR)/guest-worker"
+	@/bin/bash Build/mac/build-launcher-image.sh "$(SMOL_RUNTIME_STAGE)" "$(BUILD_DIR)/guest-worker"
 
 package: test launcher-runtime
 	@echo "Creating app package..."
@@ -123,7 +123,7 @@ package: test launcher-runtime
 	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
 	@rsync -a --delete "$(BUILT_SPARKLE_FRAMEWORK)/" "$(SPARKLE_FRAMEWORK)/"
-	@/bin/bash Scripts/install-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
+	@/bin/bash Build/mac/copy-smol-into-app.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
 	@cp "$(CONTAINER_TOOLS_STAGE)/Helpers/buildx" "$(BUILDX)"
@@ -167,16 +167,16 @@ sign-sparkle:
 		"$(SPARKLE_FRAMEWORK)"
 
 sign-smol-runtime:
-	@/bin/bash Scripts/sign-smol-runtime.sh "$(SMOL_RUNTIME)" "$(SIGN_IDENTITY)" "$(SMOL_ENTITLEMENTS)"
+	@/bin/bash Build/mac/sign-smol-runtime.sh "$(SMOL_RUNTIME)" "$(SIGN_IDENTITY)" "$(SMOL_ENTITLEMENTS)"
 
 verify-smol-runtime:
-	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)"
+	@/bin/bash Build/mac/verify-smol-runtime.sh "$(SMOL_RUNTIME)"
 
 sign-compose-server:
 	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(COMPOSE_SERVER)"
 
 verify-compose-server:
-	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)"
+	@/bin/bash Build/mac/verify-compose-server.sh "$(COMPOSE_SERVER)"
 
 sign-workerd:
 	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --entitlements Sources/macos/WorkerdEntitlements.plist --sign "$(SIGN_IDENTITY)" "$(WORKERD)"
@@ -185,10 +185,10 @@ sign-port-helper:
 	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(PORT_HELPER)"
 
 verify-workerd:
-	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)"
+	@/bin/bash Build/mac/verify-workerd.sh "$(WORKERD)"
 
 verify-port-helper:
-	@/bin/bash Scripts/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
+	@/bin/bash Build/mac/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
 
 bundle: package
 	@echo "Creating app bundle..."
@@ -230,16 +230,16 @@ release-sign: package
 	@echo "Signed app bundle created at $(APP_BUNDLE)"
 
 verify-sparkle:
-	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)"
+	@Build/mac/verify-sparkle.sh "$(APP_BUNDLE)"
 
 # Pre-notarization checks (catches issues locally before slow upload)
 check: release-sign
-	@Tests/Integration/verify-sparkle.sh "$(APP_BUNDLE)" --release
-	@/bin/bash Scripts/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
-	@/bin/bash Scripts/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
-	@/bin/bash Scripts/verify-container-tools.sh "$(CONTENTS)" --release
-	@/bin/bash Scripts/verify-workerd.sh "$(WORKERD)" --release
-	@/bin/bash Scripts/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist" --release
+	@Build/mac/verify-sparkle.sh "$(APP_BUNDLE)" --release
+	@/bin/bash Build/mac/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
+	@/bin/bash Build/mac/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
+	@/bin/bash Build/mac/verify-container-tools.sh "$(CONTENTS)" --release
+	@/bin/bash Build/mac/verify-workerd.sh "$(WORKERD)" --release
+	@/bin/bash Build/mac/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist" --release
 
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"
