@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           clean: true
       - uses: denoland/setup-deno@v2
@@ -19,7 +19,7 @@ jobs:
           deno install --frozen
           deno task test:unit
           deno task build:runtime
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: guest-worker
           path: workerd/dist/guest-runtime/

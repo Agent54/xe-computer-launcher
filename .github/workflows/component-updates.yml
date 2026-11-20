@@ -84,7 +84,7 @@ jobs:
 
     steps:
       - name: Check out integration branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: int
           fetch-depth: 0

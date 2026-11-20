@@ -39,7 +39,7 @@ jobs:
 
       - name: Check out release branch
         id: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           clean: true
           fetch-depth: 0
@@ -49,7 +49,7 @@ jobs:
           XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
         run: bash macos/Tests/Integration/cleanup-ci.sh
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: guest-worker
           path: workerd/dist/guest-runtime
