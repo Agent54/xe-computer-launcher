@@ -23,30 +23,70 @@ is open reveals the embedded channel as **Prerelease (int)** or **Release
 (stable)** so testers can confirm which feed the installed build uses.
 Development builds with the placeholder public key keep the updater disabled.
 
+Interrupted launcher DMG and delta downloads keep their partial files in the
+user's Sparkle cache. The downloader resumes after transient network failures
+up to three times per download, waiting one, two, then four seconds between attempts.
+This applies to the selected archive, including deltas. Each attempt requests the missing bytes from the
+release URL, including after a launcher restart or a change of GitHub CDN URL.
+If the server returns a replacement archive, the downloader uses the full
+response. Sparkle verifies the completed archive before extraction.
+An ambiguous HTTP 416 triggers a HEAD metadata check while preserving the
+cached bytes. Matching length and validator recover a complete cached archive;
+unverifiable metadata triggers a full GET without discarding the saved file
+before a successful response. Age-based cleanup excludes the requested partial
+and acquires an exclusive file lock before deleting any other expired entry.
+These protocol steps run inside one transfer; only actual failures consume the
+three automatic retries. Cancellation applies to every step.
+
+Packaging builds Sparkle's Downloader XPC service from the pinned SwiftPM
+checkout with the launcher's resumable transfer implementation. A loopback
+integration test interrupts two transfers and checks the reassembled archive.
+
 The Xe Computer source asset is stored in application support as
-`darc.VERSION.swbn` (for example, `darc.0.0.18.swbn`). The versioned filename
-acts as the download marker, so updating the launcher to a newly pinned Xe
-Computer version fetches and installs that exact bundle instead of reusing an
-older `darc.swbn` file. Once the managed browser is stopped, the launcher
-validates the bundle's embedded manifest version and fixed Web Bundle ID,
+`darc/VERSION/darc.swbn` (for example, `darc/0.0.18/darc.swbn`). Setup checks
+the cached bundle against the SHA-256 pinned alongside its version. Pin updates
+read `darc.swbn`'s published SHA-256 digest from the trusted GitHub release asset
+metadata without downloading or rehashing the bundle. A missing or malformed
+digest stops the pin update. An invalid
+cached source is deleted; setup downloads a replacement, verifies its checksum in
+staging, and atomically moves it into the pinned version's directory.
+Once the managed browser is stopped, the launcher
+checks the pinned checksum again,
 then atomically replaces Chromium's profile-owned `main.swbn`. The versioned
 source bundles remain available for rollback, so the launcher does not create
 redundant per-profile backups. Chromium uses random per-IWA directory names, so
 the launcher finds Xe Computer by its fixed Web Bundle ID, replaces every
 matching `main.swbn`, and ignores all other installed IWAs.
+Damaged profile bundles use the same atomic replacement path as normal updates,
+even when the shim exists. Publication never deletes the destination first and
+does not write ownership attributes. The bundle ID marker only identifies the
+profile slot; the pinned checksum validates the replacement's complete contents.
 
 Helium is also an independently versioned source asset. The manifest pins its
 release version, Chromium version, and the publisher's SHA-256 instead of using
 an unversioned `latest/Helium.zip` URL. At startup the launcher stops its
 managed browser processes, downloads the pinned Apple-silicon disk image when
-the installed Helium version is older or unreadable, and verifies the checksum,
+the installed Helium version is older or fails deep signature/resource verification, and verifies the checksum,
 bundle identity, Developer ID signature, and signing team. A verified engine is
 installed at `helium/VERSION/Helium.app`. The complete version directory becomes
-visible only after verification, older directories remain usable as fallbacks,
-and the legacy unversioned `Helium.app` remains a migration fallback. Resolution
-prefers the newest valid installed engine that satisfies the pin and never
+visible only after verification, and replacing an existing version uses an
+atomic directory swap. Startup deletes invalid managed installations and
+abandoned staging/replacement directories. It never restores an old backup;
+missing installations go through the normal download and installation flow.
+Busy staging directories are logged and left for a later cleanup pass; cleanup
+failures do not prevent other setup downloads.
+Resolution selects the newest verified engine that satisfies the pin, including
+the existing unversioned `Helium.app` when it qualifies, and never
 downgrades a newer engine. Browser profiles are stored separately and are not
 replaced.
+
+Setup uses the same resumable downloader for Helium and the Xe Computer bundle.
+It also allows three automatic resume retries before showing the setup error.
+Partial source files stay in the application support directory under `.downloads`
+across retries. At startup, setup removes superseded partial files and abandoned
+staging files when no setup installation is using the cache.
+Each setup pass gets a new cancellation token; cancelling one pass does not
+disable later attempts in the same process.
 
 The launcher intentionally does not patch Chromium's protobuf/LevelDB IWA
 registry. That registry can therefore continue to display the version used for

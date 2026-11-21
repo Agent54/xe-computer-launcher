@@ -123,6 +123,9 @@ package: test launcher-runtime
 	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
 	@rsync -a --delete "$(BUILT_SPARKLE_FRAMEWORK)/" "$(SPARKLE_FRAMEWORK)/"
+	@/bin/bash Build/mac/build-sparkle-downloader.sh
+	@cp .build/sparkle-downloader/Downloader "$(SPARKLE_FRAMEWORK)/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+	@/bin/bash Tests/Integration/test-sparkle-resume.sh "$(SPARKLE_FRAMEWORK)"
 	@/bin/bash Build/mac/copy-smol-into-app.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
 	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
 	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"

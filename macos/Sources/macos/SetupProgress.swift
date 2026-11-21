@@ -1,19 +1,33 @@
 import AppKit
 import os
+import ResumableDownloads
 
 /// Thread-safe cancellation token with active task management.
 final class CancellationToken: @unchecked Sendable {
     private struct State {
         var cancelled = false
-        var activeTask: URLSessionDownloadTask?
+        var activeTask: XEArchiveTransfer?
     }
     private let lock = os.OSAllocatedUnfairLock(initialState: State())
+    private let cancellationSignal = DispatchSemaphore(value: 0)
 
     var isCancelled: Bool { lock.withLock { $0.cancelled } }
 
-    var activeTask: URLSessionDownloadTask? {
-        get { lock.withLock { $0.activeTask } }
-        set { lock.withLock { $0.activeTask = newValue } }
+    func start(_ task: XEArchiveTransfer) {
+        lock.withLock {
+            if $0.cancelled {
+                task.cancel()
+            } else {
+                $0.activeTask = task
+                task.resume()
+            }
+        }
+    }
+
+    func finish(_ task: XEArchiveTransfer) {
+        lock.withLock {
+            if $0.activeTask === task { $0.activeTask = nil }
+        }
     }
 
     func cancel() {
@@ -22,6 +36,13 @@ final class CancellationToken: @unchecked Sendable {
             $0.activeTask?.cancel()
             $0.activeTask = nil
         }
+        cancellationSignal.signal()
+    }
+
+    func waitBeforeRetry(seconds: Int) -> Bool {
+        guard !isCancelled else { return false }
+        _ = cancellationSignal.wait(timeout: .now() + .seconds(seconds))
+        return !isCancelled
     }
 }
 
@@ -35,7 +56,7 @@ nonisolated(unsafe) private var _cancelButton: NSButton?
 nonisolated(unsafe) private var _setupActionButton: NSButton?
 nonisolated(unsafe) private var _setupActionHandler: (() -> Void)?
 nonisolated(unsafe) private var _setupPlacement: SetupProgressPlacement = .centered
-private let _cancellation = CancellationToken()
+private let _cancellation = os.OSAllocatedUnfairLock(initialState: CancellationToken())
 
 private var setupAppDisplayName: String {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Launcher"
@@ -78,7 +99,16 @@ func setSetupProgressPlacement(_ placement: SetupProgressPlacement) {
 }
 
 /// The shared cancellation token for the current setup. Check `isCancelled` from any thread.
-var setupCancellation: CancellationToken { _cancellation }
+var setupCancellation: CancellationToken { _cancellation.withLock { $0 } }
+
+/// A new pass gets its own token; callbacks from an old pass stay cancelled.
+@discardableResult
+func beginSetupAttempt() -> CancellationToken {
+    _cancellation.withLock {
+        $0 = CancellationToken()
+        return $0
+    }
+}
 
 /// Load the app icon from the .app bundle's Resources directory.
 /// Tries multiple strategies: Bundle.main.resourceURL, then navigating from the executable path.
@@ -402,47 +432,9 @@ private class ClickablePathLabel: NSTextField {
 private class SetupCancelHelper: NSObject {
     static let shared = SetupCancelHelper()
     @objc func cancelSetup() {
-        _cancellation.cancel()
+        setupCancellation.cancel()
         _statusLabel?.stringValue = "Cancelling..."
         _setupWindow?.close()
         _setupWindow = nil
-    }
-}
-
-// MARK: - Download progress delegate
-
-/// URLSession delegate that reports download progress and captures the downloaded file.
-/// NOTE: Do NOT use a completion handler on the download task when using this delegate,
-/// otherwise the delegate progress methods will not be called.
-class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let onProgress: (Double) -> Void
-    private let completion: (URL?, Error?) -> Void
-
-    init(onProgress: @escaping (Double) -> Void, completion: @escaping (URL?, Error?) -> Void) {
-        self.onProgress = onProgress
-        self.completion = completion
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        onProgress(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // Move to a stable temp location before the system deletes it
-        let ext = downloadTask.response?.suggestedFilename.flatMap { URL(string: $0)?.pathExtension } ?? "tmp"
-        let stableTemp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
-        do {
-            try FileManager.default.moveItem(at: location, to: stableTemp)
-            completion(stableTemp, nil)
-        } catch {
-            completion(nil, error)
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error {
-            completion(nil, error)
-        }
     }
 }

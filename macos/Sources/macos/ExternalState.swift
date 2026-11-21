@@ -171,12 +171,11 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    /// Resolve a helper app path: prefer the user data dir copy (avoids signature issues),
-    /// fall back to the app bundle's Helpers/.
-    static func resolveHelperApp(name: String) -> URL {
-        if name == "Helium.app",
-           let versionedApp = resolvedHeliumAppURL(dataURL: appDataURL) {
-            return versionedApp
+    /// Helium must pass the configured version and integrity checks. Other
+    /// helpers prefer the data directory, then the app bundle's Helpers/.
+    static func resolveHelperApp(name: String) -> URL? {
+        if name == "Helium.app" {
+            return resolvedHeliumAppURL(dataURL: appDataURL)
         }
         let userCopy = appDataURL.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: userCopy.path) {
@@ -202,14 +201,15 @@ final class ExternalState: @unchecked Sendable {
     /// Discovery may launch browser executables. Call off the UI thread and
     /// return a value without replacing the runtime's configured-browser cache.
     func scanChromeAvailability(scanAll: Bool = false) -> [InstalledChrome] {
-        let heliumApp = Self.resolveHelperApp(name: "Helium.app")
-        let heliumExec = heliumApp.appendingPathComponent("Contents/MacOS/Helium")
-        let allChromePaths: [(String, String, String, String)] = [
-            ("Helium", heliumApp.path, heliumExec.path, "helium"),
+        var allChromePaths: [(String, String, String, String)] = [
             ("Google Chrome Beta", "/Applications/Google Chrome Beta.app", "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta", "beta"),
             ("Google Chrome", "/Applications/Google Chrome.app", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "stable"),
             ("Google Chrome Canary", "/Applications/Google Chrome Canary.app", "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary", "canary")
         ]
+        if let heliumApp = Self.resolveHelperApp(name: "Helium.app") {
+            let heliumExec = heliumApp.appendingPathComponent("Contents/MacOS/Helium")
+            allChromePaths.insert(("Helium", heliumApp.path, heliumExec.path, "helium"), at: 0)
+        }
 
         let fm = FileManager.default
         let chromePaths: [(String, String, String, String)]

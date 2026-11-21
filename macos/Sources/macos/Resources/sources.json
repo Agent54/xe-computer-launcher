@@ -6,6 +6,7 @@
         "label": "Helium browser engine"
     },
     "darc": {
+        "sha256": "fd7e794644b99668b0e3bd4b092fa84ce837e083c565dacce4e52de6ef991327",
         "version": {
             "major": 0,
             "minor": 4,

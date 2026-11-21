@@ -63,6 +63,7 @@ public_key="$(plutil -extract SUPublicEDKey raw "$info_plist")"
 automatic_checks="$(plutil -extract SUEnableAutomaticChecks raw "$info_plist")"
 allows_automatic_updates="$(plutil -extract SUAllowsAutomaticUpdates raw "$info_plist")"
 automatic_downloads="$(plutil -extract SUAutomaticallyUpdate raw "$info_plist")"
+downloader_service="$(plutil -extract SUEnableDownloaderService raw "$info_plist")"
 verify_before_extraction="$(plutil -extract SUVerifyUpdateBeforeExtraction raw "$info_plist")"
 require_signed_feed="$(plutil -extract SURequireSignedFeed raw "$info_plist")"
 
@@ -81,6 +82,7 @@ fi
     || fail "automatic background updates must be allowed"
 [[ "$automatic_downloads" == "true" ]] \
     || fail "automatic background downloads must be enabled by default"
+[[ "$downloader_service" == "true" ]] || fail "resumable update downloader must be enabled"
 [[ "$verify_before_extraction" == "true" ]] \
     || fail "updates are not verified before extraction"
 [[ "$require_signed_feed" == "true" ]] || fail "signed appcast feeds are not required"

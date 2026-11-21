@@ -1,8 +1,9 @@
 name: Update launcher components
 
 on:
-  schedule:
-    - cron: '17,47 * * * *'
+  # Release workflows dispatch this updater after uploading their assets.
+  # schedule:
+  #   - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       component:

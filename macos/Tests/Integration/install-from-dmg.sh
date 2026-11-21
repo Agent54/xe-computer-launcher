@@ -1117,7 +1117,7 @@ codesign -dv --verbose=4 "$installed_helium" 2>&1 \
 darc_major="$(plutil -extract darc.version.major raw "$sources_manifest")"
 darc_minor="$(plutil -extract darc.version.minor raw "$sources_manifest")"
 darc_patch="$(plutil -extract darc.version.patch raw "$sources_manifest")"
-darc_bundle="$APP_DATA/darc.${darc_major}.${darc_minor}.${darc_patch}.swbn"
+darc_bundle="$APP_DATA/darc/${darc_major}.${darc_minor}.${darc_patch}/darc.swbn"
 
 if xattr -p com.apple.quarantine "$INSTALLED_APP" >/dev/null 2>&1; then
     fail "installed app still has a quarantine attribute"

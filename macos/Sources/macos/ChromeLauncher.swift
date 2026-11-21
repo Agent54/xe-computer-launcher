@@ -100,11 +100,8 @@ extension ExternalState {
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
            !shimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
-        } else if !isDevProxy && !shimExists {
-            if let iwaURL = configuredSourceAssetURL(name: "darc", dataURL: Self.appDataURL),
-               FileManager.default.fileExists(atPath: iwaURL.path) {
-                args.append("--install-isolated-web-app-from-file=\(iwaURL.path)")
-            }
+        } else if !isDevProxy && !shimExists, let iwaURL = installedConfiguredDarcSourceURL(dataURL: Self.appDataURL) {
+            args.append("--install-isolated-web-app-from-file=\(iwaURL.path)")
         }
         if let openingURL {
             args.append(openingURL)

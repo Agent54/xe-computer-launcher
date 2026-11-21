@@ -127,7 +127,9 @@ write_output() {
 
 require_command gh
 require_command jq
-require_command shasum
+if [[ "$component" != "xe-computer" ]]; then
+    require_command shasum
+fi
 
 case "$component" in
     xe-computer)
@@ -261,13 +263,25 @@ fi
 case "$component" in
     xe-computer)
         version="${release_tag#v}"
+        checksum="$(jq -er --arg asset "$primary_asset" '
+            [.assets[] | select(.name == $asset)]
+            | select(length == 1)
+            | .[0].digest
+            | select(type == "string")
+            | select(test("^sha256:[0-9a-fA-F]{64}$"))
+            | ltrimstr("sha256:") | ascii_downcase
+        ' "$release_file")" || {
+            echo "Release $release_tag has no valid published SHA-256 for $primary_asset" >&2
+            exit 1
+        }
         IFS=. read -r version_major version_minor version_patch <<< "$version"
         updated_sources="$temporary_dir/sources.json"
         jq --indent 4 \
             --argjson major "$version_major" \
             --argjson minor "$version_minor" \
             --argjson patch "$version_patch" \
-            '.darc.version = {major: $major, minor: $minor, patch: $patch}' \
+            --arg checksum "$checksum" \
+            '.darc.version = {major: $major, minor: $minor, patch: $patch} | .darc.sha256 = $checksum' \
             "$repository_root/$lock_file" > "$updated_sources"
         mv "$updated_sources" "$repository_root/$lock_file"
         ;;

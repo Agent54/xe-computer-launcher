@@ -29,11 +29,10 @@ func activeDarcBundleActivation(
     profileName: String,
     sourceURL: URL,
     expectedVersion: String,
+    expectedSHA256: String,
     trustedWebBundleID: String = trustedXeComputerWebBundleID
 ) -> DarcProfileBundleActivation? {
-    guard let sourceData = try? Data(contentsOf: sourceURL, options: .mappedIfSafe),
-          darcManifestVersion(in: sourceData, webBundleID: trustedWebBundleID) == expectedVersion,
-          let sourceSHA256 = try? sha256Hex(of: sourceURL) else {
+    guard let sourceSHA256 = try? sha256Hex(of: sourceURL), sourceSHA256 == expectedSHA256 else {
         return nil
     }
 
@@ -56,40 +55,45 @@ func activeDarcBundleActivation(
     return nil
 }
 
+func cachedDarcSource(at url: URL, expectedSHA256: String,
+                      onInvalid: (Error) -> Void = { _ in }) -> URL? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    do {
+        try verifySourceChecksum(at: url, expectedSHA256: expectedSHA256)
+        return url
+    } catch {
+        onInvalid(error)
+        do { try FileManager.default.removeItem(at: url) }
+        catch { onInvalid(error) }
+        return nil
+    }
+}
+
+func installDarcSource(from download: URL, at destination: URL, expectedSHA256: String) throws {
+    try verifySourceChecksum(at: download, expectedSHA256: expectedSHA256)
+    try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try publishDarcBundle(from: download, to: destination)
+}
+
 /// Activates a downloaded Darc release in every matching Chromium profile.
 /// Chromium owns the fixed `main.swbn` filename, while Xe Launcher owns the
 /// versioned source file used as the activation authority.
 func activateDarcBundle(
     sourceURL: URL,
     expectedVersion: String,
+    expectedSHA256: String,
     dataURL: URL,
     profileNames: Set<String>? = nil,
     trustedWebBundleID: String = trustedXeComputerWebBundleID,
     log: (String) -> Void = { _ in }
 ) throws -> DarcBundleActivationSummary {
-    let fm = FileManager.default
-    guard fm.fileExists(atPath: sourceURL.path) else {
-        throw DarcBundleActivationError(message: "Configured Xe Computer bundle is missing at \(sourceURL.path)")
-    }
-
-    let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
-    guard sourceData.count >= 1_000 else {
-        throw DarcBundleActivationError(message: "Configured Xe Computer bundle is too small")
-    }
-    guard containsWebBundleID(trustedWebBundleID, in: sourceData) else {
-        throw DarcBundleActivationError(message: "Configured Xe Computer bundle has an unexpected Web Bundle ID")
-    }
-    guard darcManifestVersion(in: sourceData, webBundleID: trustedWebBundleID) == expectedVersion else {
-        throw DarcBundleActivationError(
-            message: "Configured Xe Computer bundle does not contain manifest version \(expectedVersion)"
-        )
-    }
-
-    let sourceSHA256 = try sha256Hex(of: sourceURL)
+    try verifySourceChecksum(at: sourceURL, expectedSHA256: expectedSHA256)
+    let sourceSHA256 = expectedSHA256
     let candidates = installedDarcBundleCandidates(
         dataURL: dataURL,
         profileNames: profileNames,
-        trustedWebBundleID: trustedWebBundleID
+        trustedWebBundleID: trustedWebBundleID,
+        log: log
     )
     var summary = DarcBundleActivationSummary()
 
@@ -133,7 +137,8 @@ private struct InstalledDarcBundleCandidate {
 private func installedDarcBundleCandidates(
     dataURL: URL,
     profileNames: Set<String>?,
-    trustedWebBundleID: String
+    trustedWebBundleID: String,
+    log: (String) -> Void = { _ in }
 ) -> [InstalledDarcBundleCandidate] {
     let fm = FileManager.default
     let profilesRoot = dataURL.appendingPathComponent("profiles", isDirectory: true)
@@ -163,9 +168,12 @@ private func installedDarcBundleCandidates(
 
         for installedDirectory in installedDirectories {
             let bundleURL = installedDirectory.appendingPathComponent("main.swbn")
-            guard fm.isReadableFile(atPath: bundleURL.path),
-                  let data = try? Data(contentsOf: bundleURL, options: .mappedIfSafe),
-                  darcManifestVersion(in: data, webBundleID: trustedWebBundleID) != nil else {
+            // This marker identifies the target slot; it does not validate the
+            // artifact. Only the pinned checksum authorizes published bytes.
+            let marker = Data("webBundleId".utf8) + Data([0x78, UInt8(trustedWebBundleID.utf8.count)]) + Data(trustedWebBundleID.utf8)
+            guard let handle = try? FileHandle(forReadingFrom: bundleURL) else { continue }
+            defer { try? handle.close() }
+            guard let header = try? handle.read(upToCount: 1024), header.range(of: marker) != nil else {
                 continue
             }
             candidates.append(InstalledDarcBundleCandidate(
@@ -205,6 +213,10 @@ private func atomicallyReplaceDarcBundle(
     try handle.synchronize()
     try handle.close()
 
+    try publishDarcBundle(from: stagedURL, to: destinationURL)
+}
+
+private func publishDarcBundle(from stagedURL: URL, to destinationURL: URL) throws {
     guard Darwin.rename(stagedURL.path, destinationURL.path) == 0 else {
         let errorCode = errno
         throw NSError(
@@ -213,70 +225,6 @@ private func atomicallyReplaceDarcBundle(
             userInfo: [NSLocalizedDescriptionKey: "Atomic Xe Computer bundle replacement failed"]
         )
     }
-}
-
-private func containsWebBundleID(_ webBundleID: String, in data: Data) -> Bool {
-    let marker = Data("isolated-app://\(webBundleID)/".utf8)
-    return data.range(of: marker) != nil
-}
-
-private func darcManifestVersion(in data: Data, webBundleID: String) -> String? {
-    let manifestURL = Data(
-        "isolated-app://\(webBundleID)/.well-known/manifest.webmanifest".utf8
-    )
-    var searchStart = data.startIndex
-
-    while searchStart < data.endIndex,
-          let manifestRange = data.range(of: manifestURL, in: searchStart..<data.endIndex) {
-        // The signed bundle index contains the manifest URL shortly before the
-        // manifest response. Limit parsing to that response neighborhood so a
-        // JavaScript dependency's unrelated `version` field cannot satisfy the
-        // release pin check.
-        let windowEnd = min(data.endIndex, manifestRange.upperBound + 1_048_576)
-        let manifestNeighborhood = Data(data[manifestRange.lowerBound..<windowEnd])
-        if jsonStringValues(forKey: "name", in: manifestNeighborhood).contains("Xe Computer"),
-           let version = jsonStringValues(forKey: "version", in: manifestNeighborhood).first(where: { value in
-               let components = value.split(separator: ".", omittingEmptySubsequences: false)
-               return components.count == 3 && components.allSatisfy { component in
-                   !component.isEmpty && component.allSatisfy(\.isNumber)
-               }
-           }) {
-            return version
-        }
-        searchStart = manifestRange.upperBound
-    }
-    return nil
-}
-
-private func jsonStringValues(forKey key: String, in data: Data) -> [String] {
-    let keyData = Data("\"\(key)\"".utf8)
-    let whitespace = Set<UInt8>([9, 10, 13, 32])
-    var values: [String] = []
-    var searchStart = data.startIndex
-
-    while searchStart < data.endIndex,
-          let keyRange = data.range(of: keyData, in: searchStart..<data.endIndex) {
-        var index = keyRange.upperBound
-        while index < data.endIndex && whitespace.contains(data[index]) { index += 1 }
-        guard index < data.endIndex, data[index] == 58 else {
-            searchStart = keyRange.upperBound
-            continue
-        }
-        index += 1
-        while index < data.endIndex && whitespace.contains(data[index]) { index += 1 }
-        guard index < data.endIndex, data[index] == 34 else {
-            searchStart = keyRange.upperBound
-            continue
-        }
-        index += 1
-        let valueStart = index
-        guard let valueEnd = data[index..<data.endIndex].firstIndex(of: 34) else { break }
-        if let value = String(data: data[valueStart..<valueEnd], encoding: .utf8) {
-            values.append(value)
-        }
-        searchStart = data.index(after: valueEnd)
-    }
-    return values
 }
 
 private func relativePath(of url: URL, under root: URL) -> String {

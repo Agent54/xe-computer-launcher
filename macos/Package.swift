@@ -19,6 +19,7 @@ let package = Package(
             dependencies: [
                 "PortHelperSupport",
                 "LauncherMaintenance",
+                "ResumableDownloads",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: [
@@ -45,6 +46,7 @@ let package = Package(
         ),
         .target(name: "PortHelperSupport"),
         .target(name: "LauncherMaintenance"),
+        .target(name: "ResumableDownloads"),
         .executableTarget(name: "port-helper", dependencies: ["PortHelperSupport"], path: "Sources/PortHelper"),
         .executableTarget(name: "maintenance-test-helper", dependencies: ["LauncherMaintenance"], path: "Tests/Fixtures/MaintenanceHelper"),
         .executableTarget(name: "settings-termination-test", dependencies: ["LauncherMaintenance"], path: "Tests/Fixtures/SettingsTermination"),
