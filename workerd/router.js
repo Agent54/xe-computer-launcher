@@ -1,0 +1,135 @@
+import { bridgeSocketAndWebSocket } from './socket-bridge.js';
+import { routingErrorResponse } from './startup-response.js';
+
+// Runs inside the guest. Validate the host's exact container/port selection and
+// resolve its live network address without exposing each port on macOS.
+let cached = null;
+let expires = 0;
+const cacheLifetime = 100;
+
+async function discover(env) {
+  if (cached && Date.now() < expires) return cached;
+  // Cache parsed data, never another request's in-flight I/O or promise.
+  const requestedAt = Date.now();
+  const response = await env.DOCKER.fetch('http://docker/containers/json?all=true', {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error('Docker discovery unavailable');
+  const containers = await response.json();
+  if (!Array.isArray(containers)) throw new Error('Invalid Docker response');
+  cached = containers;
+  expires = requestedAt + cacheLifetime;
+  return containers;
+}
+
+async function findContainer(id, env) {
+  let containers = await discover(env);
+  // A successful create can provide a new ID before the Docker cache expires.
+  if (!containers.some(container => container.Id === id)) {
+    cached = null;
+    containers = await discover(env);
+  }
+  return containers.find(container => container.Id === id &&
+    container.Labels?.['com.docker.compose.service'] && container.Labels?.['com.docker.compose.project'] &&
+    container.Labels?.['com.docker.compose.oneoff']?.toLowerCase() !== 'true');
+}
+
+function publishedTarget(container, port, published) {
+  const targets = new Set((container.Ports || [])
+    .filter(binding => binding.Type === 'tcp' && binding.PublicPort === published)
+    .map(binding => binding.PrivatePort));
+  return targets.size === 1 && targets.has(port);
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const error = (message, status, code, headers) => routingErrorResponse(request, message, {
+      status, code, headers, source: 'Guest router',
+    });
+    const url = new URL(request.url);
+    if (url.pathname === '/__xe_router_health' && url.hostname === 'localhost') {
+      return new Response('ready');
+    }
+    if (url.origin === 'http://localhost' && url.pathname === '/__xe_tls_tunnel' &&
+        request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+      const id = request.headers.get('x-xe-container-id');
+      const port = Number(request.headers.get('x-xe-target-port'));
+      const published = Number(request.headers.get('x-xe-published-port'));
+      if (!/^[a-f0-9]{64}$/.test(id || '') || !Number.isInteger(port) || port < 1 || port > 65535 ||
+          !Number.isInteger(published) || published < 1 || published > 65535) {
+        return error('Invalid TLS tunnel target', 403, 'invalid_tls_target');
+      }
+      try {
+        const container = await findContainer(id, env);
+        if (!container || container.State !== 'running' || !publishedTarget(container, port, published)) {
+          return error('TLS target unavailable', 404, 'tls_target_unavailable');
+        }
+        const address = Object.values(container.NetworkSettings?.Networks || {}).map(n => n.IPAddress).find(ip => ip);
+        if (!address) return error('TLS target unavailable', 503, 'tls_target_unavailable');
+        const { connect } = await import('cloudflare:sockets');
+        const upstream = connect({ hostname: address, port });
+        await upstream.opened;
+        const pair = new WebSocketPair();
+        const [client, server] = Object.values(pair);
+        ctx.waitUntil(bridgeSocketAndWebSocket(upstream, server));
+        return new Response(null, { status: 101, webSocket: client });
+      } catch {
+        return error('TLS target unavailable', 503, 'tls_target_unavailable');
+      }
+    }
+    if (url.protocol !== 'http:' || url.port !== '' ||
+        !/^(?:[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?\.localhost|[a-z0-9][a-z0-9_-]*\.app\.localhost)$/.test(url.hostname)) {
+      return error('Invalid application hostname', 403, 'invalid_app_host');
+    }
+    const id = request.headers.get('x-xe-container-id');
+    const port = Number(request.headers.get('x-xe-target-port'));
+    const published = Number(request.headers.get('x-xe-published-port'));
+    if (!id || !Number.isInteger(port) || port < 1 || port > 65535 ||
+        !Number.isInteger(published) || published < 1 || published > 65535) {
+      return error('Invalid application target', 403, 'invalid_app_target');
+    }
+    try {
+      const container = await findContainer(id, env);
+      if (!container || container.State !== 'running') throw new Error('Container is not running');
+      if (!publishedTarget(container, port, published)) {
+        return error('Published port not available', 404, 'published_port_unavailable');
+      }
+      const networks = container.NetworkSettings?.Networks || {};
+      const address = Object.values(networks).map(n => n.IPAddress).find(ip => ip);
+      if (!address) throw new Error('Container network unavailable');
+      const headers = new Headers(request.headers);
+      headers.delete('x-xe-target-port');
+      headers.delete('x-xe-container-id');
+      headers.delete('x-xe-published-port');
+      headers.delete('forwarded');
+      headers.delete('x-forwarded-for');
+      const publicHost = headers.get('x-xe-public-host');
+      headers.delete('x-xe-public-host');
+      headers.set('x-forwarded-host', publicHost === url.hostname ||
+        (publicHost?.startsWith(`${url.hostname}:`) && /^\d{1,5}$/.test(publicHost.slice(url.hostname.length + 1)))
+        ? publicHost : url.host);
+      headers.set('x-forwarded-proto', headers.get('x-xe-origin-proto') === 'https' ? 'https' : 'http');
+      headers.delete('x-xe-origin-proto');
+      url.hostname = address;
+      url.port = String(port);
+      // Manual redirects ensure a backend cannot make the router fetch another
+      // host. Passing the response through also preserves WebSocket upgrades.
+      const response = await fetch(new Request(url, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+      // This header belongs to the router, never to an upstream application.
+      if (!['x-xe-router-unavailable', 'x-xe-error-source', 'x-xe-error-code']
+        .some(name => response.headers.has(name))) return response;
+      const responseHeaders = new Headers(response.headers);
+      responseHeaders.delete('x-xe-router-unavailable');
+      responseHeaders.delete('x-xe-error-source');
+      responseHeaders.delete('x-xe-error-code');
+      return new Response(response.body, { status: response.status, statusText: response.statusText,
+        headers: responseHeaders, ...(response.webSocket ? { webSocket: response.webSocket } : {}) });
+    } catch (cause) {
+      console.warn('Guest application route failed:', url.hostname, id, port, cause);
+      cached = null;
+      expires = 0;
+      return error('Could not connect to the app container. Check that the app is running and listening on its Compose target port.',
+        503, 'container_connection_failed', { 'Retry-After': '2', 'x-xe-router-unavailable': 'true' });
+    }
+  },
+};

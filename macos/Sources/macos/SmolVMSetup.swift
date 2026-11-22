@@ -1,0 +1,202 @@
+import Darwin
+import Foundation
+import LauncherMaintenance
+
+struct SmolVMStartupResult: Sendable {
+    let machineName: String
+    let dockerSocketURL: URL
+}
+
+enum SmolVMSetup {
+    static let machineName = "xe-launcher"
+    static let dockerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("docker.sock")
+    static let routerSocketURL = SmolVMPaths.socketsURL.appendingPathComponent("workerd.sock")
+    static let guestStacksDirectory = "/stacks"
+    static let runtimeFormat = "xe-launcher-1"
+
+    static func imageRevision(from metadata: String) throws -> String {
+        let prefix = "XE_RUNTIME_INPUT_SHA256="
+        let revisions = metadata.split(whereSeparator: \.isNewline)
+            .filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+        guard revisions.count == 1, let revision = revisions.first,
+              revision.count == 64, revision.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+            throw ContainerBuildTools.Failure("The bundled VM image identity is missing or invalid.")
+        }
+        return revision
+    }
+
+    static var stacksURL: URL {
+        let configured = ExternalState.shared.stringSetting("compose_storage_path")
+        return (configured.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? ComposeServerPaths.stacksURL)
+            .resolvingSymlinksInPath()
+    }
+
+    static var resources: ContainerVMResources { ContainerVMResources(settings: ExternalState.shared.settings.rawData) }
+    static var memoryMiB: UInt32 { resources.memoryMiB }
+
+    static func start(stacksURL: URL? = nil, virtualizationAvailable: Bool = VirtualizationSupport.isAvailable) async throws -> SmolVMStartupResult {
+        let startedAt = ContinuousClock.now
+        try Task.checkCancellation()
+        guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
+        let client = SmolVMClient.shared
+        let configuredResources = resources
+        let stacksVolume = "\((stacksURL ?? Self.stacksURL).path):\(guestStacksDirectory):rw"
+        let machines = try await client.listMachines()
+        try Task.checkCancellation()
+        let existing = machines.first { $0.name == machineName }
+        let bundledRevision = try imageRevision(from: String(
+            contentsOf: SmolVMPaths.composeArtifactURL.deletingLastPathComponent().appendingPathComponent("Builder.lock"),
+            encoding: .utf8
+        ))
+        // The VM image owns its engines. An old image cannot be upgraded by
+        // mounting replacement executables from the launcher.
+        if let existing, existing.labels?["dev.xe.computer.runtime-format"] != runtimeFormat ||
+            existing.labels?["dev.xe.computer.runtime-image"] != bundledRevision {
+            throw ContainerBuildTools.Failure("This VM uses a different runtime image. Back up its container data and explicitly recreate it with the bundled image; automatic migration is not supported.")
+        }
+        let existingStatus = existing != nil ? try await client.machineStatus(named: machineName) : nil
+        let currentDiskGiB = existingStatus?.storageGiB
+        let diskGiB = configuredResources.diskGiB(preserving: currentDiskGiB)
+        // Host reserves gate resize actions, never startup with saved limits.
+
+        if existing != nil {
+            // Restart a surviving VM with the runtime and mounts owned by this app.
+            try await client.stopMachine(named: machineName)
+            removeStaleSocketIfPresent()
+        }
+        try Task.checkCancellation()
+
+        if existing == nil {
+            removeStaleSocketIfPresent()
+            let spec = SmolVMMachineSpec(
+                name: machineName,
+                artifactURL: SmolVMPaths.composeArtifactURL,
+                memoryMiB: configuredResources.memoryMiB,
+                cpus: configuredResources.cpus,
+                storageGiB: diskGiB,
+                networkBackend: "virtio-net",
+                volumes: [stacksVolume],
+                exposedSockets: [
+                    "/var/run/docker.sock:\(dockerSocketURL.path)",
+                    "/run/xe-router/workerd.sock:\(routerSocketURL.path)",
+                ],
+                labels: [
+                    "dev.xe.computer.owner": "launcher",
+                    "dev.xe.computer.purpose": "runtime",
+                    "dev.xe.computer.runtime-format": runtimeFormat,
+                    "dev.xe.computer.runtime-image": bundledRevision,
+                ]
+            )
+            try await client.createMachine(spec)
+        } else {
+            try await client.updateMachine(
+                named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
+                storageGiB: diskGiB,
+                volumes: [stacksVolume]
+            )
+        }
+
+        try Task.checkCancellation()
+        await RuntimeLogCollector.shared.beginAttempt()
+        do { try await client.startMachine(named: machineName) }
+        catch {
+            await RuntimeLogCollector.shared.collect(flushPartial: true)
+            throw error
+        }
+        ExternalState.shared.appendLog("runtime", "SmolVM workload launched after \(startedAt.duration(to: .now)); waiting for Docker API")
+        let dockerWaitStartedAt = ContinuousClock.now
+        try await waitForDocker()
+        ExternalState.shared.appendLog("runtime", "Docker API ready after \(dockerWaitStartedAt.duration(to: .now)) (total startup \(startedAt.duration(to: .now)))")
+
+        return SmolVMStartupResult(machineName: machineName, dockerSocketURL: dockerSocketURL)
+    }
+
+    private static func waitForDocker() async throws {
+        let deadline = ContinuousClock.now + .seconds(90)
+        var nextDiagnostics = ContinuousClock.now
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if await UnixSocketHTTP.isReady(at: dockerSocketURL) {
+                try Task.checkCancellation()
+                return
+            }
+            if ContinuousClock.now >= nextDiagnostics {
+                await RuntimeLogCollector.shared.collect()
+                if let machine = try? await SmolVMClient.shared.machineStatus(named: machineName),
+                   !machine.isRunning || machine.workload?.state == "exited" {
+                    await RuntimeLogCollector.shared.collect(flushPartial: true)
+                    let detail = await RuntimeLogCollector.shared.failureDetail()
+                        ?? machine.workload?.lastExitReason
+                        ?? "Docker workload exited before its API became ready."
+                    throw SmolVMSetupError.dockerStartupFailed(detail)
+                }
+                nextDiagnostics = ContinuousClock.now + .seconds(2)
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+
+        await RuntimeLogCollector.shared.collect(flushPartial: true)
+        if let detail = await RuntimeLogCollector.shared.failureDetail() {
+            throw SmolVMSetupError.dockerStartupFailed(detail)
+        }
+        throw SmolVMSetupError.dockerSocketUnavailable(dockerSocketURL.path)
+    }
+
+    static func stop() async throws {
+        let client = SmolVMClient.shared
+        let machineExists = try await client.listMachines().contains { $0.name == machineName }
+        if machineExists {
+            try await client.stopMachine(named: machineName)
+            let status = try await client.machineStatus(named: machineName)
+            guard ["stopped", "exited"].contains(status.state.lowercased()),
+                  status.pid.map({ $0 <= 0 || (kill($0, 0) != 0 && errno == ESRCH) }) != false else {
+                throw MaintenanceFailure("The container VM still has a running process after shutdown.")
+            }
+        }
+        removeStaleSocketIfPresent()
+    }
+
+    private static func removeStaleSocketIfPresent() {
+        for socket in [dockerSocketURL, routerSocketURL] {
+            do { try removeSocketIfPresent(at: socket) }
+            catch { ExternalState.shared.appendLog("runtime", error.localizedDescription) }
+        }
+    }
+
+    /// Never recursively remove a directory or follow a symlink at a socket path.
+    /// A path collision belongs to the user until it is proven to be a socket.
+    static func removeSocketIfPresent(at url: URL) throws {
+        var metadata = stat()
+        guard lstat(url.path, &metadata) == 0 else {
+            if errno == ENOENT { return }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard metadata.st_mode & S_IFMT == S_IFSOCK else {
+            throw SmolVMSetupError.unsafeSocketPath(url.path)
+        }
+        // unlink cannot recursively remove a replacement directory.
+        guard unlink(url.path) == 0 || errno == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+}
+
+enum SmolVMSetupError: LocalizedError, Sendable {
+    case virtualizationUnavailable
+    case dockerSocketUnavailable(String)
+    case dockerStartupFailed(String)
+    case unsafeSocketPath(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .virtualizationUnavailable:
+            return VirtualizationSupport.unavailableWarning
+        case .dockerSocketUnavailable(let path):
+            return "SmolVM started, but its Docker API did not become ready at \(path)."
+        case .dockerStartupFailed(let detail):
+            return "Docker startup failed: \(detail)"
+        case .unsafeSocketPath(let path):
+            return "Refusing to remove a non-socket file at \(path)."
+        }
+    }
+}

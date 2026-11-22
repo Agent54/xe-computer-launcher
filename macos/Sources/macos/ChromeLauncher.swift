@@ -1,26 +1,24 @@
 import Foundation
+import LauncherMaintenance
 import AppKit
 import ApplicationServices
+
+// macOS normally attributes a posix_spawn child’s privacy-sensitive work to
+// its parent. Helium is a separately signed application and must own its own
+// TCC responsibility, just as it does when launched through Launch Services.
+// Chromium and LLDB use this Darwin SPI for the same kind of helper launch.
+@_silgen_name("responsibility_spawnattrs_setdisclaim")
+private func responsibilitySpawnAttributesSetDisclaim(
+    _ attributes: UnsafeMutablePointer<posix_spawnattr_t?>,
+    _ disclaim: Int32
+) -> Int32
 
 // Chrome launch configuration and lifecycle management.
 // Edit the flags and arguments here to customise how Chrome is started.
 
 extension ExternalState {
 
-    /// File handles for Chrome DevTools Protocol pipe transport.
-    /// Write CDP commands to `cdpWriteHandle`, read responses from `cdpReadHandle`.
-    /// These are set when Chrome starts with --remote-debugging-pipe and can be
-    /// bridged to a Unix socket for workerd or other consumers.
-    private static let _cdpHandles = CDPHandles()
-
-    var cdpWriteHandle: FileHandle? {
-        get { Self._cdpHandles.writeHandle }
-        set { Self._cdpHandles.writeHandle = newValue }
-    }
-    var cdpReadHandle: FileHandle? {
-        get { Self._cdpHandles.readHandle }
-        set { Self._cdpHandles.readHandle = newValue }
-    }
+    private static let cdpTransport = CDPTransport()
 
     /// Command-line flags passed to Chrome on every launch.
     static let chromeFlags: [String] = [
@@ -30,21 +28,26 @@ extension ExternalState {
         // TODO: support "--proxy-server=http://127.0.0.1:8080",
         "--flag-switches-begin",
         "--enable-features=AppShimNotificationAttribution,DesktopPWAsAdditionalWindowingControls,DesktopPWAsLinkCapturingWithScopeExtensions,DesktopPWAsSubApps,IsolatedWebAppDevMode,IsolatedWebApps,OverscrollEffectOnNonRootScrollers,UseAdHocSigningForWebAppShims,PwaNavigationCapturing,UnframedIwa,WebAppBorderless,WebAppPredictableAppUpdating",
-        "--disable-features=CADisplayLinkInBrowser,AutomationControlled",
+        "--disable-features=AutomationControlled",
         "--disable-blink-features=AutomationControlled",
         "--flag-switches-end"
     ]
     // DO NOT DELETE:
+    //   --disable-features=CADisplayLinkInBrowser \
     //   --remote-debugging-port=9226 \
     //   --remote-allow-origins=https://localhost:5194 \
 
-    /// Path to the Unix domain socket used for Chrome DevTools debugging.
-    /// Lives under sockets/ in the user app data directory.
-    static var debugSocketPath: String {
-        appDataURL.appendingPathComponent("sockets/chrome-debug.sock").path
+    /// Path to the Unix domain socket used for CDP.
+    /// Uses the short runtime alias to the existing user app-data socket directory.
+    static var cdpSocketPath: String {
+        RuntimeSocketPaths.shared.browserSocketsURL.appendingPathComponent("cdp.sock").path
     }
 
-    func startChrome() -> String? {
+    func startChrome(openingURL: String? = nil, forceHeaded: Bool = false) -> String? {
+        guard !isBrowserStackStopRequested else {
+            return "Chrome startup cancelled because Xe Launcher is shutting down"
+        }
+
         // Re-check if the configured chrome is available (it may have been downloaded since last check)
         refreshChromeAvailability()
 
@@ -54,17 +57,32 @@ extension ExternalState {
             if let err = createProfile(name: profileName) { return err }
         }
 
+        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
+        if !isDevProxy {
+            activateConfiguredDarcBundle(
+                dataURL: Self.appDataURL,
+                profileNames: [profileName],
+                browserIsRunning: chromeRunning
+            ) { [weak self] source, message in
+                self?.appendLog(source, message)
+            }
+        }
+
         // Ensure sockets directory exists for the debug pipe
-        let socketsDir = Self.appDataURL.appendingPathComponent("sockets", isDirectory: true)
+        let socketsDir = RuntimeSocketPaths.shared.browserSocketsURL
         try? FileManager.default.createDirectory(at: socketsDir, withIntermediateDirectories: true)
 
         guard let chrome = preferredChrome() else { return "No supported Chrome installation found" }
 
+        let launchFlags = forceHeaded
+            ? Self.chromeFlags.filter { $0 != "--silent-launch" }
+            : Self.chromeFlags
         var args = [
             "--user-data-dir=\(profileDir.path)",
             "--remote-debugging-pipe"
-        ] + Self.chromeFlags
-        if boolSetting("chrome_headless", default: false) {
+        ] + launchFlags
+        let runsHeadless = !forceHeaded && boolSetting("chrome_headless", default: true)
+        if runsHeadless {
             args.append("--headless=new")
             // Override User-Agent globally (including workers) to remove "HeadlessChrome"
             let majorVersion = chrome.version ?? 145
@@ -73,24 +91,25 @@ extension ExternalState {
 
         // Install the IWA: use override URL if set for this profile, otherwise use local file.
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
         let shimDir = Self.appDataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
-        let devShimExists = FileManager.default.fileExists(atPath: shimDir.appendingPathComponent("Darc Dev.app").path)
+        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
+        let shimApp = shimDir.appendingPathComponent(shimAppName)
+        let shimExists = FileManager.default.fileExists(atPath: shimApp.path)
 
         if let overrideURL = darcOverrideURL(forProfile: profileName),
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
-           !devShimExists {
+           !shimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
-        } else if !isDevProxy {
-            let iwaPath = Self.appDataURL.appendingPathComponent("darc.swbn").path
-            if FileManager.default.fileExists(atPath: iwaPath) {
-                args.append("--install-isolated-web-app-from-file=\(iwaPath)")
-            }
+        } else if !isDevProxy && !shimExists, let iwaURL = installedConfiguredDarcSourceURL(dataURL: Self.appDataURL) {
+            args.append("--install-isolated-web-app-from-file=\(iwaURL.path)")
+        }
+        if let openingURL {
+            args.append(openingURL)
         }
 
         // Create pipe pairs for Chrome DevTools Protocol pipe transport.
         // Chrome reads commands from fd 3 and writes responses to fd 4.
-        // We keep the other ends for our launcher / future workerd bridge.
+        // The transport shares the other ends with the launcher and workerd.
         let toChrome = Pipe()    // we write → Chrome reads on fd 3
         let fromChrome = Pipe()  // Chrome writes on fd 4 → we read
 
@@ -106,27 +125,33 @@ extension ExternalState {
                 ]
             )
 
-            // Store the pipe handles for later CDP communication (e.g. workerd bridge)
-            cdpWriteHandle = toChrome.fileHandleForWriting
-            cdpReadHandle = fromChrome.fileHandleForReading
+            try Self.cdpTransport.start(
+                reader: fromChrome.fileHandleForReading,
+                writer: toChrome.fileHandleForWriting,
+                socketURL: URL(fileURLWithPath: Self.cdpSocketPath)
+            )
+
+            if isBrowserStackStopRequested {
+                terminateBrowserProcessGroup()
+                return "Chrome startup cancelled because Xe Launcher is shutting down"
+            }
 
             appendLog("launcher", "Chrome started with debug pipe (\(chrome.name), pid=\(_browserPid), isRunning=\(chromeRunning))")
             print("[ExternalState] Chrome started, isRunning=\(chromeRunning)")
 
-            // Apply anti-detection patches when running in headless mode
-            if boolSetting("chrome_headless", default: false) {
-                preventDetection()
+            // Apply anti-fingerprinting patches when running in headless mode
+            if runsHeadless {
+                applyAntiFingerprinting()
             }
 
             // Check if app shim needs provisioning (in parallel)
-            let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
-            let shimApp = shimDir.appendingPathComponent(shimAppName)
-            if !FileManager.default.fileExists(atPath: shimApp.path) {
+            if !shimExists {
                 provisionAppShim(profileName: profileName, profileDir: profileDir, shimApp: shimApp, chrome: chrome)
             }
 
             return nil
         } catch {
+            terminateBrowserProcessGroup()
             let msg = "Chrome start failed: \(error)"
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
@@ -136,83 +161,40 @@ extension ExternalState {
 
     // MARK: - CDP Pipe Communication
 
-    /// Monotonically increasing CDP message ID.
-    nonisolated(unsafe) private static var _cdpNextId: Int = 0
-    private static let _cdpIdLock = NSLock()
-    private static func nextCDPId() -> Int {
-        _cdpIdLock.lock()
-        defer { _cdpIdLock.unlock() }
-        _cdpNextId += 1
-        return _cdpNextId
-    }
-
-    /// Leftover data from previous CDP reads (events that arrived between commands).
-    nonisolated(unsafe) private static var _cdpReadBuffer = Data()
-
-    /// Send a CDP command over the debugging pipe with a timeout.
+    /// Send a CDP command over the CDP pipe with a timeout.
     /// The pipe protocol uses \0 as message delimiter.
     /// If `sessionId` is provided, the command is routed to that target session.
     @discardableResult
     func sendCDP(method: String, params: [String: Any] = [:], sessionId: String? = nil, timeout: TimeInterval = 5.0) -> [String: Any]? {
-        guard let writeHandle = cdpWriteHandle, let readHandle = cdpReadHandle else {
-            appendLog("launcher", "CDP: pipe not available")
-            return nil
-        }
-        let id = Self.nextCDPId()
-        var msg: [String: Any] = ["id": id, "method": method]
-        if !params.isEmpty { msg["params"] = params }
-        if let sid = sessionId { msg["sessionId"] = sid }
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: msg),
-              var payload = String(data: jsonData, encoding: .utf8) else {
-            appendLog("launcher", "CDP: failed to serialize \(method)")
-            return nil
-        }
-        payload.append("\0")
-        writeHandle.write(payload.data(using: .utf8)!)
-
-        let deadline = Date().addingTimeInterval(timeout)
-        let fd = readHandle.fileDescriptor
-
-        while Date() < deadline {
-            while let zeroIdx = Self._cdpReadBuffer.firstIndex(of: 0) {
-                let messageData = Self._cdpReadBuffer[Self._cdpReadBuffer.startIndex..<zeroIdx]
-                Self._cdpReadBuffer = Data(Self._cdpReadBuffer[Self._cdpReadBuffer.index(after: zeroIdx)...])
-
-                guard let response = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
-                    continue
-                }
-                if let responseId = response["id"] as? Int, responseId == id {
-                    return response
-                }
-            }
-
-            let remainingMs = Int32(max(deadline.timeIntervalSinceNow * 1000, 1))
-            var pollFd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let pollResult = poll(&pollFd, 1, min(remainingMs, 500))
-            if pollResult > 0 {
-                var buf = [UInt8](repeating: 0, count: 65536)
-                let n = read(fd, &buf, buf.count)
-                if n <= 0 { return nil }
-                Self._cdpReadBuffer.append(contentsOf: buf[0..<n])
-            } else if pollResult < 0 {
-                return nil
-            }
-        }
-
-        appendLog("launcher", "CDP: timeout waiting for response to \(method) (id=\(id))")
-        return nil
+        guard !isBrowserStackStopRequested else { return nil }
+        let response = Self.cdpTransport.command(method: method, params: params,
+                                                          sessionID: sessionId, timeout: timeout)
+        if response == nil { appendLog("launcher", "CDP: no response to \(method)") }
+        return response
     }
 
-    func stopChrome() {
-        let wasRunning = chromeRunning
-        terminateSubprocess("browser")
-        appendLog("launcher", "Chrome stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] Chrome stopped (wasRunning=\(wasRunning))")
+    @discardableResult
+    func stopChrome() -> Bool {
+        let wasRunning = _browserPid > 0
+        let stopped = terminateBrowserProcessGroup()
+        appendLog("launcher", "Chrome shutdown (wasRunning=\(wasRunning), stopped=\(stopped))")
+        return stopped
+    }
+
+    @discardableResult
+    private func terminateBrowserProcessGroup() -> Bool {
+        let processGroup = _browserPid
+        let stopped = BrowserShutdown.stop(processGroup: processGroup, transport: Self.cdpTransport) {
+            self.appendLog("launcher", $0)
+        }
+        if stopped && _browserPid == processGroup {
+            _browserPid = 0
+        }
+        return stopped
     }
 
     /// Provision the app shim in the background.
-    /// Chrome creates the shim at ~/Applications/Chromium Apps.localized/Darc.app
+    /// Chrome creates the shim at ~/Applications/Chromium Apps.localized/Xe Computer.app
     /// on first IWA install. We wait for it, move it to our shims dir, restart Chrome
     /// with a fresh Preferences.json.
     private func provisionAppShim(profileName: String, profileDir: URL, shimApp: URL, chrome: InstalledChrome) {
@@ -220,7 +202,7 @@ extension ExternalState {
             guard let self else { return }
             let fm = FileManager.default
             let appsFolder = chrome.variant == "canary" ? "Chrome Canary Apps.localized" : "Chromium Apps.localized"
-            let systemShimPath = NSHomeDirectory() + "/Applications/\(appsFolder)/Darc.app"
+            let systemShimPath = NSHomeDirectory() + "/Applications/\(appsFolder)/\(Self.xeComputerShimAppName)"
             let shimCodeSignature = systemShimPath + "/Contents/_CodeSignature"
 
             self.appendLog("launcher", "Waiting for app shim at \(systemShimPath)...")
@@ -228,6 +210,7 @@ extension ExternalState {
             // Poll for the shim to appear with a valid code signature (max ~20s)
             var found = false
             for _ in 0..<40 {
+                if self.isBrowserStackStopRequested { return }
                 if fm.fileExists(atPath: shimCodeSignature) {
                     found = true
                     break
@@ -247,15 +230,16 @@ extension ExternalState {
             // Create shims directory
             try? fm.createDirectory(at: shimApp.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-            // Verify the shim's CrAppModeUserDataDir matches our profile dir before moving
+            // Require profile ownership before moving a globally generated shim.
             let systemShimPlist = URL(fileURLWithPath: systemShimPath).appendingPathComponent("Contents/Info.plist")
-            if let plistData = try? Data(contentsOf: systemShimPlist),
-               let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
-               let shimUserDataDir = plist["CrAppModeUserDataDir"] as? String {
-                if !shimUserDataDir.hasPrefix(profileDir.path) {
-                    self.appendLog("launcher", "App shim CrAppModeUserDataDir mismatch: \(shimUserDataDir) does not start with \(profileDir.path), skipping")
-                    return
-                }
+            guard let plistData = try? Data(contentsOf: systemShimPlist),
+                  let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
+                  let shimUserDataDir = plist["CrAppModeUserDataDir"] as? String,
+                  (BrowserProcessOwnership.normalizedPath(URL(fileURLWithPath: shimUserDataDir))
+                    == BrowserProcessOwnership.normalizedPath(profileDir)
+                    || BrowserProcessOwnership.contains(shimUserDataDir, in: profileDir)) else {
+                self.appendLog("launcher", "App shim profile ownership could not be verified, skipping")
+                return
             }
 
             // Move shim to our managed location
@@ -307,10 +291,11 @@ extension ExternalState {
             }
 
             // Restart Chrome
-            self.appendLog("launcher", "Restarting Chrome and Darc after shim provisioning...")
+            guard !self.isBrowserStackStopRequested else { return }
+            self.appendLog("launcher", "Restarting Chrome and Xe Computer after shim provisioning...")
             let err = self.startDarc()
             if let err {
-                self.appendLog("launcher", "Darc relaunch failed: \(err)")
+                self.appendLog("launcher", "Xe Computer relaunch failed: \(err)")
             }
         }
     }
@@ -400,6 +385,24 @@ extension ExternalState {
         posix_spawnattr_init(&attrs)
         defer { posix_spawnattr_destroy(&attrs) }
 
+        let responsibilityResult = responsibilitySpawnAttributesSetDisclaim(&attrs, 1)
+        guard responsibilityResult == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(responsibilityResult), userInfo: [
+                NSLocalizedDescriptionKey: "Could not assign browser privacy responsibility: \(String(cString: strerror(responsibilityResult)))"
+            ])
+        }
+
+        // Own the browser and all helpers as one process group. This lets app
+        // termination stop the complete browser tree before Xe Launcher exits.
+        let processGroupResult = posix_spawnattr_setpgroup(&attrs, 0)
+        let spawnFlagsResult = posix_spawnattr_setflags(&attrs, Int16(POSIX_SPAWN_SETPGROUP))
+        guard processGroupResult == 0, spawnFlagsResult == 0 else {
+            let errorCode = processGroupResult != 0 ? processGroupResult : spawnFlagsResult
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errorCode), userInfo: [
+                NSLocalizedDescriptionKey: "Could not create browser process group: \(String(cString: strerror(errorCode)))"
+            ])
+        }
+
         var pid: pid_t = 0
         let spawnResult = cArgs.withUnsafeBufferPointer { argsBuf in
             cEnv.withUnsafeBufferPointer { envBuf in
@@ -442,12 +445,20 @@ extension ExternalState {
         // Store the pid for terminateSubprocess to use
         appendLog("launcher", "\(source) spawned via posix_spawn (pid=\(pid))")
 
+        // Record ownership before monitoring so even a browser that exits
+        // immediately cannot leave a stale PID behind.
+        _browserPid = pid
+
         // Monitor child exit in background
         let capturedPid = pid
         DispatchQueue.global().async { [weak self] in
             var status: Int32 = 0
             waitpid(capturedPid, &status, 0)
             outputPipe.fileHandleForReading.readabilityHandler = nil
+            // Retain the process group while helpers finish exiting. Clearing
+            // it when only the browser exits lets later cleanup mistake those
+            // helpers for zombies and kill them during profile writes.
+            // chromeRunning and stopChrome clear it once the group is gone.
             let exitCode = (status & 0x7f) == 0 ? Int32((status >> 8) & 0xff) : Int32(-1)
             self?.appendLog(source, "Process exited with code \(exitCode)")
             self?.appendLog("launcher", "\(source) process exited (code=\(exitCode))")
@@ -455,8 +466,6 @@ extension ExternalState {
         }
 
         // We can't return a real Process object since we used posix_spawn directly.
-        // Store the pid directly for kill management.
-        _browserPid = pid
         return process  // Placeholder — terminateSubprocess should use _browserPid
     }
 }
@@ -466,111 +475,97 @@ extension ExternalState {
 extension ExternalState {
 
     /// A stale browser-related process found on the system.
-    struct ZombieProcess {
+    struct ZombieProcess: Hashable {
         let pid: pid_t
         let name: String       // e.g. "Helium", "app_mode_loader"
         let profileDir: String? // extracted from --user-data-dir if present
     }
 
-    /// Find running Helium / Darc (app_mode_loader) processes that were NOT
-    /// spawned by this launcher instance.  These are "zombies" left over from
-    /// a previous crash or unclean shutdown.
-    func findZombieProcesses() -> [ZombieProcess] {
-        // Get all running args via `ps`
-        let pipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-eo", "pid,comm"]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return [] }
-        proc.waitUntilExit()
+    static func isPrivateBrowserExecutable(_ path: String, dataURL: URL) -> Bool {
+        BrowserProcessOwnership.contains(path, in: dataURL.appendingPathComponent("helium"))
+            || BrowserProcessOwnership.contains(path, in: dataURL.appendingPathComponent("Helium.app"))
+    }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
-            appendLog("launcher", "findZombieProcesses: failed to decode ps output")
-            return []
+    /// Find browser and IWA processes using the launcher's private profiles and
+    /// shims. An executable's installation directory alone does not establish
+    /// ownership: unrelated instances can use the same Helium installation.
+    func findZombieProcesses() -> [ZombieProcess] {
+        (try? findZombieProcessesChecked()) ?? []
+    }
+
+    func findZombieProcessesChecked() throws -> [ZombieProcess] {
+        let result = try ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/ps"), arguments: ["-eo", "pid,pgid,comm"]
+        )
+        guard result.exitCode == 0 else {
+            throw MaintenanceFailure("Could not verify browser shutdown: ps exited with code \(result.exitCode).")
         }
 
-        // Our own managed PIDs
-        let ownBrowserPid = _browserPid
-        let ownDarcPid = darcAppRef?.processIdentifier ?? -1
-        let ownPid = ProcessInfo.processInfo.processIdentifier
-        appendLog("launcher", "findZombieProcesses: ownBrowserPid=\(ownBrowserPid), ownDarcPid=\(ownDarcPid), ownPid=\(ownPid)")
+        let data = result.standardOutput
+        guard let output = String(data: data, encoding: .utf8) else {
+            throw MaintenanceFailure("Could not decode the browser process list.")
+        }
 
-        var zombies: [ZombieProcess] = []
+        var candidates: [BrowserProcessOwnership.ProcessSnapshot] = []
 
         for line in output.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard let spaceIdx = trimmed.firstIndex(of: " ") else { continue }
-            guard let pid = Int32(trimmed[trimmed.startIndex..<spaceIdx]) else { continue }
-            let comm = String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
-
-            // Log any processes that look related to Chrome/Helium/Darc
-            if comm.contains("Helium") || comm.contains("app_mode_loader") || comm.contains("Darc") {
-                appendLog("launcher", "findZombieProcesses: candidate pid=\(pid) comm='\(comm)'")
-            }
-
-            let isHelium = comm.hasSuffix("/Helium") || comm == "Helium"
+            let fields = line.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3, let pid = pid_t(fields[0]), let group = pid_t(fields[1]) else { continue }
+            let comm = BrowserProcessOwnership.executableURL(pid: pid)?.path ?? String(fields[2])
+            let privateEngine = Self.isPrivateBrowserExecutable(comm, dataURL: Self.appDataURL)
+            let isHelium = privateEngine || ["Helium", "Chromium", "Google Chrome", "Google Chrome Canary"]
+                .contains { comm == $0 || comm.hasSuffix("/" + $0) }
             let isDarc = comm.hasSuffix("/app_mode_loader") || comm == "app_mode_loader"
 
             guard isHelium || isDarc else { continue }
-            guard pid != ownBrowserPid && pid != ownDarcPid else { continue }
-            // Don't include our own launcher process
-            guard pid != ownPid else { continue }
-
-            // Try to get command-line args to extract --user-data-dir
-            let profileDir = Self.extractUserDataDir(pid: pid)
-            let name = isHelium ? "Helium" : "Darc (app_mode_loader)"
-            zombies.append(ZombieProcess(pid: pid, name: name, profileDir: profileDir))
+            let arguments = BrowserProcessOwnership.arguments(pid: pid) ?? []
+            candidates.append(.init(pid: pid, group: group, executable: comm, arguments: arguments))
         }
 
-        return zombies
-    }
-
-    /// Extract the --user-data-dir value from a process's command-line arguments using sysctl.
-    private static func extractUserDataDir(pid: pid_t) -> String? {
-        // Use ps to get full command line
-        let pipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-p", "\(pid)", "-o", "args="]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return nil }
-        proc.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let args = String(data: data, encoding: .utf8) else { return nil }
-
-        // Find --user-data-dir=...
-        for part in args.components(separatedBy: " ") {
-            if part.hasPrefix("--user-data-dir=") {
-                return String(part.dropFirst("--user-data-dir=".count))
-            }
+        return BrowserProcessOwnership.staleProcesses(
+            candidates, dataURL: Self.appDataURL,
+            ownPID: ProcessInfo.processInfo.processIdentifier, browserGroup: _browserPid
+        ).map {
+            ZombieProcess(pid: $0.pid,
+                          name: $0.executable.hasSuffix("/app_mode_loader") ? "Xe Computer (app_mode_loader)" : "Helium",
+                          profileDir: BrowserProcessOwnership.userDataDirectory(arguments: $0.arguments))
         }
-        return nil
     }
 
     /// Kill the given zombie processes.
     func killZombieProcesses(_ zombies: [ZombieProcess]) {
-        for z in zombies {
+        guard !zombies.isEmpty else { return }
+        // Recheck ownership before each signal phase instead of trusting an
+        // earlier PID list after processes may have exited or exec'd.
+        let verified = Set(findZombieProcesses())
+        let targets = zombies.filter { verified.contains($0) }
+        for z in targets {
             kill(z.pid, SIGTERM)
-            appendLog("launcher", "Killed zombie \(z.name) (pid=\(z.pid))")
+            appendLog("launcher", "Terminating zombie \(z.name) (pid=\(z.pid))")
         }
-        // Give them a moment, then SIGKILL any survivors
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            for z in zombies {
-                if kill(z.pid, 0) == 0 {
-                    kill(z.pid, SIGKILL)
-                }
+
+        waitForZombieProcessesToExit(targets, timeout: 2.0)
+
+        let stillOwned = Set(findZombieProcesses())
+        let survivors = targets.filter { stillOwned.contains($0) && kill($0.pid, 0) == 0 }
+        for z in survivors {
+            kill(z.pid, SIGKILL)
+            appendLog("launcher", "Force-terminated zombie \(z.name) (pid=\(z.pid))")
+        }
+
+        waitForZombieProcessesToExit(survivors, timeout: 2.0)
+    }
+
+    private func waitForZombieProcessesToExit(
+        _ processes: [ZombieProcess],
+        timeout: TimeInterval
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if processes.allSatisfy({ kill($0.pid, 0) != 0 }) {
+                return
             }
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
-}
-
-/// Thread-safe storage for CDP pipe handles.
-private class CDPHandles: @unchecked Sendable {
-    var writeHandle: FileHandle?
-    var readHandle: FileHandle?
 }

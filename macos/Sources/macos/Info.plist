@@ -15,16 +15,25 @@
         <string>6.0</string>
 
         <key>CFBundleName</key>
-        <string>Xe Computer</string>
+        <string>Xe Launcher</string>
 
         <key>CFBundlePackageType</key>
         <string>APPL</string>
 
         <key>CFBundleShortVersionString</key>
-        <string>1.0</string>
+        <string>0.4.1</string>
 
         <key>CFBundleVersion</key>
         <string>1</string>
+
+        <key>XeReleaseVersion</key>
+        <string>0.4.1</string>
+
+        <key>XeUpdateChannel</key>
+        <string>stable</string>
+
+        <key>XePortHelperUnregisterCLI</key>
+        <true/>
 
         <key>LSMinimumSystemVersion</key>
         <string>26.2</string>
@@ -37,6 +46,30 @@
 
         <key>NSPrincipalClass</key>
         <string>NSAppication</string>
+
+        <key>SUFeedURL</key>
+        <string>https://raw.githubusercontent.com/Agent54/xe-computer-launcher/updates/stable/appcast.xml</string>
+
+        <key>SUEnableAutomaticChecks</key>
+        <true/>
+
+        <key>SUEnableDownloaderService</key>
+        <true/>
+
+        <key>SUAllowsAutomaticUpdates</key>
+        <true/>
+
+        <key>SUAutomaticallyUpdate</key>
+        <true/>
+
+        <key>SUVerifyUpdateBeforeExtraction</key>
+        <true/>
+
+        <key>SURequireSignedFeed</key>
+        <true/>
+
+        <key>SUPublicEDKey</key>
+        <string>SPARKLE_PUBLIC_ED_KEY</string>
 
         <key>CFBundleIconFile</key>
         <string>app</string>

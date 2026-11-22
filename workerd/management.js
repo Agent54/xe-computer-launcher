@@ -1,0 +1,141 @@
+import { readRuntimeStatus, runtimeUnavailable, surfaceRuntimeFailure } from './runtime-status.js';
+import { readAppPorts } from './app-ports.js';
+import { diskUsageResponse, invalidateDiskUsage } from './disk-usage.js';
+import { routingErrorResponse } from './startup-response.js';
+
+const mimeTypes = {
+  html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8',
+  css: 'text/css; charset=utf-8', json: 'application/json; charset=utf-8',
+  svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon',
+  woff: 'font/woff', woff2: 'font/woff2', txt: 'text/plain; charset=utf-8',
+};
+const maintenanceCompletions = new WeakMap();
+
+export default {
+  async fetch(request, env) {
+    const error = (message, status, headers = {}) => routingErrorResponse(request, message, {
+      status, headers, source: 'Compose gateway', code: 'compose_request_failed',
+    });
+    const url = new URL(request.url);
+    if (url.protocol === 'https:' &&
+        (url.hostname !== 'compose-ui.localhost' ||
+         (request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+         request.headers.get('Sec-Fetch-Site') === 'cross-site')) {
+      return error('Forbidden', 403);
+    }
+    if (url.pathname === '/v1.24/runtime-status' && request.method === 'GET') {
+      return Response.json(await readRuntimeStatus(env), { headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/v1.24/app-ports' && request.method === 'GET') {
+      const ports = await readAppPorts(env);
+      return ports
+        ? Response.json(ports, { headers: { 'Cache-Control': 'no-store' } })
+        : error('Selected local app ports are unavailable', 503);
+    }
+    if (url.pathname === '/v1.24/file-descriptors') {
+      if (request.method !== 'GET') return error('Method not allowed', 405, { Allow: 'GET' });
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return error('Forbidden', 403);
+      }
+      const container = url.searchParams.get('container');
+      if ([...url.searchParams.keys()].some(key => key !== 'container') ||
+          url.searchParams.getAll('container').length > 1 ||
+          (container !== null && !/^[a-f0-9]{12,64}$/.test(container))) {
+        return Response.json({ message: 'Invalid container ID' }, { status: 400 });
+      }
+      const runtime = await readRuntimeStatus(env);
+      if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      try {
+        const target = new URL('http://maintenance/file-descriptors');
+        if (container !== null) target.searchParams.set('container', container);
+        const response = await env.MAINTENANCE.fetch(target.href, { method: 'GET' });
+        return new Response(response.body, { status: response.status,
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      } catch {
+        return Response.json({ message: 'Descriptor telemetry unavailable' }, { status: 503 });
+      }
+    }
+    if (url.pathname === '/v1.24/disk-usage/cleanup') {
+      if (!['GET', 'POST'].includes(request.method)) {
+        return error('Method not allowed', 405, { Allow: 'GET, POST' });
+      }
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return error('Forbidden', 403);
+      }
+      try {
+        const response = await env.MAINTENANCE.fetch(`http://maintenance/${request.method === 'POST' ? 'cleanup' : 'status'}`, {
+          method: request.method,
+        });
+        const cleanup = await response.json();
+        if (response.ok) {
+          if (request.method === 'POST' || (cleanup.completedAt && maintenanceCompletions.get(env.DOCKER) !== cleanup.completedAt)) {
+            invalidateDiskUsage(env.DOCKER);
+          }
+          if (cleanup.completedAt) maintenanceCompletions.set(env.DOCKER, cleanup.completedAt);
+        }
+        return Response.json(cleanup, { status: response.status, headers: { 'Cache-Control': 'no-store' } });
+      } catch (error) {
+        console.error('Cleanup service request failed:', error);
+        return Response.json({ message: 'Cleanup service unavailable.' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+    if (url.pathname === '/v1.24/disk-usage' || url.pathname === '/v1.24/disk-usage/scan') {
+      const scan = url.pathname.endsWith('/scan');
+      const method = scan ? 'POST' : 'GET';
+      if (request.method !== method) return error('Method not allowed', 405, { Allow: method });
+      // A scan does disk work. Never allow another website to trigger it.
+      if ((request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) ||
+          request.headers.get('Sec-Fetch-Site') === 'cross-site') {
+        return error('Forbidden', 403);
+      }
+      const runtime = await readRuntimeStatus(env);
+      if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      return await diskUsageResponse(env.DOCKER, scan);
+    }
+    if (/^\/v1\.24\//.test(url.pathname)) {
+      // Docker's Unix-socket bridge exists before dockerd can answer requests.
+      // Do not leave callers waiting on it during boot or VM recovery. Compose's
+      // schema, ping and repository checkout are independent of the daemon.
+      if (!['/v1.24/', '/v1.24/_ping', '/v1.24/repos/checkout'].includes(url.pathname)) {
+        const runtime = await readRuntimeStatus(env);
+        if (runtime.phase !== 'healthy') return await runtimeUnavailable(env, { runtime });
+      }
+      const headers = new Headers(request.headers);
+      // Browser credentials do not belong to the local Compose API.
+      for (const name of ['cookie', 'authorization', 'host', 'forwarded', 'x-forwarded-host', 'x-forwarded-for']) headers.delete(name);
+      try {
+        const response = await env.COMPOSE.fetch(new Request(request, { headers }));
+        const resultHeaders = new Headers(response.headers);
+        resultHeaders.set('Cache-Control', 'no-store');
+        resultHeaders.delete('set-cookie');
+        resultHeaders.delete('access-control-allow-origin');
+        if (response.status >= 500) return await surfaceRuntimeFailure(response, env);
+        // Passing the body through preserves SSE and cancellation; never .text().
+        return new Response(response.body, { status: response.status, statusText: response.statusText, headers: resultHeaders });
+      } catch { return await runtimeUnavailable(env); }
+    }
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return error('Method not allowed', 405, { Allow: 'GET, HEAD' });
+    }
+    let path;
+    try { path = decodeURIComponent(url.pathname); } catch { return error('Invalid path', 400); }
+    if (path.includes('\\') || path.split('/').some(part => part.startsWith('.')) || path.includes('\0')) {
+      return error('Not found', 404);
+    }
+    if (path === '/') path = '/index.html';
+    // This release has one page and uses hash navigation. Do not return HTML
+    // for missing JS, API routes, or directories (disk serves directory lists).
+    const extension = path.split('.').pop();
+    if (!mimeTypes[extension]) return error('Not found', 404);
+    const assetUrl = new URL('http://assets');
+    assetUrl.pathname = path;
+    const response = await env.ASSETS.fetch(new Request(assetUrl, { method: request.method }));
+    if (!response.ok) return error('Not found', 404);
+    const headers = new Headers(response.headers);
+    headers.set('Content-Type', mimeTypes[extension]);
+    headers.set('Cache-Control', path.startsWith('/_app/immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache');
+    return new Response(response.body, { status: response.status, headers });
+  },
+};

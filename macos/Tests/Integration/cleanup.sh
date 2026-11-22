@@ -2,10 +2,13 @@
 
 set -euo pipefail
 
-APP_NAME="Xe Computer"
+APP_NAME="Xe Launcher"
 BUNDLE_ID="dev.xe.computer"
-INSTALLED_APP="/Applications/${APP_NAME}.app"
+INSTALLED_APPS=("/Applications/${APP_NAME}.app" "${HOME}/Applications/${APP_NAME}.app")
 APP_DATA="${HOME}/Library/Application Support/${BUNDLE_ID}"
+PERMANENT_CLEANUP=0
+STOP_ONLY=0
+PRESERVE_PERMISSIONS=0
 
 log() {
     printf '[installer-cleanup] %s\n' "$*"
@@ -16,6 +19,187 @@ fail() {
     exit 1
 }
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/local-https-cleanup.sh"
+
+require_ci_context() {
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] \
+        || fail "permanent cleanup requires GitHub Actions"
+    [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]] \
+        || fail "permanent cleanup requires a self-hosted runner"
+    [[ "${RUNNER_OS:-}" == "macOS" && "${RUNNER_ARCH:-}" == "ARM64" ]] \
+        || fail "permanent cleanup requires the macOS ARM64 runner"
+    [[ "${GITHUB_REPOSITORY:-}" == "Agent54/xe-computer-launcher" ]] \
+        || fail "permanent cleanup requires the launcher repository"
+    if [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/main-release.yml@"* ]]; then
+        [[ "${GITHUB_JOB:-}" == "release" && "${GITHUB_EVENT_NAME:-}" == "push" ]] \
+            || fail "permanent cleanup requires the release job triggered by a push"
+        [[ "${GITHUB_REF_NAME:-}" == "int" || "${GITHUB_REF_NAME:-}" == "main" ]] \
+            || fail "permanent cleanup requires the int or main release branch"
+    elif [[ "${GITHUB_WORKFLOW_REF:-}" == "Agent54/xe-computer-launcher/.github/workflows/pr-build.yml@"* ]]; then
+        [[ "${GITHUB_JOB:-}" == "launcher-integration" && "${GITHUB_EVENT_NAME:-}" == "pull_request" \
+            && "${GITHUB_BASE_REF:-}" == "main" ]] \
+            || fail "permanent cleanup requires the integration job for a main-branch pull request"
+    else
+        fail "permanent cleanup requires the launcher release or integration workflow"
+    fi
+}
+
+configure_cleanup_mode() {
+    case "$#:${1:-}" in
+        0:)
+            PERMANENT_CLEANUP=0
+            ;;
+        1:--ci-permanent)
+            require_ci_context
+            PERMANENT_CLEANUP=1
+            PRESERVE_PERMISSIONS=1
+            ;;
+        1:--preserve-permissions)
+            PRESERVE_PERMISSIONS=1
+            ;;
+        1:--stop-only)
+            STOP_ONLY=1
+            ;;
+        *)
+            fail "usage: cleanup.sh [--ci-permanent|--preserve-permissions|--stop-only]"
+            ;;
+    esac
+}
+
+reset_app_permissions() {
+    if [[ "$PRESERVE_PERMISSIONS" == "1" ]]; then
+        log "preserving the app's one-time privacy grants"
+    else
+        log "resetting app privacy permissions"
+        if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
+            log "bundle is not registered yet; there are no registered app permissions to reset"
+        fi
+    fi
+}
+
+remove_installed_apps() {
+    if [[ "$PRESERVE_PERMISSIONS" == "1" ]]; then
+        log "retaining installed app bundles for an in-place signed CI refresh"
+        return 0
+    fi
+    local installed_app
+    for installed_app in "${INSTALLED_APPS[@]}"; do
+        if [[ -e "$installed_app" || -L "$installed_app" ]]; then
+            if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+                log "permanently removing existing installed app at $installed_app"
+                permanently_remove_owned_path "$installed_app"
+            else
+                trash_owned_path "$installed_app" app
+            fi
+        fi
+    done
+}
+
+refuse_ancestor_symlinks() {
+    local path="$1"
+    local ancestor
+
+    case "$path" in
+        /*) ;;
+        *) fail "cleanup paths must be absolute: $path" ;;
+    esac
+    case "$path" in
+        *'/../'* | *'/./'* | *'//'* | */.. | */.)
+            fail "cleanup paths must be normalized: $path" ;;
+    esac
+    ancestor="$(dirname "$path")"
+    while :; do
+        [[ ! -L "$ancestor" ]] \
+            || fail "refusing cleanup through symlinked ancestor: $ancestor"
+        [[ "$ancestor" == / ]] && break
+        ancestor="$(dirname "$ancestor")"
+    done
+}
+
+refuse_mounted_cleanup_target() {
+    local path="$1"
+    local parent_device
+    local path_device
+    local descendant
+    local descendant_device
+    local mount_output
+    local mount_record
+    local mount_point
+
+    [[ -d "$path" && ! -L "$path" ]] || return 0
+
+    mount_output="$(mount)" || fail "could not inspect mounted filesystems"
+    while IFS= read -r mount_record; do
+        mount_point="${mount_record#* on }"
+        [[ "$mount_point" != "$mount_record" ]] || continue
+        mount_point="${mount_point% (*}"
+        [[ "$mount_point" == "$path" || "$mount_point" == "$path/"* ]] \
+            && fail "refusing to remove cleanup target containing a mount point: $mount_point"
+    done <<<"$mount_output"
+
+    path_device="$(stat -f '%d' "$path")" \
+        || fail "could not inspect cleanup target filesystem: $path"
+    parent_device="$(stat -f '%d' "$(dirname "$path")")" \
+        || fail "could not inspect cleanup target parent filesystem: $path"
+    [[ "$path_device" == "$parent_device" ]] \
+        || fail "refusing to remove mounted cleanup target: $path"
+
+    while IFS= read -r -d '' descendant; do
+        descendant_device="$(stat -f '%d' "$descendant")" \
+            || fail "could not inspect cleanup target descendant: $descendant"
+        [[ "$descendant_device" == "$path_device" ]] \
+            || fail "refusing to cross nested mount during cleanup: $descendant"
+    done < <(find -x "$path" -type d -print0)
+}
+
+require_owned_cleanup_path() {
+    local path="$1"
+
+    case "$path" in
+        "/Applications/Xe Launcher.app" | \
+        "${HOME}/Applications/Xe Launcher.app" | \
+        "${HOME}/Library/Application Support/dev.xe.computer" | \
+        "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" | \
+        "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" | \
+        "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app" | \
+        "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app")
+            ;;
+        *)
+            fail "refusing cleanup of unowned path: $path"
+            ;;
+    esac
+
+    refuse_ancestor_symlinks "$path"
+}
+
+permanently_remove_owned_path() {
+    local path="$1"
+
+    require_owned_cleanup_path "$path"
+    refuse_mounted_cleanup_target "$path"
+    rm -rf -- "$path"
+}
+
+trash_owned_path() {
+    local path="$1"
+    local label="$2"
+    local destination
+
+    require_owned_cleanup_path "$path"
+    refuse_mounted_cleanup_target "$path"
+    refuse_ancestor_symlinks "${HOME}/.Trash/placeholder"
+    [[ -d "${HOME}/.Trash" && ! -L "${HOME}/.Trash" ]] \
+        || fail "Trash must be an existing directory without a symlink: ${HOME}/.Trash"
+    destination="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-${label}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
+    rmdir "$destination"
+    log "moving $path to $destination"
+    # rename(2) either moves the entry atomically or fails (including EXDEV).
+    # Unlike mv, it never falls back to copying and recursively deleting a tree.
+    perl -e 'rename $ARGV[0], $ARGV[1] or die "atomic Trash rename failed: $!\n";' \
+        -- "$path" "$destination" \
+        || fail "could not safely move cleanup target to Trash: $path"
+}
+
 detach_disk_image() {
     local target="$1"
     if [[ -d "$target" || -b "$target" ]]; then
@@ -24,16 +208,175 @@ detach_disk_image() {
     fi
 }
 
+trash_generated_shim_if_owned() {
+    local shim_path="$1"
+    local plist_path="${shim_path}/Contents/Info.plist"
+    local shim_user_data_dir
+
+    [[ -d "$shim_path" && -f "$plist_path" ]] || return 0
+    shim_user_data_dir="$(
+        /usr/libexec/PlistBuddy -c 'Print :CrAppModeUserDataDir' "$plist_path" 2>/dev/null \
+            || true
+    )"
+    [[ "$shim_user_data_dir" == "${APP_DATA}/profiles/"* ]] || return 0
+
+    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+        log "permanently removing stale generated app shim at $shim_path"
+        permanently_remove_owned_path "$shim_path"
+    else
+        trash_owned_path "$shim_path" shim
+    fi
+}
+
+stop_matching_processes() {
+    local description="$1"
+    local pattern="$2"
+    local process_ids
+
+    process_ids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    [[ -n "$process_ids" ]] || return 0
+
+    log "stopping $description"
+    while IFS= read -r process_id; do
+        kill -TERM "$process_id" 2>/dev/null || true
+    done <<<"$process_ids"
+
+    # Chromium helpers and app shims normally exit with their parent. Give them
+    # a short grace period, then ensure stale instances cannot keep app-data
+    # files open while cleanup moves the directory.
+    for _ in {1..20}; do
+        pgrep -f "$pattern" >/dev/null 2>&1 || return 0
+        sleep 0.1
+    done
+
+    process_ids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    while IFS= read -r process_id; do
+        [[ -n "$process_id" ]] && kill -KILL "$process_id" 2>/dev/null || true
+    done <<<"$process_ids"
+
+    sleep 0.1
+    pgrep -f "$pattern" >/dev/null 2>&1 \
+        && fail "could not stop $description"
+    return 0
+}
+
 [[ "$(uname -s)" == "Darwin" ]] || fail "cleanup must run on macOS"
-command -v brew >/dev/null 2>&1 || fail "Homebrew is required"
+# Loading the cleanup functions for safety tests must not stop processes or
+# remove application files.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
+configure_cleanup_mode "$@"
 
 log "stopping existing app processes"
-pkill -f '/Xe Computer.app/Contents/MacOS/bin' 2>/dev/null || true
+bundle_id_pattern="${BUNDLE_ID//./[.]}"
+helium_bundle_pattern="/Library/Application Support/${bundle_id_pattern}/(Helium[.]app|helium/[^/]+/Helium[.]app)"
+launcher_pattern='/X[Ee] Launcher[.]app/Contents/MacOS/bin'
+if [[ "$STOP_ONLY" == "1" ]]; then
+    # Ask Cocoa to quit normally so the launcher can stop Workerd, Compose,
+    # Helium, the shim, and its VM before we force any remaining process out.
+    # JXA invokes no-argument Objective-C methods on property access.
+    log "requesting graceful Xe Launcher shutdown"
+    perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' 10 \
+        osascript -l JavaScript -e 'ObjC.import("AppKit"); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("dev.xe.computer"); for (var i = 0; i < apps.count; i++) apps.objectAtIndex(i).terminate;' \
+        || log "Launch Services quit request failed; falling back to process signals"
+    for _ in {1..140}; do
+        pgrep -f "$launcher_pattern" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+fi
+stop_matching_processes \
+    "Xe Launcher instances" \
+    "$launcher_pattern"
+stop_matching_processes \
+    "orphaned Xe Launcher certificate approval" \
+    '/usr/bin/security add-trusted-cert -r trustRoot -p ssl .*/Library/Application Support/dev[.]xe[.]computer/workerd/ui-https/root[.]crt'
+stop_matching_processes \
+    "orphaned Xe Launcher workerd processes" \
+    '/X[Ee] Launcher[.]app/Contents/Helpers/workerd( |$)'
+stop_matching_processes \
+    "orphaned Xe Launcher SmolVM processes" \
+    '/X[Ee] Launcher[.]app/Contents/Helpers/SmolRuntime/smolvm-bin( |$)'
+stop_matching_processes \
+    "Xe Launcher worker-bridge processes" \
+    '/X[Ee] Launcher[.]app/Contents/MacOS/port-helper --exec-workerd'
+stop_matching_processes \
+    "Xe Computer app shims" \
+    "/Library/Application Support/${bundle_id_pattern}/shims/.*/Xe Computer[^/]*[.]app/Contents/MacOS/app_mode_loader"
+stop_matching_processes \
+    "Xe Computer app shims launched by Xe Launcher's Helium" \
+    "app_mode_loader .*--launched-by-chrome-bundle-path=.*${helium_bundle_pattern}"
+stop_matching_processes \
+    "Xe Launcher's Helium and helper processes" \
+    "${helium_bundle_pattern}/"
+
+if [[ "$STOP_ONLY" == "1" ]]; then
+    log "app processes stopped; preserving the installed app, shim files, data, port helper, and permissions"
+    exit 0
+fi
+
+# Validate every owned root before changing certificates, bundles or data. The
+# checks also run immediately before each deletion/rename below.
+for cleanup_path in \
+    "${INSTALLED_APPS[@]}" "$APP_DATA" \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app" \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app" \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app" \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app"; do
+    require_owned_cleanup_path "$cleanup_path"
+    refuse_mounted_cleanup_target "$cleanup_path"
+done
+
+# Removing the app data would otherwise strand a trusted CA in the user's
+# Keychain with no remaining certificate file for a later cleanup to identify.
+root_certificate="$APP_DATA/workerd/ui-https/root.crt"
+leaf_certificate="$APP_DATA/workerd/ui-https/ui.crt"
+if [[ -f "$root_certificate" && -f "$leaf_certificate" ]] \
+    && security verify-cert -q -L -p ssl -n compose-ui.localhost \
+        -c "$leaf_certificate" >/dev/null 2>&1; then
+    log "removing local HTTPS certificate trust"
+    if removal_output="$(security remove-trusted-cert "$root_certificate" 2>&1)"; then
+        :
+    elif [[ "$removal_output" == 'SecTrustSettingsRemoveTrustSettings: The specified item could not be found in the keychain.' ]]; then
+        log "CA has no current-user trust setting; continuing certificate cleanup"
+    else
+        printf '%s\n' "$removal_output" >&2
+        fail "could not remove local HTTPS certificate trust before deleting its source"
+    fi
+    remove_local_https_certificate "$root_certificate"
+    trust_removal_deadline=$((SECONDS + 10))
+    while security verify-cert -q -L -p ssl -n compose-ui.localhost \
+        -c "$leaf_certificate" >/dev/null 2>&1; do
+        (( SECONDS < trust_removal_deadline )) \
+            || fail "the old HTTPS certificate still validates after current-user trust cleanup; preserving app data for inspection"
+        sleep 0.25
+    done
+fi
+
+if [[ "$PRESERVE_PERMISSIONS" != "1" ]]; then
+    for installed_app in "${INSTALLED_APPS[@]}"; do
+        if [[ -x "$installed_app/Contents/MacOS/bin" ]] \
+            && [[ "$(plutil -extract XePortHelperUnregisterCLI raw "$installed_app/Contents/Info.plist" 2>/dev/null || true)" == "true" ]]; then
+            log "unregistering Xe Launcher's port helper from $installed_app"
+            "$installed_app/Contents/MacOS/bin" --unregister-port-helper \
+                || fail "could not unregister the port helper before removing $installed_app"
+        fi
+    done
+fi
+
+log "removing stale generated app shims"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer.app"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer.app"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chromium Apps.localized/Xe Computer Dev.app"
+trash_generated_shim_if_owned \
+    "${HOME}/Applications/Chrome Canary Apps.localized/Xe Computer Dev.app"
 
 log "detaching stale installer disk images"
 while IFS= read -r stale_mount; do
     detach_disk_image "$stale_mount"
-done < <(find /Volumes -maxdepth 1 -type d -name 'Xe Computer*' -print 2>/dev/null)
+done < <(find /Volumes -maxdepth 1 -type d -iname 'xe launcher*' -print 2>/dev/null)
 
 # An interrupted first-open confirmation can leave an image attached to a
 # /dev/disk node without a mounted volume. Detach both the normal build name
@@ -45,10 +388,8 @@ done < <(
         /^image-path[[:space:]]*:/ {
             image_path = $0
             sub(/^[^:]*:[[:space:]]*/, "", image_path)
-            matches_xe_dmg = (
-                image_path ~ /\/Xe Computer\.dmg$/ ||
-                image_path ~ /\/Xe\.Computer\.dmg$/
-            )
+            normalized_path = tolower(image_path)
+            matches_xe_dmg = normalized_path ~ /\/xe launcher\.dmg$/ || normalized_path ~ /\/xe\.launcher\.dmg$/
             next
         }
         matches_xe_dmg && /^\/dev\/disk[0-9]+[[:space:]]/ {
@@ -58,30 +399,17 @@ done < <(
     '
 )
 
-log "resetting app privacy permissions"
-if ! tccutil reset All "$BUNDLE_ID" >/dev/null 2>&1; then
-    log "bundle is not registered yet; there are no registered app permissions to reset"
-fi
-
-log "removing existing installed app"
-if [[ -e "$INSTALLED_APP" ]]; then
-    trashed_app="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-app-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_app"
-    log "moving existing installed app to $trashed_app"
-    mv "$INSTALLED_APP" "$trashed_app"
-fi
+reset_app_permissions
+remove_installed_apps
 
 log "removing existing app data"
 if [[ -e "$APP_DATA" ]]; then
-    trashed_data="$(mktemp -d "${HOME}/.Trash/${BUNDLE_ID}-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-    rmdir "$trashed_data"
-    log "moving existing app data to $trashed_data"
-    mv "$APP_DATA" "$trashed_data"
-fi
-
-log "uninstalling Colima so first-run dependency installation is exercised"
-if brew list --formula colima >/dev/null 2>&1; then
-    brew uninstall --force colima
+    if [[ "$PERMANENT_CLEANUP" == "1" ]]; then
+        log "permanently removing existing app data at $APP_DATA"
+        permanently_remove_owned_path "$APP_DATA"
+    else
+        trash_owned_path "$APP_DATA" data
+    fi
 fi
 
 log "cleanup complete"

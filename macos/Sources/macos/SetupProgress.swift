@@ -1,19 +1,33 @@
 import AppKit
 import os
+import ResumableDownloads
 
 /// Thread-safe cancellation token with active task management.
 final class CancellationToken: @unchecked Sendable {
     private struct State {
         var cancelled = false
-        var activeTask: URLSessionDownloadTask?
+        var activeTask: XEArchiveTransfer?
     }
     private let lock = os.OSAllocatedUnfairLock(initialState: State())
+    private let cancellationSignal = DispatchSemaphore(value: 0)
 
     var isCancelled: Bool { lock.withLock { $0.cancelled } }
 
-    var activeTask: URLSessionDownloadTask? {
-        get { lock.withLock { $0.activeTask } }
-        set { lock.withLock { $0.activeTask = newValue } }
+    func start(_ task: XEArchiveTransfer) {
+        lock.withLock {
+            if $0.cancelled {
+                task.cancel()
+            } else {
+                $0.activeTask = task
+                task.resume()
+            }
+        }
+    }
+
+    func finish(_ task: XEArchiveTransfer) {
+        lock.withLock {
+            if $0.activeTask === task { $0.activeTask = nil }
+        }
     }
 
     func cancel() {
@@ -22,6 +36,13 @@ final class CancellationToken: @unchecked Sendable {
             $0.activeTask?.cancel()
             $0.activeTask = nil
         }
+        cancellationSignal.signal()
+    }
+
+    func waitBeforeRetry(seconds: Int) -> Bool {
+        guard !isCancelled else { return false }
+        _ = cancellationSignal.wait(timeout: .now() + .seconds(seconds))
+        return !isCancelled
     }
 }
 
@@ -32,19 +53,23 @@ nonisolated(unsafe) private var _progressBar: NSProgressIndicator?
 nonisolated(unsafe) private var _titleLabel: NSTextField?
 nonisolated(unsafe) private var _statusLabel: NSTextField?
 nonisolated(unsafe) private var _cancelButton: NSButton?
-private let _cancellation = CancellationToken()
+nonisolated(unsafe) private var _setupActionButton: NSButton?
+nonisolated(unsafe) private var _setupActionHandler: (() -> Void)?
+nonisolated(unsafe) private var _setupPlacement: SetupProgressPlacement = .centered
+private let _cancellation = os.OSAllocatedUnfairLock(initialState: CancellationToken())
 
 private var setupAppDisplayName: String {
-    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Computer"
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Xe Launcher"
 }
 
-enum SetupProgressPlacement {
+enum SetupProgressPlacement: Equatable {
     case centered
     case topTrailing
 }
 
 @MainActor
 private func positionSetupPanel(_ panel: NSPanel, placement: SetupProgressPlacement) {
+    _setupPlacement = placement
     switch placement {
     case .centered:
         panel.level = .floating
@@ -66,8 +91,24 @@ private func positionSetupPanel(_ panel: NSPanel, placement: SetupProgressPlacem
     }
 }
 
+/// Move only when the placement changes, preserving user positioning during a wait.
+@MainActor
+func setSetupProgressPlacement(_ placement: SetupProgressPlacement) {
+    guard let panel = _setupWindow, placement != _setupPlacement else { return }
+    positionSetupPanel(panel, placement: placement)
+}
+
 /// The shared cancellation token for the current setup. Check `isCancelled` from any thread.
-var setupCancellation: CancellationToken { _cancellation }
+var setupCancellation: CancellationToken { _cancellation.withLock { $0 } }
+
+/// A new pass gets its own token; callbacks from an old pass stay cancelled.
+@discardableResult
+func beginSetupAttempt() -> CancellationToken {
+    _cancellation.withLock {
+        $0 = CancellationToken()
+        return $0
+    }
+}
 
 /// Load the app icon from the .app bundle's Resources directory.
 /// Tries multiple strategies: Bundle.main.resourceURL, then navigating from the executable path.
@@ -97,20 +138,29 @@ private func loadAppIcon() -> NSImage? {
 func showSetupProgress(
     message: String,
     placement: SetupProgressPlacement = .centered,
-    allowsCancellation: Bool = true
+    allowsCancellation: Bool = true,
+    title: String? = nil,
+    minimumSize: NSSize = NSSize(width: 420, height: 320)
 ) {
-    if let panel = _setupWindow {
-        positionSetupPanel(panel, placement: placement)
-        _cancelButton?.isHidden = !allowsCancellation
-        panel.orderFrontRegardless()
-        return
-    }
-
-    // Size window to fit the path
     let pathFont = NSFont.systemFont(ofSize: 11)
     let pathTextWidth = (message as NSString).size(withAttributes: [.font: pathFont]).width + 100
-    let w = max(420, min(pathTextWidth, 700))
-    let h: CGFloat = 320
+    let w = max(minimumSize.width, min(pathTextWidth, 700))
+    let h = max(minimumSize.height, 320)
+
+    if let panel = _setupWindow {
+        if panel.frame.width < w || panel.frame.height < h {
+            closeSetupProgress()
+        } else {
+            positionSetupPanel(panel, placement: placement)
+            _titleLabel?.stringValue = title ?? "Configuring \(setupAppDisplayName)"
+            _cancelButton?.isHidden = !allowsCancellation
+            _setupActionButton?.isHidden = true
+            _setupActionHandler = nil
+            panel.orderFrontRegardless()
+            return
+        }
+    }
+
     let panel = NSPanel(
         contentRect: NSRect(x: 0, y: 0, width: w, height: h),
         styleMask: [.titled, .fullSizeContentView],
@@ -160,13 +210,13 @@ func showSetupProgress(
     vfx.addSubview(iconView)
 
     // App setup title centered below icon
-    let title = NSTextField(labelWithString: "Setting up \(setupAppDisplayName)")
-    title.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
-    title.font = .systemFont(ofSize: 15, weight: .semibold)
-    title.textColor = .white
-    title.alignment = .center
-    vfx.addSubview(title)
-    _titleLabel = title
+    let titleLabel = NSTextField(labelWithString: title ?? "Configuring \(setupAppDisplayName)")
+    titleLabel.frame = NSRect(x: pad, y: h - iconSize - 80, width: w - pad * 2, height: 22)
+    titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+    titleLabel.textColor = .white
+    titleLabel.alignment = .center
+    vfx.addSubview(titleLabel)
+    _titleLabel = titleLabel
 
     // Path on its own line (clickable to open in Finder)
     let pathString = message.isEmpty ? "" : "App Dir: \(message)"
@@ -183,11 +233,12 @@ func showSetupProgress(
     let status = NSTextField(labelWithString: "Preparing...")
     status.frame = NSRect(x: pad, y: 70, width: w - pad * 2, height: h - iconSize - 125 - 70)
     status.font = .systemFont(ofSize: 12)
-    status.textColor = NSColor.white.withAlphaComponent(0.6)
+    status.textColor = NSColor.white.withAlphaComponent(0.8)
     status.alignment = .center
     status.maximumNumberOfLines = 0
     status.lineBreakMode = .byWordWrapping
     status.cell?.wraps = true
+    status.cell?.usesSingleLineMode = false
     status.cell?.isScrollable = false
     vfx.addSubview(status)
     _statusLabel = status
@@ -213,6 +264,14 @@ func showSetupProgress(
     cancelButton.isHidden = !allowsCancellation
     vfx.addSubview(cancelButton)
     _cancelButton = cancelButton
+
+    let actionButton = NSButton(title: "Open System Settings", target: SetupActionHelper.shared,
+                                action: #selector(SetupActionHelper.performAction))
+    actionButton.frame = NSRect(x: (w - 190) / 2, y: 15, width: 190, height: 28)
+    actionButton.bezelStyle = .rounded
+    actionButton.isHidden = true
+    vfx.addSubview(actionButton)
+    _setupActionButton = actionButton
 
     // Dock visibility belongs to the running launcher, not to setup windows.
     // In particular, showing setup during the DMG installation flow must never
@@ -242,6 +301,26 @@ func setSetupProgressIndeterminate(_ isIndeterminate: Bool) {
     } else {
         _progressBar?.stopAnimation(nil)
     }
+}
+
+/// Keep the next macOS permission action available while setup waits.
+@MainActor
+func setSetupProgressAction(title: String, action: @escaping () -> Void) {
+    _setupActionHandler = action
+    _setupActionButton?.title = title
+    _setupActionButton?.isHidden = false
+}
+
+@MainActor
+func hideSetupProgressAction() {
+    _setupActionButton?.isHidden = true
+    _setupActionHandler = nil
+}
+
+@MainActor
+private class SetupActionHelper: NSObject {
+    static let shared = SetupActionHelper()
+    @objc func performAction() { _setupActionHandler?() }
 }
 
 /// Possible user responses from the error dialog.
@@ -327,6 +406,8 @@ func closeSetupProgress() {
     _titleLabel = nil
     _statusLabel = nil
     _cancelButton = nil
+    _setupActionButton = nil
+    _setupActionHandler = nil
 }
 
 // Clickable label that opens the folder path in Finder on click
@@ -351,47 +432,9 @@ private class ClickablePathLabel: NSTextField {
 private class SetupCancelHelper: NSObject {
     static let shared = SetupCancelHelper()
     @objc func cancelSetup() {
-        _cancellation.cancel()
+        setupCancellation.cancel()
         _statusLabel?.stringValue = "Cancelling..."
         _setupWindow?.close()
         _setupWindow = nil
-    }
-}
-
-// MARK: - Download progress delegate
-
-/// URLSession delegate that reports download progress and captures the downloaded file.
-/// NOTE: Do NOT use a completion handler on the download task when using this delegate,
-/// otherwise the delegate progress methods will not be called.
-class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let onProgress: (Double) -> Void
-    private let completion: (URL?, Error?) -> Void
-
-    init(onProgress: @escaping (Double) -> Void, completion: @escaping (URL?, Error?) -> Void) {
-        self.onProgress = onProgress
-        self.completion = completion
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        onProgress(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // Move to a stable temp location before the system deletes it
-        let ext = downloadTask.response?.suggestedFilename.flatMap { URL(string: $0)?.pathExtension } ?? "tmp"
-        let stableTemp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
-        do {
-            try FileManager.default.moveItem(at: location, to: stableTemp)
-            completion(stableTemp, nil)
-        } catch {
-            completion(nil, error)
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error {
-            completion(nil, error)
-        }
     }
 }

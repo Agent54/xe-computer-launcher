@@ -9,17 +9,49 @@ permissions:
   contents: read
 
 jobs:
+  guest-worker:
+    uses: ./.github/workflows/guest-worker.yml
   launcher-integration:
+    needs: guest-worker
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
 
     # Available to every step in this job.
     env:
-      DEVELOPER_ID: ${{ vars.MACOS_DEVELOPER_ID }}
+      GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist/guest-runtime
+      DEVELOPER_ID: ${{ secrets.MACOS_DEVELOPER_ID }}
       NOTARY_PROFILE: notarytool-profile
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      # Detect hypervisor support unless the repository variable disables it.
+      XE_TEST_SUB_VM_AVAILABLE: ${{ vars.XE_CI_SUB_VM_AVAILABLE || 'auto' }}
 
     steps:
       - name: Check out pull request
-        uses: actions/checkout@v4
+        id: checkout
+        uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Reset launcher integration environment
+        env:
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
+        run: bash macos/Tests/Integration/cleanup-ci.sh
+
+      - name: Test release version calculation
+        run: bash macos/Tests/Integration/test-release-version.sh
+
+      - name: Verify Sparkle delta appcast fixture
+        run: |
+          macos/Build/mac/verify-appcast.sh \
+            macos/Tests/Fixtures/appcast.xml \
+            123.1 \
+            https://github.com/Agent54/xe-darc-launcher/releases/download/1.2.3/Xe-Launcher.dmg \
+            1.2.3 \
+            1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-worker
+          path: workerd/dist/guest-runtime
 
       - name: Install Developer ID certificate
         env:
@@ -58,9 +90,18 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          security list-keychains \
-            -d user \
-            -s "$KEYCHAIN_PATH"
+          # Keep the login Keychain searchable for Helium during the installer
+          # test. Replacing the list with only the signing Keychain makes its
+          # encrypted profile key unavailable even when login is the default.
+          login_keychain="$HOME/Library/Keychains/login.keychain-db"
+          [[ -f "$login_keychain" ]] || { echo "::error::CI login Keychain is missing."; exit 1; }
+          keychains=("$login_keychain")
+          while IFS= read -r keychain; do
+            if [[ -n "$keychain" && "$keychain" != "$login_keychain" && "$keychain" != "$KEYCHAIN_PATH" ]]; then
+              keychains+=("$keychain")
+            fi
+          done < <(security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/')
+          security list-keychains -d user -s "${keychains[@]}" "$KEYCHAIN_PATH"
 
           security find-identity \
             -v \
@@ -83,16 +124,49 @@ jobs:
             --key-id "$NOTARY_KEY_ID" \
             --issuer "$NOTARY_ISSUER_ID"
 
-      - name: Ensure create-dmg is installed
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check worker types
+        working-directory: workerd
+        run: deno check --no-config --no-lock tests/integration.ts
+
+      - name: Install build dependencies
         run: |
-          if ! command -v create-dmg >/dev/null 2>&1; then
-            brew install create-dmg
-          fi
+          for formula in create-dmg gh; do
+            if ! brew list --formula "$formula" >/dev/null 2>&1; then
+              brew install "$formula"
+            fi
+          done
 
       - name: Build complete launcher DMG
+        env:
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN }}
         working-directory: macos
-        run: make
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
+            exit 1
+          fi
+          make BUILD_CONFIG=release
 
-      - name: Run full launcher integration test
-        run: macos/Tests/Integration/install-from-dmg.sh
-        
+      - name: Verify packaged VM routing and builds
+        run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
+
+      - name: Verify Sparkle bundle integration
+        run: macos/Build/mac/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel stable
+
+      - name: Run launcher integration test (Standard user)
+        env:
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
+        run: macos/Tests/Integration/install-from-dmg.sh --standard-user
+
+      - name: Verify version in About dialog
+        run: macos/Tests/Integration/about-version.sh
+
+      - name: Quit integration-test apps and preserve installation
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        # Keep failed runs available for manual debugging until the next CI start.
+        run: bash macos/Tests/Integration/cleanup.sh --stop-only

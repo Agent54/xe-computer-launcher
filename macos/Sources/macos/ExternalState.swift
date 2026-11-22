@@ -13,11 +13,15 @@ final class ExternalState: @unchecked Sendable {
 
     static var appDataFolder: String { appDataURL.path }
     static var profilesPath: String { appDataURL.appendingPathComponent("profiles", isDirectory: true).path }
-    static var vmsPath: String { appDataURL.appendingPathComponent("vms", isDirectory: true).path }
     static var settingsPath: String { appDataURL.appendingPathComponent("settings.json").path }
 
-    private static let logBufferSize = 1000
-    private static let colimaProfilePrefix = "darc_"
+    static let xeComputerShimAppName = "Xe Computer.app"
+    static let xeComputerDevelopmentShimAppName = "Xe Computer Dev.app"
+
+    static func xeComputerShimAppName(isDevelopment: Bool) -> String {
+        isDevelopment ? xeComputerDevelopmentShimAppName : xeComputerShimAppName
+    }
+
     private static let requiredChromeFlags = [
         "enable-desktop-pwas-additional-windowing-controls@1",
         "enable-desktop-pwas-borderless@1",
@@ -27,7 +31,7 @@ final class ExternalState: @unchecked Sendable {
         "enable-mac-pwas-notification-attribution@1"
     ]
 
-    struct InstalledChrome {
+    struct InstalledChrome: Sendable {
         let name: String
         let appPath: String
         let executablePath: String
@@ -41,40 +45,7 @@ final class ExternalState: @unchecked Sendable {
         let path: String
     }
 
-    struct VMProfile {
-        let name: String
-        let path: String
-    }
-
-    struct ColimaInstance: Codable {
-        let name: String
-        let status: String
-        let arch: String?
-        let cpus: Int?
-        let memory: Int?
-        let disk: Int?
-        let runtime: String?
-        let address: String?
-    }
-
-    struct ColimaStatus {
-        let isInstalled: Bool
-        let isReachable: Bool
-        let instances: [ColimaInstance]
-        let error: String?
-    }
-
-    struct LogEntry {
-        let source: String
-        let line: String
-        let timestamp: Date
-    }
-
-    struct DependencyStatus {
-        let colima: Bool
-        let chrome: InstalledChrome?
-        let profiles: [String]
-    }
+    typealias LogEntry = SystemLogStore.Entry
 
     struct Settings: Codable {
         let rawData: [String: Any]?
@@ -102,23 +73,15 @@ final class ExternalState: @unchecked Sendable {
 
     private(set) var installedChromes: [InstalledChrome] = []
     private(set) var chromeProfiles: [ChromeProfile] = []
-    private(set) var vmProfiles: [VMProfile] = []
-    private(set) var colimaStatus = ColimaStatus(isInstalled: false, isReachable: false, instances: [], error: nil)
     private(set) var settings = Settings(rawData: [:])
-
-    private(set) var legacyVMRunning = false
-    private(set) var systemVMRunning = false
-    private(set) var appVMRunning = false
 
     /// Managed long-running subprocesses keyed by name
     var subprocesses: [String: Process] = [:]
     /// PID for the browser process spawned via posix_spawn (not tracked by Process)
     var _browserPid: pid_t = 0
+    private let browserLifecycleLock = NSLock()
+    private var _browserStackStopRequested = false
     private var darcApp: NSRunningApplication?
-    /// Public read-only access to the Darc NSRunningApplication reference for activation.
-    var darcAppRef: NSRunningApplication? {
-        darcRunning ? darcApp : nil
-    }
 
     /// Check if a named subprocess is currently running
     func isSubprocessRunning(_ name: String) -> Bool {
@@ -134,7 +97,7 @@ final class ExternalState: @unchecked Sendable {
         // is not necessarily a child of this process. In particular, Chrome can
         // launch it while initially provisioning the IWA, before startDarc() has
         // received an NSRunningApplication reference. Rediscover that independent
-        // application from the managed shim's path or bundle identifier.
+        // application from the managed shim's path.
         guard let app = findRunningDarcApplication() else { return false }
         darcApp = app
         return true
@@ -143,115 +106,61 @@ final class ExternalState: @unchecked Sendable {
     private func darcShimAppURL() -> URL {
         let profileName = selectedProfileName()
         let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = isDevProxy ? "Darc Dev.app" : "Darc.app"
+        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
         return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+    }
+
+    private func isManagedDarcApplication(_ app: NSRunningApplication, at appURL: URL) -> Bool {
+        !app.isTerminated && BrowserProcessOwnership.matchesShim(
+            bundleURL: app.bundleURL,
+            executableURL: BrowserProcessOwnership.executableURL(pid: app.processIdentifier) ?? app.executableURL,
+            expectedAppURL: appURL
+        )
     }
 
     private func findRunningDarcApplication() -> NSRunningApplication? {
         let appURL = darcShimAppURL()
-        let executableURL = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader")
-        let expectedAppPath = appURL.standardizedFileURL.resolvingSymlinksInPath().path
-        let expectedExecutablePath = executableURL.standardizedFileURL.resolvingSymlinksInPath().path
-
-        func isExactManagedShim(_ app: NSRunningApplication) -> Bool {
-            guard !app.isTerminated else { return false }
-            if let bundlePath = app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path,
-               bundlePath == expectedAppPath {
-                return true
-            }
-            if let executablePath = app.executableURL?.standardizedFileURL.resolvingSymlinksInPath().path,
-               executablePath == expectedExecutablePath {
-                return true
-            }
-            return false
-        }
-
-        let runningApplications = NSWorkspace.shared.runningApplications
-        if let exactMatch = runningApplications.first(where: isExactManagedShim) {
-            return exactMatch
-        }
-
-        // Launch Services can retain the shim's pre-move bundle URL for an app
-        // that Chrome launched before provisioning moved it into our app-data
-        // directory. Its generated bundle identifier remains stable, though.
-        guard let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier else {
-            return nil
-        }
-        let identifierMatches = NSRunningApplication
-            .runningApplications(withBundleIdentifier: bundleIdentifier)
-            .filter { !$0.isTerminated }
-
-        if let exactMatch = identifierMatches.first(where: isExactManagedShim) {
-            return exactMatch
-        }
-        return identifierMatches.count == 1 ? identifierMatches[0] : nil
+        return NSWorkspace.shared.runningApplications.first { isManagedDarcApplication($0, at: appURL) }
     }
     var chromeRunning: Bool {
-        // Check posix_spawn'd browser pid
+        // The browser and its helpers are spawned as a dedicated process group.
         if _browserPid > 0 {
-            // kill(pid, 0) checks if process exists without sending a signal
-            if kill(_browserPid, 0) == 0 { return true }
+            // A negative PID addresses the complete process group.
+            if kill(-_browserPid, 0) == 0 { return true }
             _browserPid = 0
         }
         return isSubprocessRunning("browser")
     }
 
-    private var lastColimaRefresh = Date.distantPast
-    private let minColimaRefreshInterval: TimeInterval = 15
-
-    private var allLogs: [LogEntry] = []
+    let logStore = SystemLogStore(directoryURL: ExternalState.appDataURL.appendingPathComponent("logs", isDirectory: true))
 
     static let shared = ExternalState()
     private init() {}
 
     func updateAll() {
         ensureAppDataFolderExists()
-        refreshChromeAvailability()
-        updateChromeProfiles()
-        updateVMProfiles()
-        refreshRuntimeStateFromSystemTruth(force: true)
         updateSettings()
-
-    }
-
-    func refreshRuntimeStateFromSystemTruth(force: Bool = false) {
-        updateColimaStatus(force: force)
+        updateChromeProfiles()
+        let localBundleProfiles = Set(
+            chromeProfiles.lazy
+                .map(\.name)
+                .filter { self.darcOverrideURL(forProfile: $0) == nil }
+        )
+        activateConfiguredDarcBundle(
+            dataURL: Self.appDataURL,
+            profileNames: localBundleProfiles,
+            browserIsRunning: chromeRunning
+        ) { [weak self] source, message in
+            self?.appendLog(source, message)
+        }
+        refreshChromeAvailability()
     }
 
     private func ensureAppDataFolderExists() {
         let fm = FileManager.default
-        for folder in [Self.appDataFolder, Self.profilesPath, Self.vmsPath] where !fm.fileExists(atPath: folder) {
+        for folder in [Self.appDataFolder, Self.profilesPath] where !fm.fileExists(atPath: folder) {
             do { try fm.createDirectory(atPath: folder, withIntermediateDirectories: true) } catch { print("[ExternalState] mkdir failed: \(error)") }
         }
-        seedBundledAssets()
-    }
-
-    /// Seed VM profile templates and download required assets (Helium, Darc) on first run.
-    private func seedBundledAssets() {
-        let fm = FileManager.default
-        let dataURL = Self.appDataURL
-
-        // --- VM profile templates (from bundle Resources/vms/) ---
-        let bundleVMs: URL? = Bundle.main.resourceURL?.appendingPathComponent("vms", isDirectory: true)
-        if let bundleVMs, fm.fileExists(atPath: bundleVMs.path) {
-            let dstVMs = dataURL.appendingPathComponent("vms", isDirectory: true)
-            if let files = try? fm.contentsOfDirectory(atPath: bundleVMs.path) {
-                for file in files where file.hasSuffix(".yaml") {
-                    let src = bundleVMs.appendingPathComponent(file)
-                    let dst = dstVMs.appendingPathComponent(file)
-                    if !fm.fileExists(atPath: dst.path) {
-                        do {
-                            try fm.copyItem(at: src, to: dst)
-                            print("[ExternalState] Seeded VM template \(file)")
-                        } catch {
-                            print("[ExternalState] Failed to seed VM template \(file): \(error)")
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Download assets from sources.json on first run ---
         downloadAssetsIfNeeded()
     }
 
@@ -262,9 +171,12 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    /// Resolve a helper app path: prefer the user data dir copy (avoids signature issues),
-    /// fall back to the app bundle's Helpers/.
-    static func resolveHelperApp(name: String) -> URL {
+    /// Helium must pass the configured version and integrity checks. Other
+    /// helpers prefer the data directory, then the app bundle's Helpers/.
+    static func resolveHelperApp(name: String) -> URL? {
+        if name == "Helium.app" {
+            return resolvedHeliumAppURL(dataURL: appDataURL)
+        }
         let userCopy = appDataURL.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: userCopy.path) {
             return userCopy
@@ -283,14 +195,21 @@ final class ExternalState: @unchecked Sendable {
     ///   When `false` (default), only populate the configured variant (defaults to Helium) to avoid
     ///   silently falling back to a different browser.
     func refreshChromeAvailability(scanAll: Bool = false) {
-        let heliumApp = Self.resolveHelperApp(name: "Helium.app")
-        let heliumExec = heliumApp.appendingPathComponent("Contents/MacOS/Helium")
-        let allChromePaths: [(String, String, String, String)] = [
-            ("Helium", heliumApp.path, heliumExec.path, "helium"),
+        installedChromes = scanChromeAvailability(scanAll: scanAll)
+    }
+
+    /// Discovery may launch browser executables. Call off the UI thread and
+    /// return a value without replacing the runtime's configured-browser cache.
+    func scanChromeAvailability(scanAll: Bool = false) -> [InstalledChrome] {
+        var allChromePaths: [(String, String, String, String)] = [
             ("Google Chrome Beta", "/Applications/Google Chrome Beta.app", "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta", "beta"),
             ("Google Chrome", "/Applications/Google Chrome.app", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "stable"),
             ("Google Chrome Canary", "/Applications/Google Chrome Canary.app", "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary", "canary")
         ]
+        if let heliumApp = Self.resolveHelperApp(name: "Helium.app") {
+            let heliumExec = heliumApp.appendingPathComponent("Contents/MacOS/Helium")
+            allChromePaths.insert(("Helium", heliumApp.path, heliumExec.path, "helium"), at: 0)
+        }
 
         let fm = FileManager.default
         let chromePaths: [(String, String, String, String)]
@@ -302,7 +221,7 @@ final class ExternalState: @unchecked Sendable {
             chromePaths = allChromePaths.filter { $0.3 == savedVariant }
         }
 
-        installedChromes = chromePaths.map { name, app, exec, variant in
+        return chromePaths.map { name, app, exec, variant in
             InstalledChrome(
                 name: name,
                 appPath: app,
@@ -319,49 +238,6 @@ final class ExternalState: @unchecked Sendable {
         chromeProfiles = getSubfolders(at: path).map { ChromeProfile(name: $0, path: "\(path)/\($0)") }
     }
 
-    func updateVMProfiles() {
-        let path = Self.vmsPath
-        vmProfiles = getYamlFiles(at: path).map {
-            let name = ($0 as NSString).deletingPathExtension
-            return VMProfile(name: name, path: "\(path)/\($0)")
-        }
-    }
-
-    func updateColimaStatus(force: Bool = false) {
-        let now = Date()
-        if !force, now.timeIntervalSince(lastColimaRefresh) < minColimaRefreshInterval {
-            return
-        }
-        lastColimaRefresh = now
-
-        guard let colimaPath = resolveExecutable(name: "colima") else {
-            colimaStatus = ColimaStatus(isInstalled: false, isReachable: false, instances: [], error: "Colima not found")
-            legacyVMRunning = false; systemVMRunning = false; appVMRunning = false
-            return
-        }
-
-        let listResult = runCommand(colimaPath, arguments: ["list", "--json"])
-        guard listResult.exitCode == 0 else {
-            colimaStatus = ColimaStatus(isInstalled: true, isReachable: false, instances: [], error: listResult.error)
-            legacyVMRunning = false; systemVMRunning = false; appVMRunning = false
-            return
-        }
-
-        var instances: [ColimaInstance] = []
-        for line in listResult.output.components(separatedBy: .newlines) {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty, let data = t.data(using: .utf8) else { continue }
-            if let instance = try? JSONDecoder().decode(ColimaInstance.self, from: data) {
-                instances.append(instance)
-            }
-        }
-
-        colimaStatus = ColimaStatus(isInstalled: true, isReachable: true, instances: instances, error: nil)
-        legacyVMRunning = isColimaProfileRunning("darc")
-        systemVMRunning = isColimaProfileRunning("\(Self.colimaProfilePrefix)system")
-        appVMRunning = isColimaProfileRunning("\(Self.colimaProfilePrefix)apps")
-    }
-
     func updateSettings() {
         let path = Self.settingsPath
         guard FileManager.default.fileExists(atPath: path) else { settings = Settings(rawData: [:]); return }
@@ -376,6 +252,40 @@ final class ExternalState: @unchecked Sendable {
 
     func boolSetting(_ key: String, default defaultValue: Bool = false) -> Bool {
         (settings.rawData?[key] as? Bool) ?? defaultValue
+    }
+
+    func stringSetting(_ key: String) -> String? {
+        settings.rawData?[key] as? String
+    }
+
+    func integerSetting(_ key: String, default defaultValue: Int = 0) -> Int {
+        if let value = settings.rawData?[key] as? Int { return value }
+        if let value = settings.rawData?[key] as? NSNumber { return value.intValue }
+        if let value = settings.rawData?[key] as? String, let parsed = Int(value) { return parsed }
+        return defaultValue
+    }
+
+    func setStringSetting(_ key: String, _ value: String) {
+        var dict = settings.rawData ?? [:]
+        dict[key] = value
+        settings = Settings(rawData: dict)
+        saveSettings()
+    }
+
+    func setIntegerSetting(_ key: String, _ value: Int) {
+        var dict = settings.rawData ?? [:]
+        dict[key] = value
+        settings = Settings(rawData: dict)
+        saveSettings()
+    }
+
+    func setAppPorts(useStandardPorts: Bool) {
+        var dict = settings.rawData ?? [:]
+        dict["app_http_port"] = Int(useStandardPorts ? WorkerdPorts.standardHTTP : WorkerdPorts.defaultHTTP)
+        dict["app_https_port"] = Int(useStandardPorts ? WorkerdPorts.standardHTTPS : WorkerdPorts.defaultHTTPS)
+        dict["app_port_choice_confirmed"] = true
+        settings = Settings(rawData: dict)
+        saveSettings()
     }
 
     func setBoolSetting(_ key: String, _ value: Bool) {
@@ -399,86 +309,60 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    func checkDependencies() -> DependencyStatus {
-        refreshChromeAvailability()
-        updateChromeProfiles()
-        return DependencyStatus(
-            colima: resolveExecutable(name: "colima") != nil,
-            chrome: preferredChrome(),
-            profiles: chromeProfiles.map(\.name)
-        )
+    func requestBrowserStackStop() {
+        browserLifecycleLock.lock()
+        _browserStackStopRequested = true
+        browserLifecycleLock.unlock()
+        // Cancel startup without interrupting Chromium's storage helpers. The
+        // browser cleanup task closes the shim and browser in order, then waits
+        // for Chromium to flush its profile before resorting to process signals.
     }
 
-    var isColimaInstalled: Bool {
-        resolveExecutable(name: "colima") != nil
-    }
-
-    var isHomebrewInstalled: Bool {
-        resolveExecutable(name: "brew") != nil
-    }
-
-    func installColima() -> String? {
-        guard !isColimaInstalled else { return nil }
-        guard let brewPath = resolveExecutable(name: "brew") else {
-            return "Colima is not installed and Homebrew could not be found. Install Homebrew and restart Xe Computer, or install Colima manually."
-        }
-
-        appendLog("launcher", "Colima not found; installing it with Homebrew")
-        let result = runCommand(brewPath, arguments: ["install", "colima"])
-        result.output.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
-        result.error.split(separator: "\n").forEach { appendLog("homebrew", String($0)) }
-
-        guard result.exitCode == 0 else {
-            let detail = (result.error.isEmpty ? result.output : result.error)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = detail.isEmpty ? "" : "\n\nHomebrew reported:\n\(String(detail.suffix(1200)))"
-            return "Homebrew could not install Colima. Run `brew install colima` in Terminal or install Colima manually.\(suffix)"
-        }
-
-        guard isColimaInstalled else {
-            return "Homebrew finished without an error, but Colima could not be found. Run `brew install colima` in Terminal or install Colima manually."
-        }
-
-        appendLog("launcher", "Colima installed successfully with Homebrew")
-        return nil
-    }
-
-    func launchBrowserStack() -> String? {
-        if boolSetting("chrome_was_running", default: true), let err = startChrome() { return err }
-        if boolSetting("darc_was_running", default: true), let err = startDarc() { return err }
-        return nil
+    var isBrowserStackStopRequested: Bool {
+        browserLifecycleLock.lock()
+        defer { browserLifecycleLock.unlock() }
+        return _browserStackStopRequested
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
-        if let source {
-            return allLogs.filter { $0.source == source }
-        }
-        return allLogs
-    }
-
-    func clearLogs(source: String? = nil) {
-        if let source {
-            allLogs.removeAll { $0.source == source }
-        } else {
-            allLogs.removeAll()
-        }
+        logStore.snapshot(sources: source.map { [$0] }).entries
     }
 
     func appendLog(_ source: String, _ line: String) {
-        if allLogs.count >= Self.logBufferSize {
-            allLogs.removeFirst(allLogs.count - Self.logBufferSize + 1)
-        }
-        allLogs.append(LogEntry(source: source, line: line, timestamp: Date()))
+        logStore.append(source, line)
     }
 
 
     func startDarc() -> String? {
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
         if !chromeRunning, let err = startChrome() { return err }
 
+        let chromeReady = sendCDP(method: "Browser.getVersion", timeout: 10) != nil
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
+        guard chromeReady else {
+            let msg = "Chrome did not become ready before opening Xe Computer"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        return openDarcShim()
+    }
+
+    /// Ask Launch Services to reopen the managed app shim. Activating an
+    /// already-running shim is insufficient when its last window was closed;
+    /// opening the app again sends the normal macOS reopen event.
+    func reopenDarc() -> String? {
+        guard darcRunning else { return startDarc() }
+        return openDarcShim()
+    }
+
+    private func openDarcShim() -> String? {
+        guard !isBrowserStackStopRequested else { return "Xe Computer startup cancelled because Xe Launcher is shutting down" }
+        let wasRunning = darcRunning
         let appURL = darcShimAppURL()
         let loader = appURL.appendingPathComponent("Contents/MacOS/app_mode_loader").path
         guard FileManager.default.isExecutableFile(atPath: loader) else {
-            let msg = "Darc loader not found at \(loader)"
+            let msg = "Xe Computer loader not found at \(loader)"
             appendLog("launcher", msg)
             print("[ExternalState] \(msg)")
             return msg
@@ -488,38 +372,81 @@ final class ExternalState: @unchecked Sendable {
         // application (not as a child process of the launcher). This matches
         // the behaviour of launching from Finder / terminal `open`.
         let config = NSWorkspace.OpenConfiguration()
-        config.activates = false
+        config.activates = true
         let semaphore = DispatchSemaphore(value: 0)
         class Box: @unchecked Sendable { var error: String? }
         let box = Box()
         NSWorkspace.shared.openApplication(at: appURL, configuration: config) { [weak self] app, error in
             if let error {
-                box.error = "Darc open failed: \(error.localizedDescription)"
-            } else if let app {
-                self?.darcApp = app
+                box.error = "Xe Computer open failed: \(error.localizedDescription)"
+            } else if let app, let self {
+                guard self.isManagedDarcApplication(app, at: appURL) else {
+                    box.error = "Launch Services returned an application outside the managed Xe Computer shim path"
+                    semaphore.signal()
+                    return
+                }
+                if self.isBrowserStackStopRequested {
+                    _ = app.terminate()
+                } else {
+                    self.darcApp = app
+                }
             }
             semaphore.signal()
         }
-        _ = semaphore.wait(timeout: .now() + 10)
+
+        let openDeadline = Date().addingTimeInterval(10)
+        var openCompleted = false
+        while Date() < openDeadline {
+            if semaphore.wait(timeout: .now() + 0.1) == .success {
+                openCompleted = true
+                break
+            }
+            if isBrowserStackStopRequested {
+                return "Xe Computer startup cancelled because Xe Launcher is shutting down"
+            }
+        }
+        guard openCompleted else {
+            let msg = "Xe Computer open timed out"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        if isBrowserStackStopRequested {
+            if let app = darcApp, !app.isTerminated { _ = app.terminate() }
+            return "Xe Computer startup cancelled because Xe Launcher is shutting down"
+        }
 
         if let err = box.error {
             appendLog("launcher", err)
             print("[ExternalState] \(err)")
             return err
         }
-        let running = darcRunning
-        let pid = darcApp?.processIdentifier ?? -1
-        appendLog("launcher", "Darc started via NSWorkspace (isRunning=\(running), pid=\(pid))")
-        print("[ExternalState] Darc started, isRunning=\(running)")
-
-        // Bring the Darc app to the foreground (silently — ignore if app terminated)
-        if let app = darcApp, !app.isTerminated {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                if let ref = self?.darcApp, !ref.isTerminated {
-                    ref.activate()
-                }
+        let runningDeadline = Date().addingTimeInterval(5)
+        while Date() < runningDeadline && !darcRunning {
+            if isBrowserStackStopRequested {
+                return "Xe Computer startup cancelled because Xe Launcher is shutting down"
             }
+            Thread.sleep(forTimeInterval: 0.05)
         }
+        guard darcRunning else {
+            let msg = "Xe Computer was opened but did not remain running"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        // Give an app shim that fails during its initial browser connection a
+        // moment to exit before recording the restore as successful.
+        Thread.sleep(forTimeInterval: 0.25)
+        guard darcRunning else {
+            let msg = "Xe Computer exited while connecting to Chrome"
+            appendLog("launcher", msg)
+            return msg
+        }
+
+        let pid = darcApp?.processIdentifier ?? -1
+        let action = wasRunning ? "reopened" : "started"
+        appendLog("launcher", "Xe Computer \(action) via NSWorkspace (pid=\(pid))")
+        print("[ExternalState] Xe Computer \(action), pid=\(pid)")
 
         // Start a background `log stream` to capture NSLog output from app_mode_loader
         if pid > 0 {
@@ -528,15 +455,30 @@ final class ExternalState: @unchecked Sendable {
         return nil
     }
 
-    func stopDarc() {
+    @discardableResult
+    func stopDarc() -> Bool {
         let wasRunning = darcRunning
         if let app = darcApp, !app.isTerminated {
-            app.terminate()
+            _ = app.terminate()
+            waitForApplicationToExit(app, timeout: 3.0)
+            if !app.isTerminated {
+                appendLog("launcher", "Xe Computer did not exit after 3.0s; force terminating it")
+                _ = app.forceTerminate()
+                waitForApplicationToExit(app, timeout: 2.0)
+            }
         }
-        darcApp = nil
+        let stopped = darcApp?.isTerminated != false
+        if stopped { darcApp = nil }
         terminateSubprocess("darc_log")
-        appendLog("launcher", "Darc stopped (wasRunning=\(wasRunning))")
-        print("[ExternalState] Darc stopped (wasRunning=\(wasRunning))")
+        appendLog("launcher", "Xe Computer shutdown (wasRunning=\(wasRunning), stopped=\(stopped))")
+        return stopped
+    }
+
+    private func waitForApplicationToExit(_ app: NSRunningApplication, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline && !app.isTerminated {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     private func desktopForWindow(_ windowID: UInt32) -> Int? {
@@ -690,8 +632,8 @@ final class ExternalState: @unchecked Sendable {
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: darcWindows, options: [.prettyPrinted, .sortedKeys])
             try jsonData.write(to: outputURL, options: .atomic)
-            appendLog("launcher", "Saved \(darcWindows.count) darc window position(s) to \(outputURL.path)")
-            print("[ExternalState] Saved \(darcWindows.count) window positions to \(outputURL.path)")
+            appendLog("launcher", "Saved \(darcWindows.count) Xe Computer window position(s) to \(outputURL.path)")
+            print("[ExternalState] Saved \(darcWindows.count) Xe Computer window positions to \(outputURL.path)")
         } catch {
             appendLog("launcher", "Failed to save window positions: \(error)")
             print("[ExternalState] Failed to save window positions: \(error)")
@@ -718,8 +660,8 @@ final class ExternalState: @unchecked Sendable {
 
         guard !entries.isEmpty else { return }
         guard darcRunning, let darcPID = darcApp?.processIdentifier else {
-            appendLog("launcher", "Darc is not running, cannot restore windows")
-            print("[ExternalState] Darc not running")
+            appendLog("launcher", "Xe Computer is not running, cannot restore windows")
+            print("[ExternalState] Xe Computer not running")
             return
         }
 
@@ -780,7 +722,7 @@ final class ExternalState: @unchecked Sendable {
         print("[ExternalState] Restored \(min(entries.count, allWindows.count)) window positions")
     }
 
-    /// Open a new window in the Darc app shim via its dock menu "New Window" item
+    /// Open a new window in the Xe Computer app shim via its dock menu "New Window" item.
     private func openNewDarcWindow(app: AXUIElement, pid: Int32) {
         // Use AppleScript to click "New Window" in the app's dock menu
         let script = """
@@ -791,7 +733,7 @@ final class ExternalState: @unchecked Sendable {
                     try
                         if (value of attribute "AXIsApplicationRunning" of dockItem) is true then
                             set itemName to name of dockItem
-                            if itemName is "Darc" then
+                            if itemName is "Xe Computer" then
                                 perform action "AXShowMenu" of dockItem
                                 delay 0.3
                                 click menu item "New Window" of menu 1 of dockItem
@@ -808,7 +750,7 @@ final class ExternalState: @unchecked Sendable {
             appleScript.executeAndReturnError(&error)
             if let error {
                 print("[ExternalState] AppleScript new window error: \(error)")
-                appendLog("launcher", "Failed to open new darc window: \(error)")
+                appendLog("launcher", "Failed to open new Xe Computer window: \(error)")
             }
         }
     }
@@ -854,11 +796,6 @@ final class ExternalState: @unchecked Sendable {
         if let process = subprocesses[name] {
             process.terminate()
             subprocesses.removeValue(forKey: name)
-        }
-        // Also kill posix_spawn'd browser process
-        if name == "browser" && _browserPid > 0 {
-            kill(_browserPid, SIGTERM)
-            _browserPid = 0
         }
     }
 
@@ -942,48 +879,6 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    func startLegacyVM() -> String? { runColimaLogged(arguments: ["start", "-p", "darc"]) }
-    func stopLegacyVM() -> String? { runColimaLogged(arguments: ["stop", "-p", "darc"]) }
-
-    func startColimaVM(profileName: String) -> String? {
-        if let err = ensureColimaProfile(profileName: profileName) { return err }
-        return runColimaLogged(arguments: ["start", "-p", "\(Self.colimaProfilePrefix)\(profileName)"])
-    }
-
-    func stopColimaVM(profileName: String) -> String? {
-        runColimaLogged(arguments: ["stop", "-p", "\(Self.colimaProfilePrefix)\(profileName)"])
-    }
-
-    private func ensureColimaProfile(profileName: String) -> String? {
-        let profileDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".colima", isDirectory: true)
-            .appendingPathComponent("\(Self.colimaProfilePrefix)\(profileName)", isDirectory: true)
-        let dest = profileDir.appendingPathComponent("colima.yaml")
-        let src = Self.appDataURL.appendingPathComponent("vms/\(profileName).yaml")
-
-        guard FileManager.default.fileExists(atPath: src.path) else { return "VM config not found: \(src.path)" }
-
-        do {
-            try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
-            try FileManager.default.copyItem(at: src, to: dest)
-            return nil
-        } catch {
-            return "Failed to prepare colima profile: \(error.localizedDescription)"
-        }
-    }
-
-    private func runColimaLogged(arguments: [String]) -> String? {
-        guard let colimaPath = resolveExecutable(name: "colima") else { return "Colima not found" }
-        let result = runCommand(colimaPath, arguments: arguments)
-        result.output.split(separator: "\n").forEach { appendLog("colima", String($0)) }
-        result.error.split(separator: "\n").forEach { appendLog("colima", String($0)) }
-        updateColimaStatus(force: true)
-        return result.exitCode == 0 ? nil : (result.error.isEmpty ? "colima command failed" : result.error)
-    }
-
-
-
     /// Returns the currently selected Chrome variant.  Defaults to "helium" when no variant is saved.
     /// Returns `nil` if the selected variant is not installed — never silently falls back to another browser.
     func selectedChrome() -> InstalledChrome? {
@@ -1033,22 +928,6 @@ final class ExternalState: @unchecked Sendable {
         return versionStr.split(separator: ".").first.flatMap { Int($0) }
     }
 
-    private func resolveExecutable(name: String) -> String? {
-        for c in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] where FileManager.default.isExecutableFile(atPath: c) {
-            return c
-        }
-        let which = runCommand("/usr/bin/which", arguments: [name])
-        if which.exitCode == 0 {
-            let t = which.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.isEmpty ? nil : t
-        }
-        return nil
-    }
-
-    private func isColimaProfileRunning(_ name: String) -> Bool {
-        colimaStatus.instances.contains { $0.name == name && $0.status == "Running" }
-    }
-
     private func getSubfolders(at path: String) -> [String] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return [] }
@@ -1056,16 +935,6 @@ final class ExternalState: @unchecked Sendable {
         return contents.filter { name in
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: "\(path)/\(name)", isDirectory: &isDir) && isDir.boolValue
-        }.sorted()
-    }
-
-    private func getYamlFiles(at path: String) -> [String] {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else { return [] }
-        guard let contents = try? fm.contentsOfDirectory(atPath: path) else { return [] }
-        return contents.filter {
-            let ext = ($0 as NSString).pathExtension.lowercased()
-            return ext == "yaml" || ext == "yml"
         }.sorted()
     }
 

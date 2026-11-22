@@ -1,0 +1,10 @@
+# Derived from SmolVM's verified generic Docker Compose artifact at build time.
+# The image owns both services; BuildKit remains lazy inside the base image.
+entrypoint = ["/usr/local/bin/docker-init", "--", "/opt/xe/runtime/start-services.sh"]
+cmd = ["dockerd", "--host=unix:///var/run/docker.sock", "--data-root=/storage/docker"]
+env = ["DOCKER_TLS_CERTDIR=", "DOCKER_BUILDKIT=1", "DOCKER_CONFIG=/storage/xe-build-client"]
+cpus = 2
+memory = 2048
+net = true
+storage = 20
+overlay = 10

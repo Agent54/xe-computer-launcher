@@ -2,66 +2,229 @@
 -include .env
 export
 
-APP_NAME = Xe Computer
+APP_NAME = Xe Launcher
 BUNDLE_ID = dev.xe.computer
 BUILD_DIR = .build
-APP_BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
+BUILD_CONFIG ?= release
+# Resolve Swift through the selected developer directory, just like the SDK
+# and testing frameworks. A different Swift first in PATH can miss Testing.
+SWIFT ?= /usr/bin/xcrun swift
+SWIFT_BUILD_FLAGS ?=
+SPARKLE_PUBLIC_ED_KEY ?=
+DIST_DIR = dist
+APP_BUNDLE = $(DIST_DIR)/$(APP_NAME).app
 CONTENTS = $(APP_BUNDLE)/Contents
 MACOS_DIR = $(CONTENTS)/MacOS
 RESOURCES = $(CONTENTS)/Resources
+FRAMEWORKS = $(CONTENTS)/Frameworks
+HELPERS = $(CONTENTS)/Helpers
+SPARKLE_FRAMEWORK = $(FRAMEWORKS)/Sparkle.framework
+BUILT_SPARKLE_FRAMEWORK = $(BUILD_DIR)/$(BUILD_CONFIG)/Sparkle.framework
+SMOL_RUNTIME_STAGE = $(BUILD_DIR)/smol-runtime/SmolRuntime
+SMOL_RUNTIME = $(HELPERS)/SmolRuntime
+SMOL_RUNTIME_RESOURCES = $(RESOURCES)/SmolRuntime
+COMPOSE_SERVER_STAGE = $(BUILD_DIR)/compose-server/docker-compose
+COMPOSE_SERVER = $(HELPERS)/docker-compose
+CONTAINER_TOOLS_STAGE = $(BUILD_DIR)/container-tools
+BUILDX = $(HELPERS)/buildx
+WORKERD_STAGE = $(BUILD_DIR)/workerd/workerd
+WORKERD = $(HELPERS)/workerd
+PORT_HELPER = $(MACOS_DIR)/port-helper
+COMPOSE_UI_STAGE = $(BUILD_DIR)/compose-ui
+GUEST_ROUTER_ASSET_DIR ?=
 DMG_NAME = $(APP_NAME).dmg
 ENTITLEMENTS = Sources/macos/Entitlements.plist
+SMOL_ENTITLEMENTS = Sources/macos/SmolVMEntitlements.plist
 
 # Set in .env or pass on the command line
+# DEVELOPMENT_ID ?=
 # DEVELOPER_ID ?=
 # APPLE_ID ?=
 # TEAM_ID ?=
 NOTARY_PROFILE ?= notarytool-profile
 NOTARY_KEYCHAIN_ARG = $(if $(strip $(NOTARY_KEYCHAIN)),--keychain "$(NOTARY_KEYCHAIN)",)
 
-.PHONY: all clean build bundle run release release-sign check notarize dmg
+# Local bundles need a stable signing identity so macOS can recognize rebuilt
+# versions as the same app and retain privacy permissions. Prefer an explicitly
+# configured identity, then the first Apple Development identity in the user's
+# keychain, and use ad-hoc signing only when neither is available.
+DEVELOPMENT_ID ?= $(shell /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/awk -F '"' '/"Apple Development:/{print $$2; exit}')
+DEVELOPMENT_SIGN_IDENTITY = $(if $(strip $(DEVELOPMENT_ID)),$(DEVELOPMENT_ID),-)
+
+.PHONY: all clean build test smol-runtime compose-server workerd compose-ui package sign-sparkle sign-smol-runtime sign-compose-server sign-workerd sign-port-helper verify-workerd verify-port-helper verify-smol-runtime verify-compose-server bundle run release release-sign check notarize dmg notarize-dmg dev-dmg verify-sparkle
 
 all: release
 
-zip-helpers:
-	@echo "Zipping helpers..."
-	@ditto -c -k --keepParent $(BUILD_DIR)/Helium.zip Sources/macos/helpers/Helium.app
-
 build:
-	swift build -c release
+	$(SWIFT) build -c $(BUILD_CONFIG) $(SWIFT_BUILD_FLAGS)
 
-package: build
+# One SwiftPM build produces the launcher, helpers, and tests in the same
+# configuration. Packaging below consumes that tested launcher binary.
+test: workerd compose-ui compose-server container-tools
+	@BUILD_CONFIG="$(BUILD_CONFIG)" /bin/bash Tests/run-tests.sh $(SWIFT_BUILD_FLAGS)
+
+smol-runtime:
+	@SMOLVM_ASSET_DIR="$(SMOLVM_ASSET_DIR)" /bin/bash Build/mac/stage-smol-runtime.sh "$(SMOL_RUNTIME_STAGE)"
+
+compose-server:
+	@/bin/bash Build/mac/stage-compose-server.sh "$(COMPOSE_SERVER_STAGE)"
+
+.PHONY: container-tools sign-buildx verify-buildx
+container-tools:
+	@/bin/bash Build/mac/stage-container-tools.sh
+
+sign-buildx:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(BUILDX)"
+
+verify-buildx:
+	@/bin/bash Build/mac/verify-container-tools.sh "$(CONTENTS)"
+
+workerd:
+	cd ../workerd && deno install --frozen
+	cd ../workerd && deno task build
+	cd ../workerd && deno task build:guest
+	@file ../workerd/node_modules/workerd/bin/workerd | grep -q 'Mach-O 64-bit executable arm64'
+	@mkdir -p "$(BUILD_DIR)/workerd/resources"
+	@cp ../workerd/node_modules/workerd/bin/workerd "$(WORKERD_STAGE)"
+	@version=$$(/usr/bin/plutil -extract version raw -expect string ../workerd/node_modules/workerd/package.json) && \
+		printf 'WORKERD_VERSION=%s\n' "$$version" > "$(BUILD_DIR)/workerd/Workerd.lock"
+	@rsync -a --delete ../workerd/dist/host-worker/ "$(BUILD_DIR)/workerd/resources/"
+
+compose-ui:
+	@/bin/bash Build/mac/stage-compose-ui.sh "$(COMPOSE_UI_STAGE)"
+
+.PHONY: guest-worker
+guest-worker: workerd
+	@test -f "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/checksums.txt" || { echo 'Provide the Linux ARM64 guest-worker CI artifact via GUEST_ROUTER_ASSET_DIR.' >&2; exit 1; }
+	@cd "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)" && shasum -a 256 --check checksums.txt
+	@mkdir -p "$(BUILD_DIR)/guest-worker"
+	@rsync -a --delete --delete-excluded --include='/workerd' --include='/lib/***' --include='/licenses/***' --exclude='*' "$(if $(GUEST_ROUTER_ASSET_DIR),$(GUEST_ROUTER_ASSET_DIR),../workerd/dist/guest-runtime)/" "$(BUILD_DIR)/guest-worker/"
+	@cp ../workerd/dist/guest-worker.bin ../workerd/Runtime/vm/start-router.sh "$(BUILD_DIR)/guest-worker/"
+	@chmod 755 "$(BUILD_DIR)/guest-worker/workerd" "$(BUILD_DIR)/guest-worker/lib/ld-linux-aarch64.so.1"
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 workerd guest-worker.bin lib/* licenses/* start-router.sh > checksums.txt
+	@cd "$(BUILD_DIR)/guest-worker" && shasum -a 256 --check checksums.txt
+
+.PHONY: launcher-runtime
+launcher-runtime: smol-runtime guest-worker
+	@/bin/bash Build/mac/build-launcher-image.sh "$(SMOL_RUNTIME_STAGE)" "$(BUILD_DIR)/guest-worker"
+
+package: test launcher-runtime
 	@echo "Creating app package..."
 	@mkdir -p "$(MACOS_DIR)"
 	@mkdir -p "$(RESOURCES)"
-	@cp "$(BUILD_DIR)/release/macos" "$(MACOS_DIR)/bin"
+	@mkdir -p "$(FRAMEWORKS)"
+	@mkdir -p "$(HELPERS)"
+	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/macos" "$(MACOS_DIR)/bin"
+	@cp Sources/macos/Info.plist "$(CONTENTS)/Info.plist"
+	@if [ -n "$(SPARKLE_PUBLIC_ED_KEY)" ]; then \
+		plutil -replace SUPublicEDKey -string "$(SPARKLE_PUBLIC_ED_KEY)" "$(CONTENTS)/Info.plist"; \
+	fi
 	@echo 'APPL????' > "$(CONTENTS)/PkgInfo"
 	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
 	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
+	@rsync -a --delete "$(BUILT_SPARKLE_FRAMEWORK)/" "$(SPARKLE_FRAMEWORK)/"
+	@/bin/bash Build/mac/build-sparkle-downloader.sh
+	@cp .build/sparkle-downloader/Downloader "$(SPARKLE_FRAMEWORK)/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+	@/bin/bash Tests/Integration/test-sparkle-resume.sh "$(SPARKLE_FRAMEWORK)"
+	@/bin/bash Build/mac/copy-smol-into-app.sh "$(SMOL_RUNTIME_STAGE)" "$(SMOL_RUNTIME)" "$(SMOL_RUNTIME_RESOURCES)"
+	@cp "$(COMPOSE_SERVER_STAGE)" "$(COMPOSE_SERVER)"
+	@cp ComposeServer.lock "$(RESOURCES)/ComposeServer.lock"
+	@cp "$(CONTAINER_TOOLS_STAGE)/Helpers/buildx" "$(BUILDX)"
+	@rm -f "$(HELPERS)/cli-plugins/docker-buildx"
+	@rsync -a --delete "$(CONTAINER_TOOLS_STAGE)/Resources/ContainerTools/" "$(RESOURCES)/ContainerTools/"
+	@cp "$(WORKERD_STAGE)" "$(WORKERD)"
+	@cp "$(BUILD_DIR)/$(BUILD_CONFIG)/port-helper" "$(PORT_HELPER)"
+	@mkdir -p "$(CONTENTS)/Library/LaunchDaemons"
+	@cp Sources/macos/PortHelperLaunchDaemon.plist "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
+	@cp "$(BUILD_DIR)/workerd/Workerd.lock" "$(RESOURCES)/Workerd.lock"
+	@rsync -a --delete "$(BUILD_DIR)/workerd/resources/" "$(RESOURCES)/Worker/"
+	@rm -rf "$(RESOURCES)/GuestWorker"
+	@rsync -a --delete "$(COMPOSE_UI_STAGE)/" "$(RESOURCES)/compose-ui/"
+	@cp ComposeUI.lock "$(RESOURCES)/"
+	@rm -f "$(RESOURCES)/Workerd.package.json"
 	@echo "App package created at $(APP_BUNDLE)"
+
+# Sparkle contains several nested signed executables. Sign from the innermost
+# XPC services and helpers outward; using codesign --deep here would overwrite
+# the Downloader service's required entitlements.
+SIGN_IDENTITY ?= -
+CODESIGN_TIMESTAMP = $(if $(filter-out -,$(SIGN_IDENTITY)),--timestamp,)
+
+sign-sparkle:
+	@echo "Signing Sparkle framework with: $(SIGN_IDENTITY)"
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) \
+		--sign "$(SIGN_IDENTITY)" \
+		"$(SPARKLE_FRAMEWORK)/Versions/B/XPCServices/Installer.xpc"
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) \
+		--preserve-metadata=entitlements \
+		--sign "$(SIGN_IDENTITY)" \
+		"$(SPARKLE_FRAMEWORK)/Versions/B/XPCServices/Downloader.xpc"
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) \
+		--sign "$(SIGN_IDENTITY)" \
+		"$(SPARKLE_FRAMEWORK)/Versions/B/Autoupdate"
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) \
+		--sign "$(SIGN_IDENTITY)" \
+		"$(SPARKLE_FRAMEWORK)/Versions/B/Updater.app"
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) \
+		--sign "$(SIGN_IDENTITY)" \
+		"$(SPARKLE_FRAMEWORK)"
+
+sign-smol-runtime:
+	@/bin/bash Build/mac/sign-smol-runtime.sh "$(SMOL_RUNTIME)" "$(SIGN_IDENTITY)" "$(SMOL_ENTITLEMENTS)"
+
+verify-smol-runtime:
+	@/bin/bash Build/mac/verify-smol-runtime.sh "$(SMOL_RUNTIME)"
+
+sign-compose-server:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(COMPOSE_SERVER)"
+
+verify-compose-server:
+	@/bin/bash Build/mac/verify-compose-server.sh "$(COMPOSE_SERVER)"
+
+sign-workerd:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --entitlements Sources/macos/WorkerdEntitlements.plist --sign "$(SIGN_IDENTITY)" "$(WORKERD)"
+
+sign-port-helper:
+	@codesign --force --options runtime $(CODESIGN_TIMESTAMP) --sign "$(SIGN_IDENTITY)" "$(PORT_HELPER)"
+
+verify-workerd:
+	@/bin/bash Build/mac/verify-workerd.sh "$(WORKERD)"
+
+verify-port-helper:
+	@/bin/bash Build/mac/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist"
 
 bundle: package
 	@echo "Creating app bundle..."
-	@cp Sources/macos/Info.plist "$(CONTENTS)/Info.plist"
-	@echo "Signing app bundle (ad-hoc)..."
-	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign - "$(APP_BUNDLE)"
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-smol-runtime
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-buildx
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-workerd
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-port-helper
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPMENT_SIGN_IDENTITY)" sign-sparkle
+	@echo "Signing app bundle with: $(DEVELOPMENT_SIGN_IDENTITY)"
+	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPMENT_SIGN_IDENTITY)" "$(APP_BUNDLE)"
 	@echo "App bundle created at $(APP_BUNDLE)"
 
-run: package
-	@open "$(MACOS_DIR)/bin"
+run: bundle
+	@open "$(APP_BUNDLE)"
 
 # Release build with Developer ID signing
-release-sign: build
+release-sign: BUILD_CONFIG=release
+release-sign: package
 	@echo "Creating signed app bundle for distribution..."
-	@mkdir -p "$(MACOS_DIR)"
-	@mkdir -p "$(RESOURCES)"
-	@cp "$(BUILD_DIR)/release/macos" "$(MACOS_DIR)/bin"
-	@cp Sources/macos/Info.plist "$(CONTENTS)/Info.plist"
-	@echo 'APPL????' > "$(CONTENTS)/PkgInfo"
-	@rsync -a Sources/macos/Resources/ "$(RESOURCES)/"
-	@rsync -a --delete Sources/macos/sandbox/ "$(RESOURCES)/sandbox/"
+	@public_key="$$(plutil -extract SUPublicEDKey raw "$(CONTENTS)/Info.plist")"; \
+		if [ -z "$$public_key" ] || [ "$$public_key" = "SPARKLE_PUBLIC_ED_KEY" ]; then \
+			echo "ERROR: Set SPARKLE_PUBLIC_ED_KEY before creating a release build." >&2; \
+			exit 1; \
+		fi
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-smol-runtime
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-compose-server
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-buildx
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-workerd
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-port-helper
+	@$(MAKE) SIGN_IDENTITY="$(DEVELOPER_ID)" sign-sparkle
 	@echo "Signing with Developer ID: $(DEVELOPER_ID)"
-	@codesign --force --options runtime --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
+	@codesign --force --options runtime --timestamp --entitlements "$(ENTITLEMENTS)" --sign "$(DEVELOPER_ID)" "$(APP_BUNDLE)"
 	@echo "Verifying signature..."
 	@codesign --verify --verbose "$(APP_BUNDLE)"
 
@@ -69,8 +232,18 @@ release-sign: build
 	-@spctl --assess --verbose --type execute "$(APP_BUNDLE)"
 	@echo "Signed app bundle created at $(APP_BUNDLE)"
 
+verify-sparkle:
+	@Build/mac/verify-sparkle.sh "$(APP_BUNDLE)"
+
 # Pre-notarization checks (catches issues locally before slow upload)
 check: release-sign
+	@Build/mac/verify-sparkle.sh "$(APP_BUNDLE)" --release
+	@/bin/bash Build/mac/verify-smol-runtime.sh "$(SMOL_RUNTIME)" --release
+	@/bin/bash Build/mac/verify-compose-server.sh "$(COMPOSE_SERVER)" --release
+	@/bin/bash Build/mac/verify-container-tools.sh "$(CONTENTS)" --release
+	@/bin/bash Build/mac/verify-workerd.sh "$(WORKERD)" --release
+	@/bin/bash Build/mac/verify-port-helper.sh "$(PORT_HELPER)" "$(CONTENTS)/Library/LaunchDaemons/dev.xe.computer.ports.plist" --release
+
 	@echo "Deep strict signature verification..."
 	@codesign --verify --deep --strict --verbose=2 "$(APP_BUNDLE)"
 
@@ -105,26 +278,63 @@ notarize: check
 # Create DMG for distribution (after notarization)
 dmg: notarize
 	@echo "Creating DMG..."
-	@rm -f "$(BUILD_DIR)/$(DMG_NAME)"
+	@mkdir -p "$(DIST_DIR)"
+	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
 	@create-dmg \
 		--volname "$(APP_NAME)" \
-		--window-pos 510 370 \
-		--window-size 360 320 \
+		--window-pos 580 370 \
+		--window-size 640 340 \
 		--icon-size 100 \
-		--icon "$(APP_NAME).app" 180 140 \
+		--icon "$(APP_NAME).app" 170 140 \
+		--app-drop-link 470 140 \
 		--hide-extension "$(APP_NAME).app" \
 		--codesign "$(DEVELOPER_ID)" \
-		"$(BUILD_DIR)/$(DMG_NAME)" \
+		"$(DIST_DIR)/$(DMG_NAME)" \
 		"$(APP_BUNDLE)"
-	@echo "DMG created at $(BUILD_DIR)/$(DMG_NAME)"
+	@echo "DMG created at $(DIST_DIR)/$(DMG_NAME)"
+
+# Notarize the final signed container as well as the app it contains. This gives
+# Gatekeeper a stapled ticket when assessing the DMG before it is mounted.
+notarize-dmg: dmg
+	@echo "Submitting signed DMG for notarization..."
+	@xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)" \
+		--keychain-profile "$(NOTARY_PROFILE)" $(NOTARY_KEYCHAIN_ARG) \
+		--wait
+	@echo "Stapling DMG notarization ticket..."
+	@xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)"
+	@xcrun stapler validate "$(DIST_DIR)/$(DMG_NAME)"
+	@echo "DMG notarization complete!"
+
+# Development DMG: debug build, ad-hoc app signature, no Developer ID or
+# notarization. It intentionally uses the same create-dmg layout as releases.
+dev-dmg:
+	@command -v create-dmg >/dev/null 2>&1 || { \
+		echo "ERROR: create-dmg is required (install it with: brew install create-dmg)" >&2; \
+		exit 1; \
+	}
+	@$(MAKE) BUILD_CONFIG=debug bundle
+	@echo "Creating development DMG..."
+	@mkdir -p "$(DIST_DIR)"
+	@rm -f "$(DIST_DIR)/$(DMG_NAME)"
+	@create-dmg \
+		--volname "$(APP_NAME)" \
+		--window-pos 580 370 \
+		--window-size 640 340 \
+		--icon-size 100 \
+		--icon "$(APP_NAME).app" 170 140 \
+		--app-drop-link 470 140 \
+		--hide-extension "$(APP_NAME).app" \
+		"$(DIST_DIR)/$(DMG_NAME)" \
+		"$(APP_BUNDLE)"
+	@echo "Development DMG created at $(DIST_DIR)/$(DMG_NAME)"
 
 # Full release: sign, notarize, create DMG
-release: dmg
+release: notarize-dmg
 	@echo "Release build complete!"
 	@echo "  App: $(APP_BUNDLE)"
-	@echo "  DMG: $(BUILD_DIR)/$(DMG_NAME)"
+	@echo "  DMG: $(DIST_DIR)/$(DMG_NAME)"
 
 clean:
-	swift package clean
+	$(SWIFT) package clean
 	rm -rf "$(APP_BUNDLE)"
-	rm -f "$(BUILD_DIR)/$(DMG_NAME)"
+	rm -f "$(DIST_DIR)/$(DMG_NAME)"

@@ -10,12 +10,25 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: launcher-release
+  cancel-in-progress: false
+
 jobs:
+  guest-worker:
+    uses: ./.github/workflows/guest-worker.yml
   release:
+    needs: guest-worker
     runs-on: [self-hosted, macOS, ARM64, xe-mac]
-    timeout-minutes: 60
+    # Delta generation extracts and compares up to four complete application
+    # bundles in addition to the normal signed/notarized release build.
+    timeout-minutes: 90
     env:
+      GUEST_ROUTER_ASSET_DIR: ${{ github.workspace }}/workerd/dist/guest-runtime
       NOTARY_PROFILE: notarytool-profile
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      # Detect hypervisor support unless the repository variable disables it.
+      XE_TEST_SUB_VM_AVAILABLE: ${{ vars.XE_CI_SUB_VM_AVAILABLE || 'auto' }}
 
     steps:
       - name: Configure temporary paths
@@ -25,14 +38,26 @@ jobs:
           echo "ORIGINAL_KEYCHAINS=$RUNNER_TEMP/original-keychains-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" >> "$GITHUB_ENV"
 
       - name: Check out release branch
-        uses: actions/checkout@v4
+        id: checkout
+        uses: actions/checkout@v7
         with:
+          clean: true
           fetch-depth: 0
 
       - name: Reset launcher integration environment
-        run: bash macos/Tests/Integration/cleanup.sh
+        env:
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
+        run: bash macos/Tests/Integration/cleanup-ci.sh
 
-      - name: Calculate next patch version
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-worker
+          path: workerd/dist/guest-runtime
+
+      - name: Test release version calculation
+        run: bash macos/Tests/Integration/test-release-version.sh
+
+      - name: Calculate next release version
         id: version
         shell: bash
         run: |
@@ -49,27 +74,136 @@ jobs:
           fi
 
           IFS=. read -r major minor patch <<< "$latest_version"
-          version="$major.$minor.$((patch + 1))"
+          version="$(plutil -extract CFBundleShortVersionString raw macos/Sources/macos/Info.plist)"
+          IFS=. read -r minimum_major minimum_minor minimum_patch <<< "$version"
+          if (( major > minimum_major ||
+                (major == minimum_major && minor > minimum_minor) ||
+                (major == minimum_major && minor == minimum_minor && patch >= minimum_patch) )); then
+            version="$major.$minor.$((patch + 1))"
+          fi
 
           if [[ "$GITHUB_REF_NAME" == "int" ]]; then
-            release_tag="$version-int.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+            # Integration releases count from zero for each base version.
+            # Keep the global run number only in CFBundleVersion so Sparkle
+            # continues to order builds monotonically across version bumps.
+            integration_build=0
+            integration_pattern="^${version//./\\.}-int\\.([0-9]+)\\.([0-9]+)$"
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ $integration_pattern ]]; then
+                previous_build="${BASH_REMATCH[1]}"
+                if (( previous_build >= integration_build )); then
+                  integration_build=$((previous_build + 1))
+                fi
+              fi
+            done < <(git tag --list "$version-int.*")
+            release_tag="$version-int.$integration_build.$((GITHUB_RUN_ATTEMPT - 1))"
             prerelease="true"
+            update_channel="int"
           else
             release_tag="$version"
             prerelease="false"
+            update_channel="stable"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "Building Xe Computer $version for release $release_tag"
+          echo "update_channel=$update_channel" >> "$GITHUB_OUTPUT"
+          echo "Building Xe Launcher $version for release $release_tag"
+
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "::error::Actions secret SPARKLE_PUBLIC_ED_KEY is not configured."
+            exit 1
+          fi
+          if [[ ! "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+            echo "::error::Actions secret SPARKLE_PUBLIC_ED_KEY is not a base64-encoded Ed25519 public key."
+            exit 1
+          fi
 
           plutil -replace CFBundleShortVersionString \
             -string "$version" \
             macos/Sources/macos/Info.plist
           plutil -replace CFBundleVersion \
-            -string "$GITHUB_RUN_NUMBER" \
+            -string "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
             macos/Sources/macos/Info.plist
+          plutil -replace XeReleaseVersion \
+            -string "$release_tag" \
+            macos/Sources/macos/Info.plist
+          plutil -replace XeUpdateChannel \
+            -string "$update_channel" \
+            macos/Sources/macos/Info.plist
+          plutil -replace SUPublicEDKey \
+            -string "$SPARKLE_PUBLIC_ED_KEY" \
+            macos/Sources/macos/Info.plist
+          plutil -replace SUFeedURL \
+            -string "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$update_channel/appcast.xml" \
+            macos/Sources/macos/Info.plist
+
+      - name: Verify Xe Computer release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          sources_file="macos/Sources/macos/Resources/sources.json"
+          release_json="$RUNNER_TEMP/xe-computer-release.json"
+
+          darc_version="$(
+            jq -r '
+              .darc.version |
+              [.major, .minor, .patch] |
+              if all(.[]; type == "number" and . >= 0 and floor == .)
+              then map(tostring) | join(".")
+              else error("invalid Darc version")
+              end
+            ' "$sources_file"
+          )"
+
+          version_component='(0|[1-9][0-9]{0,8})'
+          if [[ ! "$darc_version" =~ ^${version_component}\.${version_component}\.${version_component}$ ]]; then
+            echo "::error::Invalid Xe Computer version in $sources_file"
+            exit 1
+          fi
+
+          gh api \
+            "repos/Agent54/xe-darc/releases/tags/v$darc_version" \
+            > "$release_json"
+          gh release download iwa-manifest \
+            --repo Agent54/xe-darc \
+            -p iwa-updates.json \
+            -D "$RUNNER_TEMP" \
+            --clobber
+
+          if [[ "$GITHUB_REF_NAME" == "int" ]]; then
+            expected_iwa_channel="nightly"
+            expected_prerelease="true"
+          else
+            expected_iwa_channel="default"
+            expected_prerelease="false"
+          fi
+
+          jq -e \
+            --argjson prerelease "$expected_prerelease" \
+            '.draft == false and
+             .prerelease == $prerelease and
+             any(.assets[]; .name == "darc.swbn")' \
+            "$release_json" >/dev/null || {
+              echo "::error::Xe Computer v$darc_version is not valid for the $GITHUB_REF_NAME launcher channel"
+              exit 1
+            }
+
+          jq -e \
+            --arg version "$darc_version" \
+            --arg channel "$expected_iwa_channel" \
+            'any(.versions[];
+              .version == $version and
+              (.channels | index($channel) != null)
+            )' \
+            "$RUNNER_TEMP/iwa-updates.json" >/dev/null || {
+              echo "::error::Xe Computer v$darc_version is not published on the $expected_iwa_channel IWA channel"
+              exit 1
+            }
+
+          echo "Verified Xe Computer v$darc_version on the $expected_iwa_channel IWA channel"
 
       - name: Install Developer ID certificate
         env:
@@ -148,6 +282,15 @@ jobs:
             --issuer "$NOTARY_ISSUER_ID" \
             --keychain "$NOTARY_KEYCHAIN"
 
+      - name: Set up Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check worker types
+        working-directory: workerd
+        run: deno check --no-config --no-lock tests/integration.ts
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -158,13 +301,203 @@ jobs:
           done
 
       - name: Build complete launcher DMG
-        working-directory: macos
-        run: make
-
-      - name: Run full launcher integration test
         env:
-          DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
-        run: macos/Tests/Integration/install-from-dmg.sh
+          GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN }}
+        working-directory: macos
+        run: |
+          report_storage() {
+            echo "::group::Runner storage diagnostics"
+            df -h "$PWD" "$RUNNER_TEMP" "${TMPDIR:-/private/tmp}" || true
+            df -i "$PWD" "$RUNNER_TEMP" "${TMPDIR:-/private/tmp}" || true
+            quota -v || true
+            ulimit -a
+            du -sh .build dist "dist/Xe Launcher.app" dist/rw.*.dmg ../workerd/dist 2>/dev/null || true
+            ls -lh dist 2>/dev/null || true
+            for image in dist/rw.*.dmg; do
+              [[ -e "$image" ]] || continue
+              echo "Writable DMG limits: $image"
+              hdiutil resize -limits "$image" || true
+            done
+            echo "::endgroup::"
+          }
+
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Configure SMOLVM_GITHUB_TOKEN with read access to Agent54/smol-compose, Agent54/compose-server, and Agent54/compose-ui."
+            exit 1
+          fi
+          report_storage
+          if ! make BUILD_CONFIG=release; then
+            report_storage
+            exit 1
+          fi
+
+      - name: Verify packaged VM routing and builds
+        run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
+
+      - name: Verify Sparkle bundle integration
+        run: macos/Build/mac/verify-sparkle.sh "macos/dist/Xe Launcher.app" --release --channel "${{ steps.version.outputs.update_channel }}"
+
+      - name: Run launcher integration test (Standard user)
+        env:
+          DMG_PATH: ${{ github.workspace }}/macos/dist/Xe Launcher.dmg
+          XE_CI_MAC_PASSWORD: ${{ secrets.XE_CI_MAC_PASSWORD }}
+        run: macos/Tests/Integration/install-from-dmg.sh --standard-user
+
+      - name: Verify version in About dialog
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.release_tag }}
+        run: macos/Tests/Integration/about-version.sh
+
+      - name: Quit integration-test apps and preserve installation
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        # Keep failed runs available for manual debugging until the next CI start.
+        run: bash macos/Tests/Integration/cleanup.sh --stop-only
+
+      - name: Generate signed Sparkle appcast and deltas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::error::Repository secret SPARKLE_PRIVATE_KEY is not configured."
+            exit 1
+          fi
+
+          update_dir="$(mktemp -d "$RUNNER_TEMP/sparkle-update.XXXXXX")"
+          echo "SPARKLE_UPDATE_DIR=$update_dir" >> "$GITHUB_ENV"
+          cp "macos/dist/Xe Launcher.dmg" "$update_dir/Xe-Launcher.dmg"
+
+          {
+            echo "# Xe Launcher $RELEASE_TAG"
+            echo
+            echo "See the GitHub release for the complete notes:"
+            echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+          } > "$update_dir/Xe-Launcher.md"
+
+          generate_appcast="macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+          if [[ ! -x "$generate_appcast" ]]; then
+            echo "::error::Sparkle generate_appcast tool was not found at $generate_appcast"
+            exit 1
+          fi
+          sign_update="macos/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          if [[ ! -x "$sign_update" ]]; then
+            echo "::error::Sparkle sign_update tool was not found at $sign_update"
+            exit 1
+          fi
+
+          # A Sparkle delta upgrades one exact CFBundleVersion to the newest
+          # build. Download at most three full DMGs from the same channel as
+          # generation inputs. They are not uploaded to the new release.
+          base_count=0
+          while IFS=$'\t' read -r tag is_prerelease is_draft; do
+            [[ "$is_draft" == "false" ]] || continue
+
+            if [[ "$UPDATE_CHANNEL" == "stable" ]]; then
+              [[ "$is_prerelease" == "false" && "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            else
+              [[ "$is_prerelease" == "true" && "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-int\.[0-9]+\.[0-9]+$ ]] || continue
+            fi
+
+            base_path="$update_dir/Xe-Launcher-base-$((base_count + 1))-$tag.dmg"
+            if gh release download "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "Xe-Launcher.dmg" \
+              --output "$base_path" \
+              --clobber; then
+              base_count=$((base_count + 1))
+              echo "Using $tag as Sparkle delta base $base_count/3"
+            else
+              rm -f "$base_path"
+              echo "::warning::Release $tag has no downloadable Xe-Launcher.dmg; trying an older release."
+            fi
+
+            ((base_count >= 3)) && break
+          done < <(
+            gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 100 \
+              --json tagName,isPrerelease,isDraft \
+              --jq '.[] | [.tagName, .isPrerelease, .isDraft] | @tsv'
+          )
+
+          echo "Prepared $base_count same-channel archive(s) for delta generation."
+          # Keep Sparkle's extracted-archive cache scoped to this release. Its
+          # default user cache would otherwise grow by another full app bundle
+          # on every run of this persistent self-hosted runner.
+          sparkle_cache_root="$update_dir/.sparkle-cache-root"
+          mkdir -p "$sparkle_cache_root"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            CFFIXED_USER_HOME="$sparkle_cache_root" "$generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/" \
+              --embed-release-notes \
+              --maximum-versions 1 \
+              --maximum-deltas 3 \
+              --versions "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+              --link "https://github.com/$GITHUB_REPOSITORY" \
+              -o "$update_dir/appcast.xml" \
+              "$update_dir"
+
+          test -s "$update_dir/appcast.xml"
+          grep -q 'sparkle:edSignature=' "$update_dir/appcast.xml"
+
+          # generate_appcast derives delta filenames from the application name,
+          # so "Xe Launcher" produces names containing a space. GitHub rewrites
+          # special characters in uploaded release asset names, which would make
+          # the generated appcast URL return 404. Rename the files and URLs to a
+          # stable, GitHub-safe form before signing the final appcast.
+          for delta in "$update_dir"/*.delta; do
+            [[ -f "$delta" ]] || continue
+            delta_name="${delta##*/}"
+            safe_delta_name="${delta_name// /-}"
+            [[ "$safe_delta_name" != "$delta_name" ]] || continue
+
+            mv "$delta" "$update_dir/$safe_delta_name"
+            encoded_delta_name="${delta_name// /%20}"
+            sed -i '' \
+              "s|$encoded_delta_name|$safe_delta_name|g" \
+              "$update_dir/appcast.xml"
+          done
+
+          # Keep CFBundleShortVersionString numeric for macOS, but expose the
+          # fully qualified release tag (including the int build suffix) in
+          # Sparkle's update UI.
+          sed -i '' -E \
+            "s|(<sparkle:shortVersionString>)[^<]*(</sparkle:shortVersionString>)|\\1${RELEASE_TAG}\\2|g" \
+            "$update_dir/appcast.xml"
+          grep -Fq "<sparkle:shortVersionString>${RELEASE_TAG}</sparkle:shortVersionString>" \
+            "$update_dir/appcast.xml"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$sign_update" \
+              --ed-key-file - \
+              "$update_dir/appcast.xml"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+            "$sign_update" \
+              --verify \
+              --ed-key-file - \
+              "$update_dir/appcast.xml"
+
+          delta_count="$(find "$update_dir" -maxdepth 1 -type f -name '*.delta' | wc -l | tr -d '[:space:]')"
+          if ((delta_count > 3 || delta_count > base_count)); then
+            echo "::error::Generated $delta_count deltas from $base_count bases; expected at most three."
+            exit 1
+          fi
+          if ((base_count > 0 && delta_count == 0)); then
+            echo "::warning::Sparkle did not produce an efficient compatible delta from the available base archives."
+          fi
+
+          macos/Build/mac/verify-appcast.sh \
+            "$update_dir/appcast.xml" \
+            "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg" \
+            "$RELEASE_TAG" \
+            "$delta_count"
+
+          echo "SPARKLE_DELTA_COUNT=$delta_count" >> "$GITHUB_ENV"
 
       - name: Create version tag and GitHub release
         env:
@@ -180,14 +513,143 @@ jobs:
             release_flags+=(--latest)
           fi
 
+          release_assets=(
+            "$SPARKLE_UPDATE_DIR/Xe-Launcher.dmg"
+            "$SPARKLE_UPDATE_DIR/appcast.xml"
+          )
+          for delta in "$SPARKLE_UPDATE_DIR"/*.delta; do
+            [[ -f "$delta" ]] || continue
+            release_assets+=("$delta")
+          done
+
           gh release create "$RELEASE_TAG" \
-            "macos/.build/Xe Computer.dmg" \
+            "${release_assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Xe Computer $RELEASE_TAG" \
+            --title "Xe Launcher $RELEASE_TAG" \
             "${release_flags[@]}"
 
-      - name: Remove temporary signing material
+          published_delta_count="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '[.assets[].name | select(endswith(".delta"))] | length'
+          )"
+          if [[ "$published_delta_count" != "$SPARKLE_DELTA_COUNT" ]]; then
+            echo "::error::Expected $SPARKLE_DELTA_COUNT published deltas, found $published_delta_count."
+            exit 1
+          fi
+
+      - name: Publish Sparkle channel feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          if ! gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/heads/updates" \
+            --silent >/dev/null 2>&1; then
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              --field ref="refs/heads/updates" \
+              --field sha="$GITHUB_SHA" \
+              --silent
+          fi
+
+          feed_path="$UPDATE_CHANNEL/appcast.xml"
+          existing_sha="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/contents/$feed_path?ref=updates" \
+              --jq .sha 2>/dev/null || true
+          )"
+          encoded_feed="$(base64 < "$SPARKLE_UPDATE_DIR/appcast.xml" | tr -d '\n')"
+
+          api_args=(
+            --method PUT
+            "repos/$GITHUB_REPOSITORY/contents/$feed_path"
+            --field message="Publish $UPDATE_CHANNEL Sparkle feed for $RELEASE_TAG"
+            --field content="$encoded_feed"
+            --field branch=updates
+            --silent
+          )
+          if [[ -n "$existing_sha" ]]; then
+            api_args+=(--field sha="$existing_sha")
+          fi
+
+          gh api "${api_args[@]}"
+
+      - name: Verify published Sparkle channel feed
+        env:
+          UPDATE_CHANNEL: ${{ steps.version.outputs.update_channel }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          feed_base_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/updates/$UPDATE_CHANNEL/appcast.xml"
+          asset_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/Xe-Launcher.dmg"
+          verification_log="$(mktemp "${RUNNER_TEMP:-/tmp}/xe-appcast-verification.XXXXXX")"
+          trap 'rm -f "$verification_log"' EXIT
+
+          # The Git contents API can accept the update before raw.githubusercontent.com
+          # observes the new branch tip. Poll the public endpoint the application uses,
+          # changing the query on every attempt so a stale response is never reused.
+          max_attempts=30
+          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            feed_url="$feed_base_url?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$attempt"
+            if macos/Build/mac/verify-appcast.sh \
+              "$feed_url" \
+              "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT" \
+              "$asset_url" \
+              "$RELEASE_TAG" \
+              "$SPARKLE_DELTA_COUNT" >"$verification_log" 2>&1; then
+              cat "$verification_log"
+              exit 0
+            fi
+
+            if ((attempt == max_attempts)); then
+              cat "$verification_log" >&2
+              echo "::error::Published Sparkle feed did not converge after $max_attempts attempts."
+              exit 1
+            fi
+
+            echo "Published Sparkle feed is not current yet (attempt $attempt/$max_attempts); retrying in 2 seconds."
+            sleep 2
+          done
+
+      - name: Announce release on Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        shell: bash
+        run: |
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "::error::The DISCORD_WEBHOOK_URL repository secret is not configured."
+            exit 1
+          fi
+
+          release_kind="release"
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_kind="prerelease"
+          fi
+
+          release_url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+          payload="$(printf \
+            '{"content":"Xe Launcher %s %s is available: %s"}' \
+            "$RELEASE_TAG" "$release_kind" "$release_url")"
+
+          curl --disable --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            --output /dev/null \
+            "$DISCORD_WEBHOOK_URL"
+
+      - name: Remove temporary release and signing material
         if: ${{ always() }}
         shell: bash
         run: |
@@ -202,6 +664,11 @@ jobs:
           fi
 
           security delete-keychain "$NOTARY_KEYCHAIN" 2>/dev/null || true
+          if [[ -n "${SPARKLE_UPDATE_DIR:-}" \
+            && "$SPARKLE_UPDATE_DIR" == "$RUNNER_TEMP"/sparkle-update.* \
+            && -d "$SPARKLE_UPDATE_DIR" ]]; then
+            rm -rf -- "$SPARKLE_UPDATE_DIR"
+          fi
           rm -f \
             "$RUNNER_TEMP/developer-id.p12" \
             "$RUNNER_TEMP/AuthKey.p8" \

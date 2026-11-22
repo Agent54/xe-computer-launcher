@@ -1,0 +1,96 @@
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+const retryScript = `
+  let cancelled = false;
+  const timer = setTimeout(() => {
+    if (!cancelled) window.location.reload();
+  }, 2000);
+  document.getElementById('startup-cancel').addEventListener('click', () => {
+    cancelled = true;
+    clearTimeout(timer);
+    document.getElementById('startup-main').setAttribute('aria-busy', 'false');
+    document.getElementById('startup-spinner').hidden = true;
+    document.getElementById('startup-status').textContent = 'Automatic retry cancelled. Reload this page to try again.';
+    const button = document.getElementById('startup-cancel');
+    button.disabled = true;
+    button.textContent = 'Cancelled';
+  });
+`;
+
+export function startupResponse(request, { name, message, failed = false, payload, status = 503, title = '', detail = '' }) {
+  const headers = {
+    'Cache-Control': 'no-store',
+    'Retry-After': '2',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  };
+  // API calls and upgrades receive a retryable response; never replay a POST.
+  if (!request || !['GET', 'HEAD'].includes(request.method) || request.headers.has('upgrade') ||
+      (request.headers.has('accept') && !request.headers.get('accept').includes('text/html') &&
+       !request.headers.get('accept').includes('*/*'))) {
+    return new Response(request?.method === 'HEAD' ? null : JSON.stringify(payload), {
+      status, headers: { ...headers, 'Content-Type': 'application/json' },
+    });
+  }
+  const nonce = crypto.randomUUID();
+  const restarting = !failed && (payload?.state === 'restarting' || payload?.runtime?.phase === 'restarting');
+  headers['Content-Type'] = 'text/html; charset=utf-8';
+  headers['Content-Security-Policy'] = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
+  const heading = escapeHTML(name);
+  return new Response(request.method === 'HEAD' ? null : `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHTML(title || `${name} · ${failed ? 'Unable to start' : restarting ? 'Restarting' : 'Starting'}`)}</title>
+  <style>
+    :root { color-scheme: dark; --background: #000000; --text: #f5f5f5; --muted: #a3a3a3; --track: #262626; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: 32px; background: var(--background); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(100%, 400px); text-align: center; }
+    .loader { width: 28px; height: 28px; margin: 0 auto 28px; border: 2px solid var(--track); border-top-color: var(--text); border-radius: 50%; animation: spin 1s linear infinite; }
+    h1 { margin: 0; font-size: clamp(24px, 5vw, 32px); font-weight: 500; letter-spacing: -.03em; overflow-wrap: anywhere; }
+    p { margin: 12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+    a { display: inline-block; margin-top: 24px; color: var(--text); text-underline-offset: 4px; }
+    button { margin-top: 24px; padding: 8px 18px; border: 1px solid var(--track); border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--track); }
+    button:disabled { color: var(--muted); cursor: default; }
+    a:focus-visible, button:focus-visible { outline: 2px solid var(--text); outline-offset: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .loader { animation: none; } }
+  </style>
+</head>
+<body>
+  <main id="startup-main" aria-busy="${!failed}" aria-live="polite">
+    ${failed ? '' : '<div id="startup-spinner" class="loader" aria-hidden="true"></div>'}
+    <h1>${heading}</h1>
+    <p id="startup-status" role="status">${escapeHTML(message)}</p>
+    ${detail ? `<p>${escapeHTML(detail)}</p>` : ''}
+    ${failed ? '<a href="">Try again</a>' : '<button id="startup-cancel" type="button">Cancel</button>'}
+  </main>
+  ${failed ? '' : `<script nonce="${nonce}">${retryScript}</script>`}
+</body>
+</html>`, { status, headers });
+}
+
+// Share the startup page's presentation and content negotiation for failures
+// before an app is reached. App responses themselves are never restyled here.
+export function routingErrorResponse(request, message, {
+  status = 503, source = 'Application gateway', code = 'app_route_unavailable', headers = {},
+} = {}) {
+  const host = request ? new URL(request.url).host : undefined;
+  const response = startupResponse(request, {
+    name: 'Unable to open app', title: 'Unable to open app · Xe Launcher', message,
+    failed: true, status, detail: `Xe Launcher · ${source}\n${host || ''}\n${status} · ${code}`,
+    payload: { ok: false, error: code, source: `Xe Launcher · ${source}`, host, message },
+  });
+  response.headers.delete('Retry-After');
+  response.headers.set('X-Xe-Error-Source', source);
+  response.headers.set('X-Xe-Error-Code', code);
+  for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
+  return response;
+}

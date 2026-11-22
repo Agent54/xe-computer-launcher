@@ -1,120 +1,201 @@
-# macOS installer integration test
+# macOS integration testing
 
-`cleanup.sh` resets the test machine, and `install-from-dmg.sh` performs the
-real interactive DMG installation. The same scripts are intended to run inside
-a local UTM macOS guest and directly on a macOS CI runner. UTM and CI should
-only provision the machine and invoke these scripts; they should not duplicate
-their behavior.
+The installer suite exercises the real DMG and installed application in a
+logged-in macOS desktop. UTM and GitHub Actions should provision the machine
+and invoke these scripts, not maintain separate installer automation.
 
-## Destructive changes
+## Test profiles
 
-Run this only in a disposable test account or VM. `cleanup.sh`:
+| Profile | Requirements and purpose |
+| --- | --- |
+| `--standard-user` | Signed distribution build, ports 5196/5194 and a persistent Accessibility grant. Used by CI without registering a privileged helper. |
+| Default | Manual fresh onboarding, ports 80/443 and privileged-helper approval. Requires an operator who can authenticate administrator requests. |
+| `--dev` | Ad-hoc development DMG. Retains strict signature validation but skips distribution-only Gatekeeper and first-open checks. |
 
-- quits running Xe Computer copies;
-- resets TCC permissions for `dev.xe.computer`;
-- removes `/Applications/Xe Computer.app`;
-- moves `~/Library/Application Support/dev.xe.computer` into `~/.Trash`
-  with a timestamp, so accidentally removed data can be recovered;
-- detaches stale Xe Computer disk-image mounts; and
-- runs `brew uninstall --force colima` when Colima is installed.
+Use a dedicated test account or disposable VM. Cleanup changes installed apps,
+launcher data, certificate trust and, in the default profile, privacy grants.
+Do not share the CI account with interactive work or concurrent GUI jobs:
+stale-authorization cleanup can dismiss other pending prompts in that account.
 
-The launched app installs Colima again as part of the behavior under test. On a
-fresh VM, `tccutil` may report that the bundle is not registered; the test treats
-that as an already-clean permission state and continues.
+## Cleanup and retained evidence
 
-## One-time machine setup
+| Command | Intended use |
+| --- | --- |
+| `cleanup.sh` | Manual reset. Removes installations and local CA trust, resets app permissions, and moves launcher data to a timestamped Trash entry. |
+| `cleanup.sh --preserve-permissions` | Manual reproduction of the CI profile. Retains the signed installation and privacy grants while resetting data and local CA trust. |
+| `cleanup-ci.sh` | CI-job-only reset. Retains the signed app and grants, but permanently removes the previous run's exact app-data and owned shim paths. |
+| `cleanup.sh --stop-only` | End-of-run shutdown. Preserves installations, data, permissions and build artifacts for inspection. |
 
-1. Use macOS 26.2 or newer. The app declares 26.2 as its minimum version.
-2. Install Homebrew and ensure `brew` is available to the test user's shell.
-3. Log into the test user at the macOS GUI. UI scripting cannot run from a
-   machine that only has a pre-login or SSH session.
-4. Open **System Settings → Privacy & Security → Accessibility** and enable the
-   program that launches the script. For a manual run this is normally
-   Terminal, iTerm, or the terminal application used by the VM. For CI, enable
-   the runner application or its UI-test launcher. After enabling it, completely
-   quit and reopen that program so its new TCC authorization takes effect.
-5. On the first manual run, macOS may also ask whether that program may control
-   **System Events**. Approve it. This grants the Apple Events permission used
-   to click the install alert.
-6. Ensure the test user can run `sudo` to remove the existing application. A
-   dedicated local test account can cache credentials before running; a CI
-   account should provide non-interactive sudo.
+Manual Trash moves require the source and Trash to be on the same filesystem.
+Cleanup refuses symlinked ancestors and paths containing mounted filesystems.
+Old timestamped entries from earlier CI workflows require separate runner
+maintenance.
 
-The cleanup deliberately resets Xe Computer's own permissions on every run. After
-the installed copy relaunches, grant its Accessibility request in System
-Settings so first-run setup can continue and reinstall Colima. This interaction
-is part of the integration test, not a persistent one-time machine grant.
+Removing the previous local CA's trust must finish before deleting its app
+data. A trust failure preserves that data for diagnosis. Testing the old leaf
+certificate is important: supplying the root as a trusted anchor would not
+prove that Keychain trust was removed.
 
-Accessibility and Automation grants belong to the process that invokes
-`osascript`. If the test is invoked over SSH, granting Terminal locally does
-not grant the SSH session the same permissions. Prefer a logged-in launch agent
-or another GUI-session runner whose executable has been approved in advance.
-The raw error may say `osascript is not allowed assistive access`; for a normal
-interactive run, approve the terminal application responsible for launching
-`/usr/bin/osascript`, then restart that terminal. The test checks this before
-performing UI automation.
+Both workflows preserve failed-run evidence until the next run starts.
+Reopen the retained DMG or inspect the installed bundle and launcher data there.
+The manual 80/443 profile can leave its helper reserving those ports; unregister
+it or select custom ports before reusing the machine for other work.
+
+## One-time runner setup
+
+1. Use macOS 26.2 or newer and a dedicated **standard** account. Log into its
+   desktop from the Mac's login or user-switching screen. `su`, `sudo` and SSH
+   do not provide the same desktop session or permission attribution.
+2. Grant Accessibility to the application responsible for launching the tests,
+   normally the GUI terminal running the Actions runner. Quit and reopen it
+   after granting access. A launch agent or service can have a different TCC
+   identity; provision and verify the actual execution context.
+3. Approve that context's Automation access to **System Events** and **Finder**.
+   Finder access is required for DMG formatting as well as installation.
+4. Install a Developer ID signed Xe Launcher, keep ports 5196/5194, and approve
+   **Xe Launcher** under Privacy & Security → Accessibility once. Quit it
+   normally. Unattended CI retains this grant and refreshes the same installed
+   bundle; it does not enable the Accessibility switch itself.
+5. Keep one installation owned and writable by the runner. The personal
+   `~/Applications` location is supported when `/Applications` is unavailable.
+   Remove conflicting installations owned by another account separately.
+   Replacement builds must match the retained bundle's signing identity.
+   Ad-hoc builds cannot use persistent-permission mode.
+6. Optionally configure `XE_CI_MAC_PASSWORD` as a repository Actions secret for
+   the runner account's native user-Keychain certificate dialogs. Without it,
+   handle those dialogs manually. It cannot satisfy requests for a different
+   administrator account.
+
+A runner without these permissions needs interactive provisioning; use a
+preconfigured self-hosted runner if the hosted environment cannot supply them.
 
 ## Build and run
 
-The test expects a signed and notarized distribution DMG because it asserts
-both strict code-signature validity and a successful Gatekeeper assessment.
-Create it using the normal release configuration:
+Commands below run from the repository root. Distribution tests require the
+normal signed, notarized release and its configured credentials:
 
 ```sh
 make -C macos release
+macos/Build/mac/verify-sparkle.sh \
+  "macos/dist/Xe Launcher.app" --release
 ```
 
-Reset the machine and run the test from the repository root:
+For manual fresh onboarding:
 
 ```sh
 bash macos/Tests/Integration/cleanup.sh
 macos/Tests/Integration/install-from-dmg.sh
+macos/Tests/Integration/about-version.sh
 ```
 
-To test a DMG from another location, including a downloaded CI artifact:
+To reproduce the Standard-user CI profile with its retained installation:
 
 ```sh
-DMG_PATH="$HOME/Downloads/Xe Computer.dmg" \
-  macos/Tests/Integration/install-from-dmg.sh
+bash macos/Tests/Integration/cleanup.sh --preserve-permissions
+macos/Tests/Integration/install-from-dmg.sh --standard-user
+macos/Tests/Integration/about-version.sh
 ```
 
-The test opens the DMG through Launch Services, waits for Finder's normal
-`/Volumes` mount, locates `Xe Computer.app` by its bundle identifier, opens the
-app through Launch Services, approves the quarantined app's Gatekeeper
-**downloaded from the Internet** confirmation with its default **Open** action
-when quarantine requires it, chooses the installer alert's default
-**Install in Applications**, approves the same system confirmation for the
-newly installed copy if macOS shows it again, and verifies:
+Set `DMG_PATH` to test an artifact from another location. Set `INSTALLED_APP`
+when the About test must target a particular installation.
 
-- installation as `/Applications/Xe Computer.app`;
-- relaunch from `/Applications`, not the mounted disk image;
-- the expected bundle identifier;
-- strict code-signature validity;
-- successful Gatekeeper assessment;
-- removal of the installed bundle's quarantine attribute; and
-- first-run reinstallation of Colima through Homebrew.
+For local development without distribution credentials:
 
-## UTM and GitHub Actions
-
-For UTM, copy or mount the repository and DMG into the logged-in guest, then
-invoke the script in that guest's approved GUI session. A host wrapper may
-start/reset UTM and trigger the guest runner, but must not implement installer
-steps itself.
-
-For GitHub Actions, the workflow should similarly contain only checkout,
-cleanup, artifact/build preparation, and the test invocation:
-
-```yaml
-- name: Reset installer integration environment
-  run: bash macos/Tests/Integration/cleanup.sh
-
-- name: Run installer integration test
-  env:
-    DMG_PATH: ${{ github.workspace }}/macos/.build/Xe Computer.dmg
-  run: macos/Tests/Integration/install-from-dmg.sh
+```sh
+make -C macos dev-dmg
+bash macos/Tests/Integration/cleanup.sh
+macos/Tests/Integration/install-from-dmg.sh --dev
 ```
 
-The runner still needs the Accessibility, Automation, Homebrew, sudo, signing,
-and GUI-session prerequisites described above. If a hosted runner cannot grant
-those UI permissions, use a preconfigured self-hosted runner; do not create a
-second CI-specific test implementation.
+The development DMG requires `create-dmg`. After inspecting a run, stop its
+processes without discarding the evidence:
+
+```sh
+bash macos/Tests/Integration/cleanup.sh --stop-only
+```
+
+For host runtime tests, use the shared build graph:
+
+```sh
+make -C macos BUILD_CONFIG=debug test
+```
+
+The test wrapper uses the selected Apple toolchain and handles Swift Testing's
+framework search paths under Command Line Tools. The standalone
+`settings-termination.sh`, `test-install-targets.sh` and
+`test-ci-security-agent-cleanup.sh` regression checks do not clean a real
+installation. The settings check is built and run by the runtime suite and still
+needs a logged-in GUI session; its standalone script reuses that built fixture
+(`BUILD_CONFIG=debug` by default).
+
+## Permission troubleshooting
+
+TCC grants belong to the responsible application, which can be an ancestor of
+`osascript`. Approving Terminal does not approve an SSH session or service.
+Use TCC log attribution to identify the responsible process. A successful
+Script Editor test is insufficient because its private Apple Events
+entitlement is not inherited by a child interpreter.
+
+Test Finder Automation from the same GUI terminal that launches the runner:
+
+```sh
+/usr/bin/osascript -e 'tell application "Finder" to get name of startup disk'
+```
+
+Screen Sharing may show a desktop that is not the Mac's main console session.
+If consent fails without displaying a prompt, inspect:
+
+```sh
+/usr/sbin/scutil <<< 'show State:/Users/ConsoleUser'
+```
+
+Within `SessionInfo`, find the runner's `kCGSSessionUserNameKey` and verify
+`kCGSSessionOnConsoleKey` is `TRUE`; the top-level name or `/dev/console`
+ownership alone is insufficient. If switching is stuck with
+`mSwitchInProgress already`, save work, restart the Mac normally, and log into
+the runner account first.
+
+For fresh Accessibility onboarding, enter System Settings through the native
+permission dialog. Opening the pane independently can leave a pending request
+that causes macOS to terminate the app. Stale authorization cleanup cannot fix
+a locked desktop, missing GUI session or revoked permission.
+
+## Virtualization and runtime diagnostics
+
+Host-only installation, updater, browser and Compose tests can run without
+nested virtualization. Docker-backed checks need `kern.hv_support=1` in the
+runner's kernel. The Actions variable `XE_CI_SUB_VM_AVAILABLE` (locally,
+`XE_TEST_SUB_VM_AVAILABLE`) can disable those checks with `0`; `1` still
+requires kernel support. When enabled on a supported machine, failure to start
+Docker is a test failure, not a skip.
+
+Runtime sockets use the short alias `~/.xe/run` for
+`~/Library/Application Support/dev.xe.computer` because macOS Unix-socket paths
+have a 103-byte UTF-8 budget, including SmolVM's internal sockets. A conflicting
+item at that alias must be resolved explicitly rather than replaced blindly.
+The Compose API socket is `~/.xe/run/compose.sock`, outside the shared project
+folder. Inspect launcher logs and the final backend error when readiness fails.
+
+### Builder and upload integrity
+
+Run `deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"`
+from the repository root on an Apple Silicon Mac with virtualization available.
+The test uses a disposable VM and leaves the installed launcher's VM untouched.
+It checks repeated plain/gzip, chunked/fixed-length uploads up to 64 MiB by
+comparing exported payload hashes; BuildKit transfers and image loading; Compose
+builder selection using BuildKit-only syntax; and rejection of classic builds.
+It verifies the containerd snapshotter stores data on the persistent disk, then
+loads an ARM64/AMD64 image with provenance and checks both platforms after restart.
+Fresh startup must not import the BuildKit image or create its container. After
+a build, VM restart and cache maintenance must leave that container stopped.
+The launcher-derived image must start its embedded router without a host resource
+or configuration mount. A real container serves a host `/stacks` file through
+the exposed router socket, before and after restart. Only the stacks mount and
+the Docker/router sockets cross this boundary; host TLS and UI stay on the Mac.
+Uploads are never retried. Successful runs delete their disposable VM and outputs.
+Failed runs preserve logs and the stopped VM under `macos/.build/builder-runtime-tests`;
+use `--keep` to preserve a successful run too. Only a short socket-path alias uses `/tmp`.
+Use `--baseline` with an older bundle to compare the old Docker upload path, or
+`--artifact /absolute/path/to/runtime.smolmachine` to test a local image build.
+Passing this test does not by itself establish the cause of an intermittent
+`unpigz: incomplete deflate data` failure on another machine.

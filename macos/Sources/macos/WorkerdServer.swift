@@ -1,0 +1,376 @@
+import Foundation
+import Darwin
+
+enum WorkerdPaths {
+    static var executableURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/workerd") }
+    static var configURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Worker/config.capnp") }
+    static var portHelperURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/port-helper") }
+    static var assetsURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/compose-ui") }
+    static var devtoolsURL: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Worker/devtools") }
+    static var stateURL: URL { ExternalState.appDataURL.appendingPathComponent("workerd", isDirectory: true) }
+    static let uiURL = URL(string: "http://127.0.0.1:8094/")!
+}
+
+/// A Sparkle replacement can end the old launcher before its Workerd child
+/// exits. The child is then adopted by launchd and keeps ports 80/443 open,
+/// preventing the new launchd socket activation from binding them.
+enum WorkerdOrphanCleanup {
+    static func stopOrphans(stateURL: URL) -> [String] {
+        let result: ProcessCaptureResult
+        do {
+            result = try ProcessCapture.standardOutput(
+                executableURL: URL(fileURLWithPath: "/bin/ps"),
+                arguments: ["-ww", "-eo", "pid=,ppid=,uid=,args="]
+            )
+        } catch {
+            return ["Could not inspect earlier workerd processes: \(error.localizedDescription)"]
+        }
+        guard result.exitCode == 0 else {
+            return ["Could not inspect earlier workerd processes (ps exited \(result.exitCode))."]
+        }
+        let currentUID = getuid()
+        let output = String(decoding: result.standardOutput, as: UTF8.self)
+        var messages: [String] = []
+        for pid in candidatePIDs(in: output, stateURL: stateURL, currentUID: currentUID) {
+            guard isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) else { continue }
+
+            guard kill(pid, SIGTERM) == 0 else {
+                messages.append("Could not stop an earlier Xe Launcher workerd (pid \(pid)): \(String(cString: strerror(errno))).")
+                continue
+            }
+            messages.append("Stopping an orphaned Xe Launcher workerd from a previous app launch (pid \(pid)).")
+            let deadline = Date().addingTimeInterval(2)
+            while Date() < deadline && isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if isOwnedOrphan(pid: pid, stateURL: stateURL, currentUID: currentUID) {
+                if kill(pid, SIGKILL) == 0 {
+                    messages.append("The orphaned workerd did not stop after 2 seconds; force-stopped pid \(pid).")
+                } else {
+                    messages.append("Could not force-stop orphaned workerd pid \(pid): \(String(cString: strerror(errno))).")
+                }
+            }
+        }
+        return messages
+    }
+
+    static func candidatePIDs(in output: String, stateURL: URL, currentUID: uid_t) -> [pid_t] {
+        var candidates: [pid_t] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let fields = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
+            guard fields.count == 4,
+                  let pid = pid_t(fields[0]),
+                  let parentPID = pid_t(fields[1]), parentPID == 1,
+                  let uid = uid_t(fields[2]), uid == currentUID,
+                  matchesOwnedOrphan(parentPID: parentPID, uid: uid,
+                                     commandAndArguments: String(fields[3]),
+                                     stateURL: stateURL, currentUID: currentUID) else { continue }
+            candidates.append(pid)
+        }
+        return candidates
+    }
+
+    private static func isOwnedOrphan(pid: pid_t, stateURL: URL, currentUID: uid_t) -> Bool {
+        guard let result = try? ProcessCapture.standardOutput(
+            executableURL: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-ww", "-p", "\(pid)", "-o", "ppid=,uid=,args="]
+        ), result.exitCode == 0 else { return false }
+        let line = String(decoding: result.standardOutput, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = line.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+        guard fields.count == 3,
+              let parentPID = pid_t(fields[0]),
+              let uid = uid_t(fields[1]) else { return false }
+        let commandAndArguments = String(fields[2])
+        // `comm` is truncated at spaces in /Applications/Xe Launcher.app;
+        // use the full argument line and this user's private config instead.
+        return matchesOwnedOrphan(parentPID: parentPID, uid: uid,
+                                  commandAndArguments: commandAndArguments,
+                                  stateURL: stateURL, currentUID: currentUID)
+    }
+
+    static func matchesOwnedOrphan(parentPID: pid_t, uid: uid_t,
+                                   commandAndArguments: String, stateURL: URL,
+                                   currentUID: uid_t) -> Bool {
+        let configPath = stateURL.appendingPathComponent("ui-https/config.capnp").path
+        return parentPID == 1 && uid == currentUID &&
+            commandAndArguments.contains("/Contents/Helpers/workerd serve --experimental \(configPath) --socket-addr") &&
+            commandAndArguments.contains("management=127.0.0.1:8094")
+    }
+}
+
+enum WorkerdError: LocalizedError {
+    case missingResource(String)
+    case exited(Int32)
+    case notReady
+    case alreadyRunning
+
+    var errorDescription: String? {
+        switch self {
+        case .missingResource(let path): "Missing workerd resource: \(path)"
+        case .exited(let status): "workerd exited (\(status)). Check System Logs; a configured listener port may already be in use."
+        case .notReady: "workerd did not become ready at 127.0.0.1:8094."
+        case .alreadyRunning: "Another launcher instance owns the workerd state directory."
+        }
+    }
+}
+
+/// Owns the Workerd process, including its public router and private HTTPS
+/// socket. No Docker connection is required to serve the Compose UI.
+@MainActor
+final class WorkerdServer {
+    private let executableURL: URL
+    private let configURL: URL
+    private let portHelperURL: URL
+    private let assetsURL: URL
+    private let devtoolsURL: URL
+    private let stateURL: URL
+    private let socketDirectoryURL: URL
+    private let runtimeStatusURL: URL
+    private let maintenanceSocketURL: URL
+    private let dockerSocketURL: URL
+    private let cdpSocketURL: URL
+    private let managementPort: UInt16
+    private let routingPort: UInt16
+    private let tlsPort: UInt16
+    private let acquirePrivilegedSockets: @Sendable () async throws -> PrivilegedPortSockets
+    private let log: @MainActor @Sendable (String) -> Void
+    private var process: Process?
+    private var stopTask: Task<Void, Never>?
+    private var stopping = false
+    private var lockDescriptor: Int32 = -1
+    private var startupSocketURL: URL?
+    private(set) var servingStandardPorts = false
+
+    var isRunning: Bool { process?.isRunning == true }
+    var usesStandardPorts: Bool { routingPort == WorkerdPorts.standardHTTP && tlsPort == WorkerdPorts.standardHTTPS }
+    var processIdentifier: pid_t? { process?.processIdentifier }
+    var uiURL: URL { URL(string: "http://127.0.0.1:\(managementPort)/")! }
+    init(executableURL: URL = WorkerdPaths.executableURL, configURL: URL = WorkerdPaths.configURL,
+         portHelperURL: URL = WorkerdPaths.portHelperURL,
+         assetsURL: URL = WorkerdPaths.assetsURL, stateURL: URL = WorkerdPaths.stateURL,
+         devtoolsURL: URL = WorkerdPaths.devtoolsURL,
+         runtimeStatusURL: URL = ContainerRuntimeStatusStore.directoryURL,
+         maintenanceSocketURL: URL = ContainerMaintenanceServer.socketURL,
+         dockerSocketURL: URL = SmolVMSetup.dockerSocketURL,
+         cdpSocketURL: URL = URL(fileURLWithPath: ExternalState.cdpSocketPath),
+         managementPort: UInt16 = 8094, routingPort: UInt16 = WorkerdPorts.defaultHTTP,
+         tlsPort: UInt16 = WorkerdPorts.defaultHTTPS,
+         acquirePrivilegedSockets: @escaping @Sendable () async throws -> PrivilegedPortSockets = { try await PrivilegedPortService.acquire() },
+         log: @escaping @MainActor @Sendable (String) -> Void = { ExternalState.shared.appendLog("workerd", $0) }) {
+        self.executableURL = executableURL
+        self.configURL = configURL
+        self.portHelperURL = portHelperURL
+        self.assetsURL = assetsURL
+        self.devtoolsURL = devtoolsURL
+        self.stateURL = stateURL
+        self.socketDirectoryURL = stateURL == WorkerdPaths.stateURL
+            ? RuntimeSocketPaths.shared.workerdDirectoryURL : stateURL
+        self.runtimeStatusURL = runtimeStatusURL
+        self.maintenanceSocketURL = maintenanceSocketURL
+        self.dockerSocketURL = dockerSocketURL
+        self.cdpSocketURL = cdpSocketURL
+        self.managementPort = managementPort
+        self.routingPort = routingPort
+        self.tlsPort = tlsPort
+        self.acquirePrivilegedSockets = acquirePrivilegedSockets
+        self.log = log
+    }
+
+    func start(composeSocketURL: URL, routerSocketURL: URL) async throws {
+        try Task.checkCancellation()
+        if let stopTask { await stopTask.value; self.stopTask = nil }
+        if isRunning { return }
+        if process != nil { await stop() }
+        if let stopTask { await stopTask.value; self.stopTask = nil }
+        stopping = false
+        try RuntimeSocketPaths.validateWorkerdPaths(directoryURL: socketDirectoryURL)
+        for url in [executableURL, configURL, assetsURL.appendingPathComponent("index.html"),
+                    devtoolsURL.appendingPathComponent("inspector.html")] {
+            guard FileManager.default.fileExists(atPath: url.path) else { throw WorkerdError.missingResource(url.path) }
+        }
+        let privilegedSockets: PrivilegedPortSockets?
+        if usesStandardPorts {
+            guard FileManager.default.isExecutableFile(atPath: portHelperURL.path) else {
+                throw WorkerdError.missingResource(portHelperURL.path)
+            }
+            privilegedSockets = try await acquirePrivilegedSockets()
+        } else {
+            privilegedSockets = nil
+        }
+        try Task.checkCancellation()
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: runtimeStatusURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateURL.path)
+        // An exited child may leave this instance's ownership lock held.
+        if lockDescriptor >= 0 { close(lockDescriptor); lockDescriptor = -1 }
+        let descriptor = open(stateURL.appendingPathComponent("owner.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw WorkerdError.alreadyRunning }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            throw WorkerdError.alreadyRunning
+        }
+        lockDescriptor = descriptor
+        var started = false
+        defer {
+            if !started && lockDescriptor >= 0 { close(lockDescriptor); lockDescriptor = -1 }
+        }
+        let state = stateURL
+        let source = configURL
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            let certificate = try LocalTLSCertificate.prepare(stateURL: state)
+            let sources = try FileManager.default.contentsOfDirectory(at: source.deletingLastPathComponent(),
+                                                                      includingPropertiesForKeys: nil)
+            for file in sources where file.pathExtension == "js" || file.lastPathComponent == "config.capnp" {
+                let contents = try Data(contentsOf: file)
+                try contents.write(to: certificate.directoryURL.appendingPathComponent(file.lastPathComponent), options: .atomic)
+            }
+            return certificate
+        }.value
+        if prepared.createdCertificate {
+            log("Local Compose UI certificate authority created at \(prepared.certificateURL.path).")
+        }
+        let uiSocketURL = socketDirectoryURL.appendingPathComponent("u-\(UUID().uuidString.prefix(8)).sock")
+        let startupSocketURL = socketDirectoryURL.appendingPathComponent("s-\(UUID().uuidString.prefix(8)).sock")
+        self.startupSocketURL = startupSocketURL
+        let startupStateURL = stateURL.appendingPathComponent("startup", isDirectory: true)
+        try FileManager.default.createDirectory(at: startupStateURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Workerd owns validation and service-start policy. Publish the configured
+        // list as data; an absent setting explicitly supplies an empty list.
+        let startupServices = ExternalState.shared.settings.rawData?["compose_startup_services"] ?? []
+        let startupData = try JSONSerialization.data(withJSONObject: startupServices, options: [.fragmentsAllowed])
+        try startupData.write(to: runtimeStatusURL.appendingPathComponent("startup-services.json"), options: .atomic)
+        let appPorts = try JSONSerialization.data(withJSONObject: [
+            "http": Int(routingPort), "https": Int(tlsPort),
+            "publicHttpReady": true,
+        ], options: [.sortedKeys])
+        try appPorts.write(to: runtimeStatusURL.appendingPathComponent("app-ports.json"), options: .atomic)
+        if stopping { await stop(); throw CancellationError() }
+        let child = Process()
+        child.executableURL = privilegedSockets == nil ? executableURL : portHelperURL
+        child.currentDirectoryURL = stateURL
+        // FIXME(multi-user): Loopback TCP listeners are machine-wide, including
+        // the privileged sockets. Block connections from other macOS accounts
+        // before serving this user's Compose UI/API or apps; Host/Origin checks
+        // and the helper's caller check do not authenticate individual clients.
+        var workerArguments = ["serve", "--experimental", prepared.directoryURL.appendingPathComponent("config.capnp").path,
+            "--socket-addr", "management=127.0.0.1:\(managementPort)",
+            "--socket-addr", "ui-https=unix:\(uiSocketURL.path)",
+            "--socket-addr", "startup=unix:\(startupSocketURL.path)",
+            "--directory-path", "assets=\(assetsURL.path)",
+            "--directory-path", "devtools-frontend=\(devtoolsURL.path)",
+            "--directory-path", "status=\(runtimeStatusURL.path)",
+            "--directory-path", "startup-state=\(startupStateURL.path)",
+            "--external-addr", "compose=unix:\(composeSocketURL.path)",
+            "--external-addr", "docker=unix:\(dockerSocketURL.path)",
+            "--external-addr", "maintenance=unix:\(maintenanceSocketURL.path)",
+            "--external-addr", "router=unix:\(routerSocketURL.path)",
+            "--external-addr", "cdp=unix:\(cdpSocketURL.path)",
+            "--external-addr", "ui-tls=unix:\(uiSocketURL.path)"]
+        if privilegedSockets != nil {
+            workerArguments += ["--socket-fd", "ingest=3", "--socket-fd", "tls=4"]
+        } else {
+            workerArguments += ["--socket-addr", "ingest=127.0.0.1:\(routingPort)",
+                                "--socket-addr", "tls=127.0.0.1:\(tlsPort)"]
+        }
+        child.arguments = privilegedSockets == nil ? workerArguments : ["--exec-workerd", executableURL.path] + workerArguments
+        // No inherited inspector flags, npm paths, or proxy settings.
+        child.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        child.standardInput = privilegedSockets?.http ?? FileHandle.nullDevice
+        let output = Pipe()
+        child.standardOutput = privilegedSockets?.https ?? output
+        child.standardError = output
+        let log = self.log
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            let text = String(decoding: data, as: UTF8.self)
+            Task { @MainActor in
+                for line in text.split(whereSeparator: \.isNewline) { log(String(line)) }
+            }
+        }
+        child.terminationHandler = { [weak self] child in
+            output.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor in
+                guard let self, self.process === child, !self.stopping else { return }
+                log("workerd exited unexpectedly (\(child.terminationStatus)); it will be restarted.")
+                await self.stop()
+            }
+        }
+        do { try child.run() } catch {
+            output.fileHandleForReading.readabilityHandler = nil
+            await stop()
+            throw error
+        }
+        process = child
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        do {
+            let deadline = ContinuousClock.now + .seconds(15)
+            while ContinuousClock.now < deadline {
+                try Task.checkCancellation()
+                guard child.isRunning else { throw WorkerdError.exited(child.terminationStatus) }
+                var request = URLRequest(url: uiURL, timeoutInterval: 1)
+                request.setValue("127.0.0.1:8094", forHTTPHeaderField: "Host")
+                if let (data, response) = try? await session.data(for: request),
+                   (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
+                    try Task.checkCancellation()
+                    guard child.isRunning else { throw WorkerdError.exited(child.terminationStatus) }
+                    let httpPort = routingPort == 80 ? "" : ":\(routingPort)"
+                    log("Compose UI ready at http://compose-ui.localhost\(httpPort)/")
+                    let httpsPort = tlsPort == 443 ? "" : ":\(tlsPort)"
+                    log("Compose UI HTTPS ready at https://compose-ui.localhost\(httpsPort)/")
+                    servingStandardPorts = usesStandardPorts
+                    started = true
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            throw WorkerdError.notReady
+        } catch {
+            await stop()
+            throw error
+        }
+    }
+
+    /// A short private notification keeps startup independent of browser traffic.
+    /// Workerd reads the published lifecycle snapshot and does all service work.
+    func notifyRuntimeChanged() async {
+        guard isRunning, !stopping, let startupSocketURL else { return }
+        _ = await UnixSocketHTTP.isReady(at: startupSocketURL, path: "/reconcile")
+    }
+
+    func requestStop() {
+        stopping = true
+        if let process, process.isRunning { process.terminate() }
+    }
+
+    func stop() async {
+        if let stopTask { await stopTask.value; return }
+        requestStop()
+        servingStandardPorts = false
+        let child = process
+        let descriptor = lockDescriptor
+        let log = self.log
+        process = nil
+        lockDescriptor = -1
+        let cleanup = Task {
+            if let child {
+                let forced = await Task.detached {
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while child.isRunning && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(50)) }
+                    let forced = child.isRunning
+                    if forced { kill(child.processIdentifier, SIGKILL) }
+                    child.waitUntilExit()
+                    return forced
+                }.value
+                if forced { log("workerd did not exit after 5.0s; sent SIGKILL.") }
+            }
+            if descriptor >= 0 { close(descriptor) }
+        }
+        stopTask = cleanup
+        await cleanup.value
+    }
+}

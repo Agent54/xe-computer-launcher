@@ -1,0 +1,423 @@
+import Foundation
+import Darwin
+
+struct SmolVMCommandResult: Sendable {
+    let standardOutput: String
+    let standardError: String
+    let exitCode: Int32
+}
+
+/// Records process termination even when the child exits before the awaiting
+/// task starts to suspend. `Process.waitUntilExit()` can otherwise remain
+/// blocked on its private run loop after a concurrently cancelled command has
+/// already exited.
+final class ProcessExitObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didExit = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func install(on process: Process) {
+        process.terminationHandler = { [weak self] _ in
+            self?.processDidExit()
+        }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if didExit {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    private func processDidExit() {
+        lock.lock()
+        guard !didExit else {
+            lock.unlock()
+            return
+        }
+        didExit = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+struct SmolVMMachine: Decodable, Sendable {
+    let name: String
+    let state: String
+    let labels: [String: String]?
+    let memory: SmolVMMemoryStatus?
+    let workload: SmolVMWorkloadStatus?
+    var pid: Int32? = nil
+    var memoryMiB: UInt64? = nil
+    var storageGiB: UInt64? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case name, state, labels, memory, workload, pid
+        case memoryMiB = "memory_mib"
+        case storageGiB = "storage_gb"
+    }
+
+    var isRunning: Bool {
+        state.caseInsensitiveCompare("running") == .orderedSame
+    }
+}
+
+struct SmolVMMemoryStatus: Decodable, Sendable {
+    let totalBytes: UInt64
+    let availableBytes: UInt64
+    let freeBytes: UInt64
+    let buffersBytes: UInt64
+    let cachedBytes: UInt64
+    let oomKillCount: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case totalBytes = "total_bytes"
+        case availableBytes = "available_bytes"
+        case freeBytes = "free_bytes"
+        case buffersBytes = "buffers_bytes"
+        case cachedBytes = "cached_bytes"
+        case oomKillCount = "oom_kill_count"
+    }
+}
+
+struct SmolVMWorkloadStatus: Decodable, Sendable {
+    let state: String
+    let lastExitCode: Int32?
+    let lastExitReason: String?
+    let oomKilled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case lastExitCode = "last_exit_code"
+        case lastExitReason = "last_exit_reason"
+        case oomKilled = "oom_killed"
+    }
+}
+
+struct SmolVMMachineSpec: Sendable {
+    let name: String
+    let artifactURL: URL
+    var memoryMiB: UInt32? = nil
+    var cpus: UInt32? = nil
+    var storageGiB: UInt64? = nil
+    var networkBackend: String? = nil
+    var volumes: [String] = []
+    var ports: [String] = []
+    var exposedSockets: [String] = []
+    var mountedSockets: [String] = []
+    var labels: [String: String] = [:]
+    var environment: [String] = []
+}
+
+enum SmolVMPaths {
+    static var runtimeURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/SmolRuntime", isDirectory: true)
+    }
+
+    static var guestRuntimeURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/SmolRuntime", isDirectory: true)
+    }
+
+    static var dataURL: URL {
+        ExternalState.appDataURL.appendingPathComponent("smol", isDirectory: true)
+    }
+
+    static var socketsURL: URL {
+        RuntimeSocketPaths.shared.socketsURL
+    }
+
+    static var runtimeHomeURL: URL {
+        dataURL.appendingPathComponent("runtime-home", isDirectory: true)
+    }
+
+    static var composeArtifactURL: URL {
+        guestRuntimeURL.appendingPathComponent("docker-compose.smolmachine")
+    }
+}
+
+enum SmolVMError: LocalizedError, Sendable {
+    case runtimeMissing(String)
+    case commandLaunchFailed(String)
+    case commandFailed(arguments: [String], exitCode: Int32, detail: String)
+    case invalidMachineList(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .runtimeMissing(let path):
+            return "The embedded SmolVM runtime is missing at \(path)."
+        case .commandLaunchFailed(let detail):
+            return "SmolVM could not be launched: \(detail)"
+        case .commandFailed(let arguments, let exitCode, let detail):
+            let command = (["smolvm-bin"] + arguments).joined(separator: " ")
+            return "SmolVM exited with code \(exitCode).\n\n\(command)\n\n\(detail)"
+        case .invalidMachineList(let detail):
+            return "SmolVM returned an invalid machine list: \(detail)"
+        }
+    }
+}
+
+/// Minimal serialized Swift API for the embedded SmolVM command-line runtime.
+actor SmolVMClient {
+    static let shared = SmolVMClient()
+
+    private let fileManager = FileManager.default
+    private let runtimeURL: URL
+    private let guestRuntimeURL: URL
+    private let dataURL: URL
+    private let runtimeHomeURL: URL
+    private var activeProcess: Process?
+
+    init(
+        runtimeURL: URL = SmolVMPaths.runtimeURL,
+        dataURL: URL = RuntimeSocketPaths.shared.smolDataURL,
+        guestRuntimeURL: URL = SmolVMPaths.guestRuntimeURL
+    ) {
+        self.runtimeURL = runtimeURL
+        self.guestRuntimeURL = guestRuntimeURL
+        self.dataURL = dataURL
+        self.runtimeHomeURL = dataURL.appendingPathComponent("runtime-home", isDirectory: true)
+    }
+
+    func listMachines() async throws -> [SmolVMMachine] {
+        let result = try await invoke(["machine", "ls", "--json"])
+        guard let data = result.standardOutput.data(using: .utf8) else {
+            throw SmolVMError.invalidMachineList("output was not UTF-8")
+        }
+        do {
+            return try JSONDecoder().decode([SmolVMMachine].self, from: data)
+        } catch {
+            throw SmolVMError.invalidMachineList(error.localizedDescription)
+        }
+    }
+
+    func createMachine(_ spec: SmolVMMachineSpec) async throws {
+        var arguments = [
+            "machine", "create",
+            "--name", spec.name,
+            "--from", spec.artifactURL.path,
+        ]
+        if let memoryMiB = spec.memoryMiB {
+            arguments += ["--mem", String(memoryMiB)]
+        }
+        if let cpus = spec.cpus {
+            arguments += ["--cpus", String(cpus)]
+        }
+        if let storageGiB = spec.storageGiB {
+            arguments += ["--storage", String(storageGiB)]
+        }
+        if let networkBackend = spec.networkBackend {
+            arguments += ["--net-backend", networkBackend]
+        }
+        for volume in spec.volumes {
+            arguments += ["--volume", volume]
+        }
+        for port in spec.ports {
+            arguments += ["--port", port]
+        }
+        for socket in spec.exposedSockets {
+            arguments += ["--expose-socket", socket]
+        }
+        for socket in spec.mountedSockets {
+            arguments += ["--mount-socket", socket]
+        }
+        for (key, value) in spec.labels.sorted(by: { $0.key < $1.key }) {
+            arguments += ["--label", "\(key)=\(value)"]
+        }
+        for variable in spec.environment {
+            arguments += ["--env", variable]
+        }
+        _ = try await invoke(arguments)
+    }
+
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String], environment: [String] = []) async throws {
+        var arguments = [
+            "machine", "update", "--name", name,
+            "--mem", String(memoryMiB), "--cpus", String(cpus),
+            "--storage", String(storageGiB),
+        ]
+        for volume in volumes {
+            arguments += ["--volume", volume]
+        }
+        for variable in environment {
+            arguments += ["--env", variable]
+        }
+        _ = try await invoke(arguments)
+    }
+
+    func machineStatus(named name: String) async throws -> SmolVMMachine {
+        let result = try await invoke(["machine", "status", "--name", name, "--json"])
+        guard let data = result.standardOutput.data(using: .utf8) else {
+            throw SmolVMError.invalidMachineList("status output was not UTF-8")
+        }
+        do {
+            return try JSONDecoder().decode(SmolVMMachine.self, from: data)
+        } catch {
+            throw SmolVMError.invalidMachineList(error.localizedDescription)
+        }
+    }
+
+    func startMachine(named name: String) async throws {
+        _ = try await invoke(["machine", "start", "--name", name])
+    }
+
+    func stopMachine(named name: String) async throws {
+        _ = try await invoke(["machine", "stop", "--name", name])
+    }
+
+    func execute(in name: String, command: [String], detached: Bool = false, timeout: String? = nil) async throws -> SmolVMCommandResult {
+        try await invoke(
+            ["machine", "exec", "--name", name]
+                + (detached ? ["--detach"] : [])
+                + (timeout.map { ["--timeout", $0] } ?? [])
+                + ["--"] + command
+        )
+    }
+
+    @discardableResult
+    func invoke(_ arguments: [String]) async throws -> SmolVMCommandResult {
+        while activeProcess != nil {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let executableURL = runtimeURL.appendingPathComponent("smolvm-bin")
+        guard fileManager.isExecutableFile(atPath: executableURL.path) else {
+            throw SmolVMError.runtimeMissing(executableURL.path)
+        }
+        try prepareStateDirectories()
+
+        let temporaryDirectory = dataURL.appendingPathComponent("tmp", isDirectory: true)
+        let commandID = UUID().uuidString
+        let outputURL = temporaryDirectory.appendingPathComponent("\(commandID).stdout")
+        let errorURL = temporaryDirectory.appendingPathComponent("\(commandID).stderr")
+        guard fileManager.createFile(atPath: outputURL.path, contents: nil),
+              fileManager.createFile(atPath: errorURL.path, contents: nil) else {
+            throw SmolVMError.commandLaunchFailed("could not create command output files")
+        }
+        defer {
+            try? fileManager.removeItem(at: outputURL)
+            try? fileManager.removeItem(at: errorURL)
+        }
+
+        let outputHandle = try FileHandle(forWritingTo: outputURL)
+        let errorHandle = try FileHandle(forWritingTo: errorURL)
+        defer {
+            try? outputHandle.close()
+            try? errorHandle.close()
+        }
+
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.currentDirectoryURL = dataURL
+        process.standardOutput = outputHandle
+        process.standardError = errorHandle
+        process.environment = [
+            "HOME": runtimeHomeURL.path,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "TMPDIR": temporaryDirectory.path,
+            "SMOLVM_DATA_DIR": dataURL.path,
+            "SMOLVM_LIB_DIR": runtimeURL.appendingPathComponent("lib", isDirectory: true).path,
+            "SMOLVM_AGENT_ROOTFS_TAR": guestRuntimeURL.appendingPathComponent("agent-rootfs.tar").path,
+            "DYLD_LIBRARY_PATH": runtimeURL.appendingPathComponent("lib", isDirectory: true).path,
+        ]
+
+        let exitObserver = ProcessExitObserver()
+        exitObserver.install(on: process)
+
+        do {
+            try process.run()
+        } catch {
+            process.terminationHandler = nil
+            throw SmolVMError.commandLaunchFailed(error.localizedDescription)
+        }
+        activeProcess = process
+        defer {
+            if activeProcess === process { activeProcess = nil }
+        }
+
+        await withTaskCancellationHandler {
+            await exitObserver.wait()
+        } onCancel: {
+            guard process.isRunning else { return }
+            let pid = process.processIdentifier
+            process.terminate()
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+        process.terminationHandler = nil
+        try Task.checkCancellation()
+
+        try outputHandle.close()
+        try errorHandle.close()
+        let standardOutput = String(data: try Data(contentsOf: outputURL), encoding: .utf8) ?? ""
+        let standardError = String(data: try Data(contentsOf: errorURL), encoding: .utf8) ?? ""
+        let result = SmolVMCommandResult(
+            standardOutput: standardOutput,
+            standardError: standardError,
+            exitCode: process.terminationStatus
+        )
+
+        guard result.exitCode == 0 else {
+            let detail = standardError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                : standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw SmolVMError.commandFailed(
+                arguments: arguments,
+                exitCode: result.exitCode,
+                detail: detail
+            )
+        }
+        return result
+    }
+
+    private func prepareStateDirectories() throws {
+        try RuntimeSocketPaths.validateSmolPaths(dataURL: dataURL)
+        if dataURL == RuntimeSocketPaths.shared.smolDataURL {
+            try RuntimeSocketPaths.shared.prepare()
+        }
+
+        let templateNames = ["storage-template.ext4.zst", "overlay-template.ext4.zst"]
+        // Validate the bundled inputs before creating or chmod'ing any state.
+        for filename in templateNames {
+            let source = guestRuntimeURL.appendingPathComponent(filename)
+            guard fileManager.fileExists(atPath: source.path) else {
+                throw SmolVMError.runtimeMissing(source.path)
+            }
+        }
+
+        for directory in [
+            dataURL,
+            dataURL.appendingPathComponent("tmp", isDirectory: true),
+            dataURL.appendingPathComponent("sockets", isDirectory: true),
+            runtimeHomeURL,
+            runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true),
+        ] {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        }
+
+        let templateDirectory = runtimeHomeURL.appendingPathComponent(".smolvm", isDirectory: true)
+        for filename in templateNames {
+            let source = guestRuntimeURL.appendingPathComponent(filename)
+            let destination = templateDirectory.appendingPathComponent(filename)
+            if let existingTarget = try? fileManager.destinationOfSymbolicLink(atPath: destination.path) {
+                if existingTarget == source.path {
+                    continue
+                }
+                try fileManager.removeItem(at: destination)
+            }
+            if !fileManager.fileExists(atPath: destination.path) {
+                try fileManager.createSymbolicLink(at: destination, withDestinationURL: source)
+            }
+        }
+    }
+}

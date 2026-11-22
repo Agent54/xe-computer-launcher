@@ -1,0 +1,192 @@
+--- Downloader/SPUDownloader.m
++++ Downloader/SPUDownloader.m
+@@ -11,6 +11,8 @@
+ #import "SPULocalCacheDirectory.h"
+ #import "SPUDownloadData.h"
+ #import "SPUDownloadDataPrivate.h"
++#import "XEArchiveTransfer.h"
++#import "SULog.h"
+ #import "SUErrors.h"
+
+
+@@ -24,12 +26,13 @@
+
+ static NSString *SUDownloadingReason = @"Downloading update related file";
+
+-@interface SPUDownloader () <NSURLSessionDownloadDelegate>
++@interface SPUDownloader () <NSURLSessionTaskDelegate>
+ @end
+
+ @implementation SPUDownloader
+ {
+     NSURLSessionTask *_sessionTask;
++    XEArchiveTransfer *_archiveTransfer;
+     NSURLSession *_downloadSession;
+     NSString *_bundleIdentifier;
+     NSString *_desiredFilename;
+@@ -40,7 +43,8 @@
+     SPUDownloadMode _mode;
+
+     BOOL _disabledAutomaticTermination;
+-    BOOL _receivedExpectedBytes;
++    int64_t _reportedBytes;
++    unsigned int _resumeRetries;
+ }
+
+ - (instancetype)initWithDelegate:(id <SPUDownloaderDelegate>)delegate
+@@ -80,16 +84,54 @@
+         return;
+     }
+
+-    _downloadSession = [NSURLSession
+-        sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
+-        delegate:self
+-        delegateQueue:[NSOperationQueue mainQueue]];
+-
+     switch (_mode) {
+-        case SPUDownloadModePersistent:
+-            _sessionTask = [_downloadSession downloadTaskWithRequest:request];
++        case SPUDownloadModePersistent: {
++            NSString *cache = [SPULocalCacheDirectory cachePathForBundleIdentifier:_bundleIdentifier];
++            NSString *directory = [cache stringByAppendingPathComponent:@"ResumableDownloads"];
++            [XEArchiveTransfer pruneDirectory:directory retainingURL:request.URL];
++            NSError *error = nil;
++            __block BOOL receivedHeaders = NO;
++            _archiveTransfer = [XEArchiveTransfer taskForRequest:request directory:directory queue:NSOperationQueue.mainQueue progress:^(int64_t received, int64_t total) {
++                if (!receivedHeaders) {
++                    [self->_delegate downloaderDidReceiveExpectedContentLength:total];
++                    receivedHeaders = YES;
++                }
++                if (received > self->_reportedBytes) {
++                    [self->_delegate downloaderDidReceiveDataOfLength:(uint64_t)(received - self->_reportedBytes)];
++                    self->_reportedBytes = received;
++                }
++            } completion:^(NSURL *file, NSURLResponse *response, NSError *failure) {
++                // Reporting a transient failure here makes Sparkle switch a delta to the full DMG.
++                if (self->_delegate != nil && failure != nil && self->_resumeRetries < 3 &&
++                    [XEArchiveTransfer shouldRetryError:failure response:response]) {
++                    unsigned int delay = 1U << self->_resumeRetries;
++                    self->_resumeRetries++;
++                    SULog(SULogLevelDefault, @"Archive download interrupted (%@); resume retry %u of 3 in %u seconds.", failure.localizedDescription, self->_resumeRetries, delay);
++                    __weak SPUDownloader *weakSelf = self;
++                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++                        SPUDownloader *downloader = weakSelf;
++                        if (downloader != nil && downloader->_delegate != nil) {
++                            [downloader startDownloadWithRequest:request];
++                        }
++                    });
++                    return;
++                }
++                if (failure != nil) {
++                    [self->_delegate downloaderDidFailWithError:failure];
++                } else if (self->_delegate != nil) {
++                    [self finishArchiveAtURL:file response:response];
++                }
++                self->_archiveTransfer = nil;
++            } error:&error];
++            if (_archiveTransfer == nil) {
++                [_delegate downloaderDidFailWithError:error];
++                return;
++            }
+             break;
++        }
+         case SPUDownloadModeTemporary: {
++            _downloadSession = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
++                                                             delegate:self delegateQueue:NSOperationQueue.mainQueue];
+             __weak __typeof__(self) weakSelf = self;
+             _sessionTask = [_downloadSession dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+                 [weakSelf temporaryDownloadDidFinishWithData:data response:response error:error];
+@@ -99,6 +141,7 @@
+     }
+
+     [_sessionTask resume];
++    [_archiveTransfer resume];
+ }
+
+ // Don't implement dealloc - make the client call cleanup, which is the only way to remove the reference cycle from the delegate anyway
+@@ -106,7 +149,7 @@
+ - (void)startPersistentDownloadWithRequest:(NSURLRequest *)request bundleIdentifier:(NSString *)bundleIdentifier desiredFilename:(NSString *)desiredFilename
+ {
+     dispatch_async(dispatch_get_main_queue(), ^{
+-        if (self->_sessionTask == nil && self->_delegate != nil) {
++        if (self->_sessionTask == nil && self->_archiveTransfer == nil && self->_delegate != nil) {
+             // Prevent service from automatically terminating while downloading the update asynchronously without any reply blocks
+             [[NSProcessInfo processInfo] disableAutomaticTermination:SUDownloadingReason];
+             self->_disabledAutomaticTermination = YES;
+@@ -123,7 +166,7 @@
+ - (void)startTemporaryDownloadWithRequest:(NSURLRequest *)request
+ {
+     dispatch_async(dispatch_get_main_queue(), ^{
+-        if (self->_sessionTask == nil && self->_delegate != nil) {
++        if (self->_sessionTask == nil && self->_archiveTransfer == nil && self->_delegate != nil) {
+             // Prevent service from automatically terminating while downloading the update asynchronously without any reply blocks
+             [[NSProcessInfo processInfo] disableAutomaticTermination:SUDownloadingReason];
+             self->_disabledAutomaticTermination = YES;
+@@ -171,6 +214,8 @@
+ {
+     [self enableAutomaticTermination];
+     [_sessionTask cancel];
++    [_archiveTransfer cancel];
++    _archiveTransfer = nil;
+     [_downloadSession finishTasksAndInvalidate];
+     _sessionTask = nil;
+     _downloadSession = nil;
+@@ -241,12 +286,8 @@
+     [self _cleanup];
+ }
+
+-- (void)URLSession:(NSURLSession *)__unused session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)location
++- (void)finishArchiveAtURL:(NSURL *)location response:(NSURLResponse *)response
+ {
+-    if (!SPUValidateStatusCodeAndFailIfInvalid(downloadTask.response, downloadTask.originalRequest.URL, _delegate)) {
+-        return;
+-    }
+-
+     // Remove our old caches path so we don't start accumulating files in there
+     NSString *rootPersistentDownloadCachePath = [self rootPersistentDownloadCachePathForBundleIdentifier:_bundleIdentifier];
+
+@@ -272,7 +313,7 @@
+
+             [_delegate downloaderDidFailWithError:error];
+         } else {
+-            NSString *name = _sessionTask.response.suggestedFilename;
++            NSString *name = response.suggestedFilename;
+             if (!name) {
+                 name = location.lastPathComponent; // This likely contains nothing useful to identify the file (e.g. CFNetworkDownload_87LVIz.tmp)
+             }
+@@ -306,22 +347,6 @@
+     }
+ }
+
+-- (void)URLSession:(NSURLSession *)__unused session downloadTask:(NSURLSessionDownloadTask *)__unused downloadTask didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)__unused totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite
+-{
+-    if (_mode != SPUDownloadModePersistent) {
+-        return;
+-    }
+-
+-    if (totalBytesExpectedToWrite > 0 && !_receivedExpectedBytes) {
+-        _receivedExpectedBytes = YES;
+-        [_delegate downloaderDidReceiveExpectedContentLength:totalBytesExpectedToWrite];
+-    }
+-
+-    if (bytesWritten >= 0) {
+-        [_delegate downloaderDidReceiveDataOfLength:(uint64_t)bytesWritten];
+-    }
+-}
+-
+ - (void)URLSession:(NSURLSession *)__unused session task:(NSURLSessionTask *)__unused task didCompleteWithError:(NSError *)error
+ {
+     _sessionTask = nil;
+--- Downloader/main.m
++++ Downloader/main.m
+@@ -53,6 +53,10 @@
+     // Next, set the object that the connection exports. All messages sent on the connection to this service will be sent to the exported object to handle. The connection retains the exported object.
+     SPUDownloader *exportedObject = [[SPUDownloader alloc] initWithDelegate:newConnection.remoteObjectProxy];
+     newConnection.exportedObject = exportedObject;
++    __weak SPUDownloader *weakDownloader = exportedObject;
++    newConnection.invalidationHandler = ^{
++        [weakDownloader cleanup:^{}];
++    };
+
+     // Resuming the connection allows the system to deliver more incoming messages.
+     [newConnection resume];

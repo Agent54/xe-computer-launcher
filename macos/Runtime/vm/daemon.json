@@ -1,0 +1,8 @@
+{
+  "pidfile": "/run/docker.pid",
+  "features": { "containerd-snapshotter": true },
+  "restart": false,
+  "log-driver": "local",
+  "log-opts": { "max-size": "10m", "max-file": "3" },
+  "builder": { "gc": { "enabled": false } }
+}

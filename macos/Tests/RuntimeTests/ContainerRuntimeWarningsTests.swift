@@ -1,0 +1,176 @@
+import AppKit
+import Foundation
+import Testing
+@testable import macos
+
+@MainActor
+struct ContainerRuntimeWarningsTests {
+    private func snapshot(available: UInt64 = 50, bootID: String = "boot-1") -> ContainerRuntimeSnapshot {
+        ContainerRuntimeSnapshot(
+            phase: .healthy, message: "Container runtime ready", reason: nil, updatedAt: Date(),
+            recoveryAttempt: nil, memoryTotalBytes: 100, memoryAvailableBytes: available,
+            oomKillCount: 0, hostResources: nil, bootId: bootID
+        )
+    }
+
+    private func history() -> ContainerRuntimeSnapshot {
+        var snapshot = snapshot()
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        snapshot.lastIncident = ContainerRuntimeIncident(
+            id: "oom-1", reason: "oom", message: "Linux killed Docker after VM memory ran out.",
+            occurredAt: date, memoryLimitBytes: 4 << 30, restartedAt: date
+        )
+        snapshot.cachePressureWarning = .init(
+            id: "cache-1", message: "Below 5% free disk; the next scheduled cleanup may include cache younger than 32 hours.",
+            occurredAt: date
+        )
+        return snapshot
+    }
+
+    @Test func automaticDialogsPresentEachEventOnceAndKeepNewEventsPending() throws {
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in })
+        var current = history()
+        warnings.update(current)
+        let oom = try #require(warnings.nextAutomaticWarning)
+        #expect(oom.kind == .outOfMemory)
+        warnings.didPresent(oom)
+        // Repeated status updates while a dialog is open must not queue it again.
+        warnings.update(current)
+        let disk = try #require(warnings.nextAutomaticWarning)
+        #expect(disk.kind == .cacheCleanup)
+        warnings.didPresent(disk)
+        warnings.update(current)
+        #expect(warnings.nextAutomaticWarning == nil)
+        current.lastIncident = .init(id: "oom-2", reason: "oom", message: "Another OOM",
+            occurredAt: Date(), memoryLimitBytes: 4 << 30)
+        warnings.update(current)
+        #expect(warnings.nextAutomaticWarning?.id == "oom-2")
+        // Completing the older dialog must not suppress the new event.
+        warnings.didPresent(oom)
+        #expect(warnings.nextAutomaticWarning?.id == "oom-2")
+        let nextOOM = try #require(warnings.nextAutomaticWarning)
+        warnings.didPresent(nextOOM)
+        warnings.didPresent(oom)
+        #expect(warnings.nextAutomaticWarning == nil)
+        #expect(warnings.warnings.count == 2)
+    }
+
+    @Test func automaticDialogsSkipIgnoredHistoryAndRecoveredPressure() throws {
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        warnings.update(history())
+        for warning in warnings.warnings { warnings.ignore(warning) }
+        let relaunched = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        relaunched.update(history())
+        #expect(relaunched.nextAutomaticWarning == nil)
+        #expect(relaunched.warnings.count == 2)
+        relaunched.update(snapshot(available: 5))
+        let pressure = try #require(relaunched.nextAutomaticWarning)
+        relaunched.didPresent(pressure)
+        relaunched.update(snapshot(available: 4))
+        #expect(relaunched.nextAutomaticWarning == nil)
+        relaunched.update(snapshot(available: 50))
+        #expect(relaunched.nextAutomaticWarning == nil)
+        relaunched.update(snapshot(available: 5))
+        #expect(relaunched.nextAutomaticWarning?.kind == .memoryPressure)
+        #expect(relaunched.nextAutomaticWarning?.id != pressure.id)
+        // Recovery while another dialog is showing removes the pending warning.
+        relaunched.update(snapshot(available: 50))
+        #expect(relaunched.nextAutomaticWarning == nil)
+    }
+
+    @Test func pressureAcknowledgementLastsUntilMemoryRecoversOrTheGuestChanges() throws {
+        var ignored: [ContainerRuntimeWarnings.Kind: String] = [:]
+        let warnings = ContainerRuntimeWarnings(readIgnored: { ignored[$0] }, saveIgnored: { ignored[$0] = $1 })
+        warnings.update(snapshot(available: 10))
+        let first = try #require(warnings.warnings.first)
+        warnings.ignore(first)
+        warnings.update(snapshot(available: 9))
+        #expect(warnings.warnings.first?.id == first.id)
+        #expect(warnings.nextAutomaticWarning == nil)
+        warnings.update(snapshot(available: 11))
+        #expect(warnings.warnings.isEmpty)
+        warnings.update(snapshot(available: 5))
+        let second = try #require(warnings.warnings.first)
+        #expect(second.id != first.id)
+        warnings.ignore(second)
+        warnings.update(snapshot(available: 5, bootID: "boot-2"))
+        #expect(warnings.nextAutomaticWarning?.kind == .memoryPressure)
+    }
+
+    @Test func dismissedDiskDialogStaysClosedButANewEpisodeCanOpen() throws {
+        var dismissed: [ContainerRuntimeWarnings.Kind: String] = [:]
+        func model() -> ContainerRuntimeWarnings {
+            ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in },
+                readDismissed: { dismissed[$0] }, saveDismissed: { dismissed[$0] = $1 })
+        }
+        var current = history()
+        current.lastIncident = nil
+        let warnings = model()
+        warnings.update(current)
+        let disk = try #require(warnings.nextAutomaticWarning)
+        warnings.dismiss(disk)
+        let relaunched = model()
+        relaunched.update(current)
+        #expect(relaunched.nextAutomaticWarning == nil)
+        current.cachePressureWarning = .init(id: "cache-2", message: "Disk space is low again", occurredAt: Date())
+        relaunched.update(current)
+        #expect(relaunched.nextAutomaticWarning?.id == "cache-2")
+    }
+
+    @Test func dialogsOfferTheRelevantResourceSettingAndIgnore() throws {
+        _ = NSApplication.shared
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in })
+        var current = history()
+        current = ContainerRuntimeSnapshot(
+            phase: current.phase, message: current.message, reason: nil, updatedAt: current.updatedAt,
+            recoveryAttempt: nil, memoryTotalBytes: 100, memoryAvailableBytes: 5, oomKillCount: 0,
+            hostResources: nil, lastIncident: current.lastIncident, cachePressureWarning: current.cachePressureWarning
+        )
+        warnings.update(current)
+        #expect(warnings.warnings.count == 3)
+        for warning in warnings.warnings {
+            let alert = ContainerRuntimeWarnings.alert(for: warning)
+            #expect(alert.alertStyle == .warning)
+            #expect(alert.messageText == warning.title)
+            #expect(alert.buttons.count == 3)
+            #expect(alert.buttons[1].title == "Ignore")
+            #expect(alert.buttons[1].keyEquivalent != "\u{1b}")
+            #expect(alert.buttons[2].title == "Dismiss")
+            #expect(alert.buttons[2].keyEquivalent == "\u{1b}")
+            if warning.kind == .cacheCleanup {
+                #expect(warning.title == "VM Disk Space Is Low")
+                #expect(warning.resource == .disk)
+                #expect(alert.buttons[0].title == "Increase Disk Size…")
+                #expect(alert.informativeText.contains("younger than 32 hours"))
+            } else {
+                #expect(warning.resource == .memory)
+                #expect(alert.buttons[0].title == "Increase Memory…")
+            }
+        }
+        let oom = try #require(warnings.warnings.first { $0.kind == .outOfMemory })
+        #expect(oom.title.contains("Restarted"))
+        #expect(oom.message.contains("Automatic VM restart:"))
+        #expect(oom.message.contains("Container runtime ready"))
+    }
+
+    @Test func increaseDialogShowsItsNextStepAndDisablesUnsafeIncreasesWithARedReason() throws {
+        _ = NSApplication.shared
+        let warnings = ContainerRuntimeWarnings(readIgnored: { _ in nil }, saveIgnored: { _, _ in })
+        warnings.update(history())
+        let warning = try #require(warnings.warnings.first { $0.kind == .outOfMemory })
+        let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: "Increase Memory to 8 GiB",
+            blockedReason: "This increase would leave less than 4 GiB RAM available on the host.")
+        #expect(alert.buttons[0].title == "Increase Memory to 8 GiB")
+        #expect(!alert.buttons[0].isEnabled)
+        #expect(alert.buttons[1].title == "Ignore")
+        #expect(alert.buttons[1].isEnabled)
+        #expect(alert.buttons[2].title == "Dismiss")
+        #expect(alert.buttons[2].isEnabled)
+        let label = try #require(alert.accessoryView as? NSTextField)
+        #expect(label.textColor == NSColor.systemRed)
+        #expect(label.stringValue.contains("4 GiB"))
+        let allowed = ContainerRuntimeWarnings.alert(for: warning, actionTitle: "Increase Memory to 8 GiB")
+        #expect(allowed.buttons[0].isEnabled)
+    }
+}

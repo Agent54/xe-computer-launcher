@@ -1,38 +1,312 @@
 import AppKit
+import ApplicationServices
+import CoreGraphics
+import Sparkle
+import LauncherMaintenance
+import ServiceManagement
+
+private enum LauncherUpdateChannel: String {
+    case stable
+    case int
+
+    static func configured(in bundle: Bundle = .main) -> LauncherUpdateChannel {
+        if let configuredValue = bundle.object(forInfoDictionaryKey: "XeUpdateChannel") as? String,
+           let channel = LauncherUpdateChannel(rawValue: configuredValue) {
+            return channel
+        }
+
+        // Preserve the correct channel for Sparkle-enabled builds released
+        // before XeUpdateChannel was added to Info.plist.
+        let feedURL = bundle.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
+        return feedURL.contains("/updates/int/") ? .int : .stable
+    }
+
+    var displayName: String {
+        switch self {
+        case .stable: "Release (stable)"
+        case .int: "Prerelease (int)"
+        }
+    }
+
+    var feedURLString: String {
+        "https://raw.githubusercontent.com/Agent54/xe-computer-launcher/updates/\(rawValue)/appcast.xml"
+    }
+
+}
+
+private final class LauncherVersionDisplayer: NSObject, SUVersionDisplay {
+    private let releaseVersion: String
+
+    init(releaseVersion: String) {
+        self.releaseVersion = releaseVersion
+    }
+
+    func formatUpdateVersion(
+        fromUpdate update: SUAppcastItem,
+        andBundleDisplayVersion inOutBundleDisplayVersion: AutoreleasingUnsafeMutablePointer<NSString>,
+        withBundleVersion bundleVersion: String
+    ) -> String {
+        inOutBundleDisplayVersion.pointee = releaseVersion as NSString
+        return update.displayVersionString
+    }
+
+    func formatBundleDisplayVersion(
+        _ bundleDisplayVersion: String,
+        withBundleVersion bundleVersion: String,
+        matchingUpdate: SUAppcastItem?
+    ) -> String {
+        releaseVersion
+    }
+}
+
+private final class LauncherUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate {
+    private let versionDisplayer: LauncherVersionDisplayer
+
+    init(releaseVersion: String) {
+        versionDisplayer = LauncherVersionDisplayer(releaseVersion: releaseVersion)
+    }
+
+    func standardUserDriverRequestsVersionDisplayer() -> (any SUVersionDisplay)? {
+        versionDisplayer
+    }
+}
+
+private enum ShutdownComponent: CaseIterable, Hashable {
+    case containerVM
+    case browserStack
+    case hostServices
+
+    var title: String {
+        switch self {
+        case .containerVM: "container VM"
+        case .browserStack: "Xe Computer and browser"
+        case .hostServices: "host services"
+        }
+    }
+}
 
 @main
 struct MacOSApp {
     static func main() {
+        if ApplicationMaintenance.runHelperIfRequested() { return }
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--xe-accessibility-trust-probe" {
+            exit(AXIsProcessTrusted() ? 0 : 1)
+        }
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--unregister-port-helper" {
+            // The standalone cleanup command shares the same exclusion rule.
+            guard let lifecycle = try? LauncherLifecycle() else { exit(1) }
+            defer { withExtendedLifetime(lifecycle) {} }
+            if let warning = PrivilegedPortService.unregisterIfRegistered() {
+                fputs("\(warning)\n", stderr)
+                exit(1)
+            }
+            return
+        }
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        let delegate = LauncherStartupDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
+    }
+}
+
+@MainActor
+private final class LauncherStartupDelegate: NSObject, NSApplicationDelegate {
+    private var launcherDelegate: AppDelegate?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Return from AppKit's launch notification before showing a modal alert.
+        // System Events must be able to inspect the dialog on a launched app.
+        DispatchQueue.main.async { [self] in
+            startLauncher(after: notification)
+        }
+    }
+
+    private func startLauncher(after notification: Notification) {
+        let app = NSApplication.shared
+
+        // Ask on every launch, before accessing launcher state or creating the
+        // runtime delegate, whose stored properties initialize components.
+        let disclaimer = NSAlert()
+        disclaimer.alertStyle = .warning
+        disclaimer.messageText = "Xe Computer Is Experimental Software"
+        disclaimer.informativeText = "Only use Xe Computer with fresh folders that contain no important data. Do not connect folders containing sensitive data. Do not visit untrusted websites or use websites with real accounts.\n\nContinue to start Xe Launcher, or cancel to quit."
+        disclaimer.addButton(withTitle: "Continue")
+        disclaimer.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        app.activate(ignoringOtherApps: true)
+        guard disclaimer.runModal() == .alertFirstButtonReturn else {
+            app.terminate(nil)
+            return
+        }
+
         // Sandbox disabled during development
         // if !Sandbox.apply() {
         //     print("[FATAL] Sandbox failed to apply - refusing to run unsandboxed")
         //     exit(1)
         // }
 
-        // Set CWD to app data folder
+        // The DMG installer has no runtime state. Let it hand off to an
+        // installed copy before acquiring that copy's exclusive lifecycle lock.
+        if ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
+            self?.startRuntime()
+        }) { return }
+        startRuntime()
+    }
+
+    private func startRuntime() {
+        do {
+            ApplicationMaintenance.context = try ApplicationMaintenance.Context()
+        } catch {
+            NSAlert(error: error).runModal()
+            NSApp.terminate(nil)
+            return
+        }
+        // Set CWD only after validating the directory and excluding other copies.
         let appDataPath = ExternalState.appDataFolder
         FileManager.default.changeCurrentDirectoryPath(appDataPath)
         print("[Init] CWD set to \(appDataPath)")
 
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
-
         let delegate = AppDelegate()
-        app.delegate = delegate
-        app.run()
+        launcherDelegate = delegate
+        NSApp.delegate = delegate
+        delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private var didFinishNormalStartup = false
+    private var setupDeferredOnThisLaunch = false
+    private var isPreparingForTermination = false
+    private var runtimeStartupTask: Task<Void, Never>?
+    private var setupStartupTask: Task<Void, Never>?
+    private var browserStartupTask: Task<Void, Never>?
+    private var browserInitializationComplete = false
+    private var openXeComputerRequested = false
+    private var composeServer: ComposeServer?
+    private var workerdServer = WorkerdServer()
+    private lazy var runtimeSupervisor = makeRuntimeSupervisor()
+
+    private func makeRuntimeSupervisor() -> ContainerRuntimeSupervisor {
+        // Cleanup must not occupy the VM lifecycle client's command queue.
+        let maintenanceClient = SmolVMClient()
+        let workerd = workerdServer
+        return ContainerRuntimeSupervisor(
+            maintenance: ContainerRuntimeMaintenance(
+                stateURL: SmolVMPaths.dataURL.appendingPathComponent("maintenance.json"),
+                execute: { command in
+                    try await maintenanceClient.execute(
+                        in: SmolVMSetup.machineName, command: command,
+                        timeout: command == VMResourceSampler.guestDiskStatusCommand ? "2s" : "120s"
+                    )
+                },
+                log: { ExternalState.shared.appendLog("maintenance", $0) }
+            ),
+            startMachine: { [weak self] in
+                // Pending storage-folder changes wait for a launcher restart;
+                // a VM-only restart keeps the mount used by the host Compose UI.
+                let stacksURL = await self?.composeServer?.stacksURL
+                return try await SmolVMSetup.start(stacksURL: stacksURL)
+            },
+            onStatusChanged: { [weak self] snapshot in
+                await MainActor.run {
+                    ContainerRuntimePresentation.shared.update(snapshot)
+                    self?.updateRuntimeWarnings(snapshot)
+                    self?.renderLauncherIssues()
+                }
+                await workerd.notifyRuntimeChanged()
+            }
+        )
+    }
+    private lazy var maintenanceServer = makeMaintenanceServer()
+
+    private func makeMaintenanceServer() -> ContainerMaintenanceServer {
+        let runtimeSupervisor = self.runtimeSupervisor
+        let descriptorSampler = VMFileDescriptorSampler()
+        return ContainerMaintenanceServer(descriptorHandler: { containerID in
+            let runtime = await runtimeSupervisor.snapshot()
+            guard runtime.phase == .healthy, let bootID = runtime.bootId,
+                  let snapshot = await descriptorSampler.sample(containerID: containerID, bootID: bootID) else {
+                return ContainerMaintenanceServer.Reply(status: 503, body: Data("{\"message\":\"Descriptor telemetry unavailable\"}".utf8))
+            }
+            let current = await runtimeSupervisor.snapshot()
+            guard current.phase == .healthy, current.bootId == bootID else {
+                return ContainerMaintenanceServer.Reply(status: 503, body: Data("{\"message\":\"VM restarted during sampling\"}".utf8))
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let body = try? encoder.encode(snapshot) else {
+                return ContainerMaintenanceServer.Reply(status: 500, body: Data("{}".utf8))
+            }
+            return ContainerMaintenanceServer.Reply(status: 200, body: body)
+        }) { @Sendable run in
+            let snapshot = run
+                ? await runtimeSupervisor.runMaintenance()
+                : await runtimeSupervisor.maintenanceSnapshot()
+            guard let snapshot else {
+                return ContainerMaintenanceServer.Reply(
+                    status: 503, body: Data("{\"message\":\"Cleanup is unavailable while the VM is not ready.\"}".utf8)
+                )
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            do { return ContainerMaintenanceServer.Reply(status: run ? 202 : 200, body: try encoder.encode(snapshot)) }
+            catch {
+                return ContainerMaintenanceServer.Reply(status: 500, body: Data("{\"message\":\"Could not read cleanup status.\"}".utf8))
+            }
+        }
+    }
+    private var hostServicesTask: Task<Void, Never>?
+    private var composeSocketURL = ComposeServerPaths.socketURL
+    private var isWaitingForRuntimeShutdown = false
+    private var terminationTimeoutTask: Task<Void, Never>?
+    private var didReplyToTermination = false
+    private var maintenanceHandoff: ApplicationMaintenance.Handoff?
+    private var maintenancePreparationTask: Task<Void, Never>?
+    private var terminationHandoffTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
+    private var statusMessageItem: NSMenuItem?
+    private var issuesItem: NSMenuItem?
+    private let launcherIssues = LauncherIssues()
+    private let runtimeWarnings = ContainerRuntimeWarnings()
+    private var containerVMSettingsTask: Task<Void, Never>?
+    private var isShowingRuntimeWarning = false
+    private var shutdownProgressIndicator: NSProgressIndicator?
+    private var pendingShutdownComponents = Set<ShutdownComponent>()
+    private let updateChannel = LauncherUpdateChannel.configured()
+    private let releaseVersion = Bundle.main.object(forInfoDictionaryKey: "XeReleaseVersion") as? String
+        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        ?? "Unknown"
+    private lazy var updaterUserDriverDelegate = LauncherUserDriverDelegate(releaseVersion: releaseVersion)
+    private var isUpdaterConfigured: Bool {
+        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String else {
+            return false
+        }
+        return !publicKey.isEmpty && publicKey != "SPARKLE_PUBLIC_ED_KEY"
+    }
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: self,
+        userDriverDelegate: updaterUserDriverDelegate
+    )
+    private var updateFeedCacheKey = UUID().uuidString
     private let logPanelController = LogPanelController()
     private var stateRefreshTimer: Timer?
     private var specialKeyCheck: Any?
     private var optionKeyTimer: Timer?
     private var lastOptionKeyState: Bool = false
     private var chromeVariantsScanned: Bool = false
+    private var chromeScanTask: Task<Void, Never>?
+    private var menuChromeOptions: [ExternalState.InstalledChrome] = []
+    private let menuServiceState = MenuServiceState()
+    private var isMenuTracking = false
+    private var canUseUpdater = false
 
     // Track which services have a pending operation (shows ⏳)
     private var pendingServices: Set<String> = []
@@ -44,27 +318,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var chromeStartItem: NSMenuItem?
     private var chromeStopItem: NSMenuItem?
     private var chromeHeadlessItem: NSMenuItem?
-    private var legacyVMItem: NSMenuItem?
-    private var legacyVMStartItem: NSMenuItem?
-    private var legacyVMStopItem: NSMenuItem?
-    private var systemVMItem: NSMenuItem?
-    private var systemVMStartItem: NSMenuItem?
-    private var systemVMStopItem: NSMenuItem?
-    private var appVMItem: NSMenuItem?
-    private var appVMStartItem: NSMenuItem?
-    private var appVMStopItem: NSMenuItem?
     private var runAtStartupItem: NSMenuItem?
     private var bindCapslockItem: NSMenuItem?
     private var hideDockIconItem: NSMenuItem?
+    private var saveWindowPositionsItem: NSMenuItem?
+    private var restoreWindowPositionsItem: NSMenuItem?
+    private var newProfileItem: NSMenuItem?
+    private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
+    private var advancedItemsSeparator: NSMenuItem?
+    private var localAppPortsItem: NSMenuItem?
+    private var composeStorageFolderItem: NSMenuItem?
+    private var containerMemoryItem: NSMenuItem?
+    private var containerCPUItem: NSMenuItem?
+    private var containerDiskItem: NSMenuItem?
+    private var restartVMItem: NSMenuItem?
+    private var restartXeItem: NSMenuItem?
+    private var uninstallItem: NSMenuItem?
+    private var settingsRestartRequired = false
+    private var updateChannelItem: NSMenuItem?
+    private var checkForUpdatesItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let isWaitingForRelaunch = ApplicationInstaller.handleDiskImageLaunch(onContinueFromDiskImage: { [weak self] in
-            self?.finishNormalStartup()
-        })
-        guard !isWaitingForRelaunch else { return }
-
         finishNormalStartup()
     }
 
@@ -72,110 +348,738 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !didFinishNormalStartup else { return }
         didFinishNormalStartup = true
 
+        do {
+            try RuntimeSocketPaths.shared.prepare()
+        } catch {
+            let detail = error.localizedDescription
+            fputs("Xe Launcher startup failed: \(detail)\n", stderr)
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Xe Launcher Could Not Start"
+            alert.informativeText = detail
+            alert.addButton(withTitle: "Quit")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            exit(EXIT_FAILURE)
+        }
+
         // The DMG installer runs as an accessory app. Only normal launcher
         // startup owns a Dock icon, according to the user's saved preference.
         let state = ExternalState.shared
         state.updateSettings()
         configureApplicationIdentity()
         applyDockIconPreference()
-
         setupMainMenu()
         setupStatusItem()
+        configureLoginItem()
         renderMenuLabels()
-
-        // Permission onboarding must not depend on whether downloadable assets
-        // or an existing Darc app shim are already present.
-        Task { @MainActor [weak self] in
-            _ = await AccessibilityPermission.requestIfNeeded()
-            self?.startBackgroundInitialization()
+        startStateRefreshLoop()
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self, selector: #selector(workspaceApplicationsChanged), name: name, object: nil
+            )
         }
-    }
 
-    private func startBackgroundInitialization() {
-        // Do expensive init off main thread.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let state = ExternalState.shared
-            state.updateAll()
+        // First-run setup and legacy settings without a port choice both need
+        // a decision before Workerd starts, even without virtualization.
+        let wasChoosingPorts = WorkerdPorts.needsPortChoice(state.settings.rawData)
+        if LauncherSetup.needsChoice() {
+            do {
+                setupDeferredOnThisLaunch = try LauncherSetup.chooseIfNeeded() == nil
+            } catch {
+                setupDeferredOnThisLaunch = true
+                state.appendLog("launcher", "Warning: launcher setup unavailable: \(error.localizedDescription)")
+            }
+        }
+        if setupDeferredOnThisLaunch {
+            state.appendLog("launcher", "Local app routing deferred until storage and port setup is complete.")
+        }
+        state.updateSettings()
+        let workerdPorts = WorkerdPorts(settings: state.settings.rawData)
+        workerdServer = WorkerdServer(routingPort: workerdPorts.http, tlsPort: workerdPorts.https)
+        for warning in setupDeferredOnThisLaunch ? [] : workerdPorts.settingWarnings {
+            state.appendLog("launcher", "Warning: \(warning)")
+        }
+        let needsPortHelper = workerdPorts.http == WorkerdPorts.standardHTTP
+        if wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch {
+            // The migration dialog has just closed. Keep setup visibly in
+            // progress while macOS registers and activates the selected helper.
+            showSetupProgress(message: "", allowsCancellation: false)
+            updateSetupProgress(status: "Configuring ports 80/443. Approve Xe Launcher in System Settings if asked; setup will continue automatically.")
+            setSetupProgressIndeterminate(true)
+        }
+        // Updating a copy on a read-only disk image cannot succeed. The copy
+        // installed into /Applications or ~/Applications starts Sparkle on its
+        // first normal launch instead.
+        canUseUpdater = isUpdaterConfigured && !ApplicationInstaller.isRunningFromDiskImage()
+        if canUseUpdater {
+            ExternalState.shared.appendLog(
+                "launcher",
+                "Sparkle update channel: \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
+            )
+            _ = updaterController
+        }
 
-            if !state.isColimaInstalled {
-                var installationError: String?
+        setupStartupTask = Task { @MainActor in
+            let workerdStateURL = WorkerdPaths.stateURL
+            let orphanMessages = await Task.detached(priority: .userInitiated) {
+                WorkerdOrphanCleanup.stopOrphans(stateURL: workerdStateURL)
+            }.value
+            guard !Task.isCancelled else { return }
+            for message in orphanMessages { state.appendLog("launcher", message) }
+            let helperWarning = setupDeferredOnThisLaunch ? nil :
+                (needsPortHelper ? await PrivilegedPortService.registerIfNeeded() :
+                    PrivilegedPortService.unregisterIfRegistered())
+            let bindingWarnings = setupDeferredOnThisLaunch ? [] :
+                workerdPorts.bindingWarnings(skipStandardPorts: needsPortHelper)
+            guard !Task.isCancelled else { return }
+            let portWarnings = bindingWarnings + (helperWarning.map { [$0] } ?? [])
+            for warning in portWarnings {
+                state.appendLog("launcher", "Warning: \(warning)")
+            }
+            // An update can briefly leave Service Management reporting the
+            // previous registration state. Probe the actual helper before
+            // displaying permission UI, including when status is stale.
+            var helperReady = needsPortHelper && !setupDeferredOnThisLaunch
+                ? await PrivilegedPortService.waitUntilReady() : false
+            var helperProgressVisible = wasChoosingPorts && needsPortHelper && !setupDeferredOnThisLaunch
+            var nextHelperRecoveryAt = Date().addingTimeInterval(12)
+            var nextHelperRegistrationAt = Date().addingTimeInterval(5)
+            if needsPortHelper && !setupDeferredOnThisLaunch && !helperReady &&
+                PrivilegedPortService.status == .requiresApproval {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Port Helper Needs Attention"
+                alert.informativeText = "Allow Xe Launcher under Allow in Background in System Settings to use local app ports 80/443. Setup will continue automatically after approval."
+                alert.alertStyle = .warning
+                if !helperProgressVisible {
+                    showSetupProgress(message: "", placement: .topTrailing, allowsCancellation: false)
+                    setSetupProgressIndeterminate(true)
+                    helperProgressVisible = true
+                }
+                setSetupProgressPlacement(.topTrailing)
+                setSetupProgressAction(title: "Open System Settings") {
+                    PrivilegedPortService.openSystemSettings()
+                }
+                updateSetupProgress(status: "Enable Xe Launcher under Allow in Background in System Settings. Setup will continue automatically.")
+                alert.addButton(withTitle: "Open System Settings")
+                alert.addButton(withTitle: "Wait for Approval")
+                alert.addButton(withTitle: "Not Now")
+                let approvalTimer = Timer(timeInterval: 1, repeats: true) { _ in
+                    if PrivilegedPortService.status == .enabled {
+                        MainActor.assumeIsolated {
+                            NSApp.stopModal(withCode: .alertSecondButtonReturn)
+                        }
+                    }
+                }
+                RunLoop.main.add(approvalTimer, forMode: .common)
+                let response = alert.runModal()
+                approvalTimer.invalidate()
+                alert.window.orderOut(nil)
+                if response == .alertFirstButtonReturn {
+                    PrivilegedPortService.openSystemSettings()
+                    nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                } else if response == .alertSecondButtonReturn {
+                    nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                } else {
+                    closeSetupProgress()
+                    return
+                }
+            } else if !bindingWarnings.isEmpty {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Local App Ports Are Unavailable"
+                alert.informativeText = bindingWarnings.joined(separator: "\n") +
+                    "\n\nFree occupied ports; Xe Launcher will retry automatically."
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
 
-                if state.isHomebrewInstalled {
-                    let progressReady = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        showSetupProgress(message: "Installing a required VM dependency", allowsCancellation: false)
-                        updateSetupProgress(status: "Installing Colima with Homebrew…")
+            // A Settings switch can report enabled before launchd has started
+            // the daemon. Confirm the actual socket handoff before starting
+            // Workerd or the browser on standard ports.
+            if needsPortHelper && !setupDeferredOnThisLaunch {
+                while !helperReady && !Task.isCancelled {
+                    var acquireFailure: String?
+                    do {
+                        _ = try await PrivilegedPortService.acquire()
+                        helperReady = true
+                        break
+                    } catch {
+                        acquireFailure = error.localizedDescription
+                    }
+                    let helperStatus = PrivilegedPortService.status
+                    setSetupProgressPlacement(helperStatus == .requiresApproval ? .topTrailing : .centered)
+                    if (helperStatus == .notRegistered || helperStatus == .notFound),
+                              Date() >= nextHelperRegistrationAt {
+                        // Re-enabling the background item in System Settings
+                        // does not register a daemon that was removed during an
+                        // app update. Retry the app's registration after consent.
+                        if let warning = await PrivilegedPortService.registerIfNeeded() {
+                            state.appendLog("launcher", "Port helper registration retry: \(warning)")
+                        }
+                        nextHelperRegistrationAt = Date().addingTimeInterval(10)
+                        continue
+                    }
+                    if !helperProgressVisible {
+                        showSetupProgress(
+                            message: "",
+                            placement: helperStatus == .requiresApproval ? .topTrailing : .centered,
+                            allowsCancellation: false
+                        )
                         setSetupProgressIndeterminate(true)
-                        progressReady.signal()
+                        helperProgressVisible = true
                     }
-                    progressReady.wait()
-
-                    installationError = state.installColima()
-
-                    let progressClosed = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        closeSetupProgress()
-                        progressClosed.signal()
+                    let helperStatusMessage: String
+                    if helperStatus == .requiresApproval {
+                        setSetupProgressAction(title: "Open System Settings") {
+                            PrivilegedPortService.openSystemSettings()
+                        }
+                        helperStatusMessage = "Enable Xe Launcher under Allow in Background in System Settings. Enter your password if asked; setup will continue automatically."
+                    } else {
+                        hideSetupProgressAction()
+                        helperStatusMessage = helperStatus == .enabled
+                            ? "Starting Xe Launcher's port helper on ports 80/443…"
+                            : "Waiting for Xe Launcher's port helper on ports 80/443…"
                     }
-                    progressClosed.wait()
-                } else {
-                    installationError = state.installColima()
+                    updateSetupProgress(status: helperStatusMessage)
+                    if Date() >= nextHelperRecoveryAt {
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        let needsApproval = helperStatus == .requiresApproval
+                        alert.messageText = needsApproval ? "Port Helper Needs Attention" : "Port Helper Could Not Start"
+                        alert.informativeText = (acquireFailure.map { "The helper did not respond: \($0)\n\n" } ?? "") +
+                            (needsApproval
+                                ? "Allow Xe Launcher under Allow in Background in System Settings for local apps on ports 80/443."
+                                : "The port helper is not responding on ports 80/443. Choose Try Again to refresh its registration.")
+                        alert.addButton(withTitle: needsApproval ? "Open System Settings" : "Try Again")
+                        alert.addButton(withTitle: needsApproval ? "Wait for Approval" : "Not Now")
+                        if needsApproval { alert.addButton(withTitle: "Not Now") }
+                        NSApp.activate(ignoringOtherApps: true)
+                        let response = alert.runModal()
+                        alert.window.orderOut(nil)
+                        if needsApproval && response == .alertFirstButtonReturn {
+                            PrivilegedPortService.openSystemSettings()
+                            nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                        } else if !needsApproval && response == .alertFirstButtonReturn {
+                            if let warning = await PrivilegedPortService.registerIfNeeded(forceRefresh: helperStatus == .enabled) {
+                                state.appendLog("launcher", "Port helper retry: \(warning)")
+                            }
+                            nextHelperRecoveryAt = Date().addingTimeInterval(20)
+                        } else if needsApproval && response == .alertSecondButtonReturn {
+                            nextHelperRecoveryAt = Date().addingTimeInterval(120)
+                        } else {
+                            closeSetupProgress()
+                            return
+                        }
+                    }
+                    try? await Task.sleep(for: .milliseconds(500))
                 }
-
-                if let installationError {
-                    let alertClosed = DispatchSemaphore(value: 0)
-                    Task { @MainActor in
-                        self.showColimaInstallationError(installationError)
-                        alertClosed.signal()
-                    }
-                    alertClosed.wait()
-                } else {
-                    state.refreshRuntimeStateFromSystemTruth(force: true)
+                if Task.isCancelled {
+                    closeSetupProgress()
+                    return
                 }
+                if helperProgressVisible { closeSetupProgress() }
+                state.appendLog("launcher", "Port helper ready; continuing launcher setup.")
             }
 
-            // Check for zombie Helium/Darc processes before launching
-            let zombies = state.findZombieProcesses()
-            if !zombies.isEmpty {
-                let sem = DispatchSemaphore(value: 0)
-                Task { @MainActor in
-                    self.showZombieAlert(zombies)
-                    sem.signal()
+            // Keep the permission companion visible until macOS confirms both
+            // approvals. Starting services sooner races the system dialogs and
+            // lets a fresh installation appear ready before its ports are usable.
+            guard await AccessibilityPermission.requestIfNeeded() else { return }
+            guard !Task.isCancelled else { return }
+            if !setupDeferredOnThisLaunch {
+                guard await requestLocalHTTPSTrustIfNeeded() else {
+                    setupDeferredOnThisLaunch = true
+                    state.appendLog("launcher", "Local HTTPS certificate approval deferred; browser startup will resume on the next launch.")
+                    return
                 }
-                sem.wait()
             }
-
-            _ = state.launchBrowserStack()
-            Task { @MainActor in self.renderMenuLabels() }
+            if !setupDeferredOnThisLaunch {
+                await runtimeSupervisor.prepareForLaunch()
+                guard !Task.isCancelled else { return }
+                startHostServices()
+            }
+            if needsPortHelper && !setupDeferredOnThisLaunch {
+                let showRoutingProgressAt = ContinuousClock.now + .seconds(wasChoosingPorts ? 0 : 2)
+                var routingProgressVisible = false
+                while !workerdServer.servingStandardPorts {
+                    if Task.isCancelled {
+                        if routingProgressVisible { closeSetupProgress() }
+                        return
+                    }
+                    if !routingProgressVisible && ContinuousClock.now >= showRoutingProgressAt {
+                        showSetupProgress(message: "", allowsCancellation: false)
+                        updateSetupProgress(status: "Starting local app routing on ports 80/443…")
+                        setSetupProgressIndeterminate(true)
+                        routingProgressVisible = true
+                    }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                if routingProgressVisible { closeSetupProgress() }
+            }
+            startBackgroundInitialization()
         }
     }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // When the app is launched again while already running, bring Darc to foreground or start it
-        let state = ExternalState.shared
-        if state.darcRunning {
-            if let app = state.darcAppRef {
-                app.activate()
+    private func requestLocalHTTPSTrustIfNeeded() async -> Bool {
+        let stateURL = WorkerdPaths.stateURL
+        while !Task.isCancelled {
+            let certificateURL: URL
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try LocalTLSCertificate.prepare(stateURL: stateURL)
+                }.value
+                certificateURL = prepared.certificateURL
+            } catch {
+                if !retryLocalHTTPSTrust(after: "Xe Launcher could not create its local HTTPS certificate: \(error.localizedDescription)") {
+                    return false
+                }
+                continue
             }
-        } else {
-            DispatchQueue.global(qos: .userInitiated).async {
-                _ = state.launchBrowserStack()
-                Task { @MainActor in self.renderMenuLabels() }
+
+            let trusted = await Task.detached(priority: .userInitiated) {
+                LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
+            }.value
+            if trusted { return true }
+
+            showSetupProgress(
+                message: "",
+                placement: .topTrailing,
+                allowsCancellation: false,
+                title: "Trust Local HTTPS for Xe Launcher",
+                minimumSize: NSSize(width: 540, height: 430)
+            )
+            updateSetupProgress(status: """
+                Browsers need this trust to open Compose UI and local apps over HTTPS without certificate warnings. The certificate Xe Launcher serves covers compose-ui.localhost and *.app.localhost.
+
+                Approving the macOS prompt trusts Xe Launcher's local CA for SSL in this user account, including other browsers. CA trust can apply to other domains it signs, not just those two local names.
+
+                Enter your Mac password in the macOS prompt to continue.
+                """)
+            setSetupProgressIndeterminate(true)
+            NSApp.activate(ignoringOtherApps: true)
+
+            var installationError: Error?
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try LocalHTTPSTrust.requestUserTrust(certificateURL: certificateURL)
+                }.value
+            } catch {
+                installationError = error
             }
+            setSetupProgressPlacement(.centered)
+            // The security tool exits after authorization, but the new user
+            // trust setting can take a moment to become visible to a separate
+            // Security.framework evaluation.
+            let trustDeadline = Date().addingTimeInterval(10)
+            var nowTrusted = false
+            repeat {
+                nowTrusted = await Task.detached(priority: .userInitiated) {
+                    LocalHTTPSTrust.isTrusted(certificateURL: certificateURL)
+                }.value
+                if nowTrusted || installationError != nil || Date() >= trustDeadline { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            } while !Task.isCancelled
+            closeSetupProgress()
+            if nowTrusted {
+                ExternalState.shared.appendLog("launcher", "Local HTTPS certificate trusted for this macOS user.")
+                return true
+            }
+            let detail = installationError?.localizedDescription ??
+                "macOS did not report the local HTTPS certificate as trusted."
+            guard retryLocalHTTPSTrust(after: detail) else { return false }
         }
         return false
     }
 
+    private func retryLocalHTTPSTrust(after detail: String) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Local HTTPS Certificate Needs Approval"
+        alert.informativeText = detail +
+            "\n\nXe Launcher serves HTTPS for compose-ui.localhost and *.app.localhost. The local CA is trusted for SSL in this macOS account and can sign for other domains. Choose Try Again to reopen the macOS approval prompt, or Not Now to retry on the next launch."
+        alert.addButton(withTitle: "Try Again")
+        alert.addButton(withTitle: "Not Now")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func startBackgroundInitialization() {
+        guard !isPreparingForTermination, runtimeStartupTask == nil, browserStartupTask == nil else { return }
+        guard !setupDeferredOnThisLaunch else {
+            ExternalState.shared.appendLog("launcher", "Browser and container startup deferred until launcher setup is complete.")
+            return
+        }
+        runtimeStartupTask = Task {
+            do {
+                // Host UI is already running, even on machines without a hypervisor.
+                guard VirtualizationSupport.isAvailable else {
+                    ExternalState.shared.appendLog("launcher", VirtualizationSupport.unavailableWarning)
+                    return
+                }
+                guard let stacksURL = try LauncherSetup.chooseIfNeeded() else {
+                    ExternalState.shared.appendLog("launcher", "Compose startup deferred until a user data folder is selected.")
+                    return
+                }
+                try Task.checkCancellation()
+                if composeServer == nil { composeServer = ComposeServer(stacksURL: stacksURL) }
+                composeSocketURL = ComposeServerPaths.socketURL
+                // The host supervisor starts Compose without waiting for Docker.
+                let result = try await runtimeSupervisor.start()
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "SmolVM machine '\(result.machineName)' is running with Docker socket at \(result.dockerSocketURL.path)"
+                )
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                // Quit or updater relaunch cancelled runtime startup.
+            } catch {
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Container startup failed: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        browserStartupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let state = ExternalState.shared
+            state.appendLog("launcher", "Recovering saved Xe Computer and browser state")
+            let recoveredProcessCount = await Task.detached(priority: .userInitiated) {
+                // Stop the managed browser before a pinned Helium update can
+                // replace its application bundle.
+                state.updateSettings()
+                state.stopDarc()
+                let staleProcesses = state.findZombieProcesses()
+                state.killZombieProcesses(staleProcesses)
+                state.updateAll()
+                return staleProcesses.count
+            }.value
+            guard !Task.isCancelled else { return }
+
+            if recoveredProcessCount > 0 {
+                state.appendLog(
+                    "launcher",
+                    "Stopped \(recoveredProcessCount) browser process(es) left by an earlier launcher"
+                )
+            }
+            browserInitializationComplete = true
+            state.appendLog("launcher", "Browser recovery complete; Xe Computer is ready to open on request")
+            openXeComputerIfRequested()
+            renderMenuLabels()
+        }
+    }
+
+    private func startHostServices() {
+        guard !isPreparingForTermination else { return }
+        if let path = ExternalState.shared.stringSetting("compose_storage_path"), !path.isEmpty {
+            composeSocketURL = ComposeServerPaths.socketURL
+            composeServer = ComposeServer(stacksURL: URL(fileURLWithPath: path))
+        }
+        hostServicesTask = Task {
+            var activeComposeSocket: URL?
+            while !Task.isCancelled {
+                if activeComposeSocket != composeSocketURL {
+                    await workerdServer.stop()
+                    activeComposeSocket = composeSocketURL
+                }
+                do {
+                    try await workerdServer.start(composeSocketURL: composeSocketURL, routerSocketURL: SmolVMSetup.routerSocketURL)
+                    try maintenanceServer.start()
+                } catch is CancellationError { break }
+                catch { ExternalState.shared.appendLog("workerd", "Host services failed to start: \(error.localizedDescription)") }
+                renderMenuLabels()
+                // Compose's listener does not need Docker. Start it before any
+                // guest commands, diagnostics or maintenance can occupy this loop.
+                if let composeServer {
+                    do { try await composeServer.reconcile(dockerSocketURL: SmolVMSetup.dockerSocketURL) }
+                    catch is CancellationError { break }
+                    catch { ExternalState.shared.appendLog("compose", error.localizedDescription) }
+                }
+                await RuntimeLogCollector.shared.collect()
+                await runtimeSupervisor.reconcile()
+                await workerdServer.notifyRuntimeChanged()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        requestOpenXeComputer()
+        return false
+    }
+
+    private func requestOpenXeComputer() {
+        guard !isPreparingForTermination, !pendingServices.contains("darc") else { return }
+        openXeComputerRequested = true
+        openXeComputerIfRequested()
+    }
+
+    private func openXeComputerIfRequested() {
+        // A Dock click during setup/recovery must wait until cleanup has
+        // finished, otherwise recovery can immediately stop the new browser.
+        guard browserInitializationComplete, openXeComputerRequested,
+              !isPreparingForTermination, !pendingServices.contains("darc") else { return }
+        openXeComputerRequested = false
+        // Opening a running app shim sends it the macOS reopen event. Merely
+        // activating a windowless shim does not create or restore a window.
+        runServiceAction("darc") {
+            let state = ExternalState.shared
+            if let error = state.reopenDarc() {
+                state.appendLog("launcher", "Xe Computer reopen failed: \(error)")
+            }
+        }
+    }
+
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        // Return the status-item menu itself so the Dock and menu bar expose the
-        // same live items, submenus, state indicators, and actions.
         renderMenuLabels()
-        return statusItem?.menu
+        updateOptionOnlyMenuItems(optionHeld: isOptionKeyHeld)
+
+        // The Dock appends its own native Quit command. Return a snapshot of
+        // the status menu without our duplicate Quit item.
+        guard let statusMenu = statusItem?.menu,
+              let dockMenu = statusMenu.copy() as? NSMenu else {
+            return nil
+        }
+        dockMenu.delegate = nil
+        if let quitItem = dockMenu.items.first(where: { $0.action == #selector(quitAction) }) {
+            dockMenu.removeItem(quitItem)
+        }
+        return dockMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        prepareForTermination()
         stopStateRefreshLoop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Sparkle sends the application a regular terminate request before it
+        // atomically replaces and relaunches the bundle. Keep this cleanup in
+        // the delegate so updater-triggered termination and the Quit menu item
+        // have identical service-state behavior.
+        prepareForTermination()
+        guard didFinishNormalStartup else { return .terminateNow }
+
+        if !isWaitingForRuntimeShutdown {
+            isWaitingForRuntimeShutdown = true
+            let shutdownStartedAt = Date()
+            ExternalState.shared.appendLog("launcher", "Shutdown started")
+
+            let vmCleanup = Task { @MainActor () -> String? in
+                let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.containerVM) }
+                ExternalState.shared.appendLog("launcher", "Stopping SmolVM")
+                do {
+                    await runtimeStartupTask?.value
+                    await containerVMSettingsTask?.value
+                    try await runtimeSupervisor.stop()
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "SmolVM machine '\(SmolVMSetup.machineName)' stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
+                    )
+                    return nil
+                } catch is CancellationError {
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "SmolVM shutdown cancelled after \(Self.elapsedDescription(since: phaseStartedAt))"
+                    )
+                    return "Container VM shutdown was cancelled."
+                } catch {
+                    ExternalState.shared.appendLog(
+                        "launcher",
+                        "Warning: could not stop SmolVM machine '\(SmolVMSetup.machineName)' after \(Self.elapsedDescription(since: phaseStartedAt)): \(error.localizedDescription)"
+                    )
+                    return "Container VM: \(error.localizedDescription)"
+                }
+            }
+
+            let browserCleanup = Task { @MainActor () -> String? in
+                let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.browserStack) }
+                ExternalState.shared.appendLog("launcher", "Stopping Xe Computer and browser")
+                await browserStartupTask?.value
+                let stopped = await Task.detached(priority: .userInitiated) {
+                    let state = ExternalState.shared
+                    let darcStopped = state.stopDarc()
+                    let chromeStopped = state.stopChrome()
+                    do {
+                        let remaining = try state.findZombieProcessesChecked()
+                        state.killZombieProcesses(remaining)
+                        let noRemainingProcesses = try state.findZombieProcessesChecked().isEmpty
+                        return darcStopped && chromeStopped && noRemainingProcesses
+                    } catch { return false }
+                }.value
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Browser shutdown finished (stopped=\(stopped)) in \(Self.elapsedDescription(since: phaseStartedAt))"
+                )
+                return stopped ? nil : "Xe Computer or the browser did not stop, or their exit could not be verified."
+            }
+
+            let hostCleanup = Task { @MainActor () -> String? in
+                let phaseStartedAt = Date()
+                defer { shutdownComponentFinished(.hostServices) }
+                ExternalState.shared.appendLog("launcher", "Stopping host services")
+                await setupStartupTask?.value
+                await hostServicesTask?.value
+                let workerdCleanup = Task { @MainActor in await workerdServer.stop() }
+                let composeCleanup = Task { @MainActor in await composeServer?.stop() }
+                await workerdCleanup.value
+                await composeCleanup.value
+                // Keep launchd registration across quit/relaunch so an approved
+                // standard-port helper stays available. Startup unregisters it
+                // when the configured ports switch away from 80/443.
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Host services stopped in \(Self.elapsedDescription(since: phaseStartedAt))"
+                )
+                return !workerdServer.isRunning && composeServer?.isRunning != true ? nil : "Host services did not stop."
+            }
+
+            terminationTimeoutTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                guard let self else { return }
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Shutdown exceeded 60 seconds; terminating after forced process cleanup"
+                )
+                vmCleanup.cancel()
+                browserCleanup.cancel()
+                hostCleanup.cancel()
+                finishTermination(sender, shutdown: ShutdownResult(stopped: [], failures: ["Component shutdown exceeded 60 seconds."]))
+            }
+
+            Task {
+                let results: [(ShutdownResult.Component, String?)] = [
+                    (.containerVM, await vmCleanup.value),
+                    (.browserStack, await browserCleanup.value),
+                    (.hostServices, await hostCleanup.value)
+                ]
+                let shutdown = ShutdownResult(stopped: Set(results.filter { $0.1 == nil }.map(\.0)),
+                                              failures: results.compactMap(\.1))
+                ExternalState.shared.appendLog(
+                    "launcher",
+                    "Shutdown complete in \(Self.elapsedDescription(since: shutdownStartedAt))"
+                )
+                await ExternalState.shared.logStore.flush()
+                finishTermination(sender, shutdown: shutdown)
+            }
+        }
+        return .terminateLater
+    }
+
+    private func finishTermination(_ sender: NSApplication, shutdown: ShutdownResult) {
+        guard !didReplyToTermination else { return }
+        guard let handoff = maintenanceHandoff else { replyToTermination(sender); return }
+        guard shutdown.succeeded else {
+            terminationHandoffTask?.cancel()
+            handoff.cancel()
+            ApplicationMaintenance.reportFailure("Maintenance cancelled: " + shutdown.failures.joined(separator: "\n"))
+            replyToTermination(sender)
+            return
+        }
+        guard terminationHandoffTask == nil else { return }
+        terminationHandoffTask = Task {
+            do {
+                try await handoff.authorize(shutdown)
+            } catch {
+                handoff.cancel()
+                guard !didReplyToTermination else { return }
+                ExternalState.shared.appendLog("launcher", "Maintenance cancelled: \(error.localizedDescription)")
+                ApplicationMaintenance.reportFailure(error.localizedDescription)
+            }
+            // The watchdog remains active during acknowledgment. It can cancel
+            // the helper and reply without waiting for this actor operation.
+            guard !didReplyToTermination else { return }
+            replyToTermination(sender)
+        }
+    }
+
+    private func replyToTermination(_ sender: NSApplication) {
+        didReplyToTermination = true
+        terminationTimeoutTask?.cancel()
+        sender.reply(toApplicationShouldTerminate: true)
+    }
+
+    private static func elapsedDescription(since start: Date) -> String {
+        String(format: "%.2fs", Date().timeIntervalSince(start))
+    }
+
+    private func prepareForTermination() {
+        guard !isPreparingForTermination, didFinishNormalStartup else { return }
+        isPreparingForTermination = true
+        beginShutdownPresentation()
+        maintenancePreparationTask?.cancel()
+        setupStartupTask?.cancel()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        stopStateRefreshLoop()
+        runtimeStartupTask?.cancel()
+        containerVMSettingsTask?.cancel()
+        browserStartupTask?.cancel()
+        hostServicesTask?.cancel()
+        maintenanceServer.stop()
+        workerdServer.requestStop()
+        composeServer?.requestStop()
+
+        ExternalState.shared.requestBrowserStackStop()
+    }
+
+    private func beginShutdownPresentation() {
+        pendingShutdownComponents = Set(ShutdownComponent.allCases)
+        updateShutdownStatus()
+        if let menu = statusItem?.menu {
+            disableMenuItemsForShutdown(in: menu)
+            menu.update()
+        }
+
+        guard shutdownProgressIndicator == nil, let button = statusItem?.button else { return }
+        statusItem?.length = NSStatusItem.squareLength
+        button.image = nil
+        button.title = ""
+        button.toolTip = "Xe Launcher is shutting down"
+
+        let indicator = NSProgressIndicator(frame: NSRect(x: 4, y: 4, width: 14, height: 14))
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = true
+        indicator.isDisplayedWhenStopped = false
+        indicator.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        button.addSubview(indicator)
+        indicator.startAnimation(nil)
+        shutdownProgressIndicator = indicator
+    }
+
+    private func shutdownComponentFinished(_ component: ShutdownComponent) {
+        pendingShutdownComponents.remove(component)
+        updateShutdownStatus()
+    }
+
+    private func updateShutdownStatus() {
+        let pending = ShutdownComponent.allCases.filter { pendingShutdownComponents.contains($0) }
+        let detail: String
+        switch pending.count {
+        case 0:
+            detail = "Finishing shutdown…"
+        case 1:
+            detail = "Stopping \(pending[0].title)…"
+        default:
+            detail = "Stopping " + pending.map(\.title).joined(separator: ", ") + "…"
+        }
+        statusMessageItem?.title = "Status: \(detail)"
+        statusItem?.menu?.update()
+    }
+
+    private func disableMenuItemsForShutdown(in menu: NSMenu) {
+        for item in menu.items {
+            if item !== statusMessageItem && !item.isSeparatorItem {
+                item.isEnabled = false
+            }
+            if let submenu = item.submenu {
+                disableMenuItemsForShutdown(in: submenu)
+            }
+        }
     }
 
     /// Create a minimal main menu so keyboard shortcuts (Cmd+C, Cmd+A, etc.)
@@ -197,6 +1101,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
+            button.setAccessibilityIdentifier("dev.xe.computer.status-menu")
+            button.setAccessibilityLabel("Xe Launcher status menu")
+            button.toolTip = "Xe Launcher"
+
             if let resourceURL = Bundle.main.resourceURL,
                let icon = NSImage(contentsOf: resourceURL.appendingPathComponent("status-icon.png")) {
                 icon.size = NSSize(width: 18, height: 18)
@@ -205,7 +1113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 button.image = NSImage(
                     systemSymbolName: "desktopcomputer",
-                    accessibilityDescription: "Xe Computer"
+                    accessibilityDescription: "Xe Launcher"
                 )
                 button.image?.size = NSSize(width: 18, height: 18)
             }
@@ -214,7 +1122,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
-        menu.addItem(NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: ""))
+        let statusMessageItem = NSMenuItem(title: "Status: Ready", action: nil, keyEquivalent: "")
+        menu.addItem(statusMessageItem)
+        self.statusMessageItem = statusMessageItem
+        let issuesItem = NSMenuItem(title: LauncherIssues.title + "…", action: #selector(openIssueLogsAction), keyEquivalent: "")
+        issuesItem.target = self
+        issuesItem.isHidden = true
+        menu.addItem(issuesItem)
+        self.issuesItem = issuesItem
         menu.addItem(.separator())
 
         // Profile entries are inserted dynamically between here and the New Profile item
@@ -223,17 +1138,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let newProfileItem = NSMenuItem(title: "New Profile...", action: #selector(newProfileAction), keyEquivalent: "")
         newProfileItem.target = self
+        newProfileItem.isHidden = true
         menu.addItem(newProfileItem)
+        self.newProfileItem = newProfileItem
 
-        menu.addItem(.separator())
-        legacyVMItem = buildSubmenu(parent: menu, title: "Legacy VM", startSelector: #selector(legacyVMStartAction), stopSelector: #selector(legacyVMStopAction), startRef: &legacyVMStartItem, stopRef: &legacyVMStopItem)
-        systemVMItem = buildSubmenu(parent: menu, title: "System VM", startSelector: #selector(systemVMStartAction), stopSelector: #selector(systemVMStopAction), startRef: &systemVMStartItem, stopRef: &systemVMStopItem)
-        appVMItem = buildSubmenu(parent: menu, title: "App VM", startSelector: #selector(appVMStartAction), stopSelector: #selector(appVMStopAction), startRef: &appVMStartItem, stopRef: &appVMStopItem)
-
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: ""))
+        let advancedSeparator = NSMenuItem.separator()
+        advancedSeparator.isHidden = true
+        menu.addItem(advancedSeparator)
+        advancedItemsSeparator = advancedSeparator
+        let saveWindowPositionsItem = NSMenuItem(title: "Save Window Positions", action: #selector(darcSaveWindowPositionsAction), keyEquivalent: "")
+        saveWindowPositionsItem.isHidden = true
+        menu.addItem(saveWindowPositionsItem)
+        self.saveWindowPositionsItem = saveWindowPositionsItem
+        let restoreWindowPositionsItem = NSMenuItem(title: "Restore Window Positions", action: #selector(darcRestoreWindowPositionsAction), keyEquivalent: "")
+        restoreWindowPositionsItem.isHidden = true
+        menu.addItem(restoreWindowPositionsItem)
+        self.restoreWindowPositionsItem = restoreWindowPositionsItem
+        let systemLogsItem = NSMenuItem(title: "System Logs", action: #selector(showLogsAction), keyEquivalent: "")
+        systemLogsItem.isHidden = true
+        menu.addItem(systemLogsItem)
+        self.systemLogsItem = systemLogsItem
 
         let appDataSeparator = NSMenuItem.separator()
         appDataSeparator.isHidden = true
@@ -245,16 +1169,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(appDataItem)
         openAppDataFolderItem = appDataItem
 
+        let portsItem = NSMenuItem(title: "Local App Ports…", action: #selector(changeLocalAppPortsAction), keyEquivalent: "")
+        portsItem.isHidden = true
+        menu.addItem(portsItem)
+        localAppPortsItem = portsItem
+        let storageFolderItem = NSMenuItem(title: "Compose Storage Folder…", action: #selector(changeStorageFolderAction), keyEquivalent: "")
+        storageFolderItem.isHidden = true
+        menu.addItem(storageFolderItem)
+        composeStorageFolderItem = storageFolderItem
+
+        let memoryItem = NSMenuItem(title: "Container VM Memory…", action: #selector(changeContainerMemoryAction), keyEquivalent: "")
+        memoryItem.isHidden = true
+        menu.addItem(memoryItem)
+        containerMemoryItem = memoryItem
+        let cpuItem = NSMenuItem(title: "Container VM CPUs…", action: #selector(changeContainerCPUAction), keyEquivalent: "")
+        cpuItem.isHidden = true
+        menu.addItem(cpuItem)
+        containerCPUItem = cpuItem
+        let diskItem = NSMenuItem(title: "Container VM Disk Size…", action: #selector(changeContainerDiskAction), keyEquivalent: "")
+        diskItem.isHidden = true
+        menu.addItem(diskItem)
+        containerDiskItem = diskItem
+
+        let restartVMItem = NSMenuItem(title: "Restart VM", action: #selector(restartVMAction), keyEquivalent: "")
+        restartVMItem.isHidden = true
+        menu.addItem(restartVMItem)
+        self.restartVMItem = restartVMItem
+
+        let restartXeItem = NSMenuItem(title: "Restart Xe", action: #selector(restartXeAction), keyEquivalent: "")
+        restartXeItem.toolTip = "Restarts all components. Choose Continue in the experimental-software prompt after relaunch."
+        restartXeItem.isHidden = true
+        menu.addItem(restartXeItem)
+        self.restartXeItem = restartXeItem
+
+        let uninstallItem = NSMenuItem(title: "Uninstall…", action: #selector(uninstallAction), keyEquivalent: "")
+        uninstallItem.isHidden = true
+        menu.addItem(uninstallItem)
+        self.uninstallItem = uninstallItem
+
         menu.addItem(.separator())
 
-        runAtStartupItem = NSMenuItem(title: "Run at Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
-        bindCapslockItem = NSMenuItem(title: "Bind to Capslock", action: #selector(bindCapslockAction), keyEquivalent: "")
+        let runAtStartupItem = NSMenuItem(title: "Start on System Startup", action: #selector(runAtStartupAction), keyEquivalent: "")
+        runAtStartupItem.toolTip = "Starts Xe Launcher when you log in to macOS. Xe Computer opens when requested."
+        menu.addItem(runAtStartupItem)
+        self.runAtStartupItem = runAtStartupItem
+        bindCapslockItem = NSMenuItem(title: "Bind to Caps Lock", action: #selector(bindCapslockAction), keyEquivalent: "")
         hideDockIconItem = NSMenuItem(title: "Hide Dock Icon", action: #selector(hideDockIconAction), keyEquivalent: "")
-        if let runAtStartupItem { menu.addItem(runAtStartupItem) }
         if let bindCapslockItem { menu.addItem(bindCapslockItem) }
         if let hideDockIconItem { menu.addItem(hideDockIconItem) }
 
         menu.addItem(.separator())
+        let updateChannelItem = NSMenuItem(
+            title: "Update Channel: \(updateChannel.displayName)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        updateChannelItem.isEnabled = false
+        updateChannelItem.isHidden = true
+        menu.addItem(updateChannelItem)
+        self.updateChannelItem = updateChannelItem
+        let updateTitle = updateChannel == .int ? "Update (int)" : "Check for Updates…"
+        let checkForUpdatesItem = NSMenuItem(
+            title: updateTitle,
+            action: #selector(checkForUpdatesAction),
+            keyEquivalent: ""
+        )
+        menu.addItem(checkForUpdatesItem)
+        self.checkForUpdatesItem = checkForUpdatesItem
         menu.addItem(NSMenuItem(title: "About", action: #selector(aboutAction), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAction), keyEquivalent: "q"))
 
@@ -262,67 +1243,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem?.menu = menu
     }
 
-    private func buildSubmenu(parent: NSMenu, title: String, startSelector: Selector, stopSelector: Selector, startRef: inout NSMenuItem?, stopRef: inout NSMenuItem?) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        submenu.autoenablesItems = false
-        let startItem = NSMenuItem(title: "Start", action: startSelector, keyEquivalent: "")
-        let stopItem = NSMenuItem(title: "Stop", action: stopSelector, keyEquivalent: "")
-        submenu.addItem(startItem)
-        submenu.addItem(stopItem)
-        item.submenu = submenu
-        parent.addItem(item)
-        startRef = startItem
-        stopRef = stopItem
-        return item
-    }
-
-    private var chromeVariantItems: [NSMenuItem] = []
+    private var chromeVariantItems: LiveMenuItems<String>?
     private var chromeSubmenu: NSMenu?
 
 
 
     private var chromeVariantSeparator: NSMenuItem?
 
+    /// Read modifier state for the whole login session. Dock-menu requests are
+    /// delivered across processes and do not necessarily have a current NSEvent
+    /// in this app, unlike clicks on the status item.
+    private var isOptionKeyHeld: Bool {
+        CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate)
+    }
+
     private func refreshChromeMenuOptions(in submenu: NSMenu) {
-        // Remove old variant items
-        for old in chromeVariantItems { submenu.removeItem(old) }
-        chromeVariantItems.removeAll()
-        if let sep = chromeVariantSeparator { submenu.removeItem(sep); chromeVariantSeparator = nil }
-
         let state = ExternalState.shared
-        let minVersion = 145
-        let showVariants = NSEvent.modifierFlags.contains(.option)
-
-        // Only scan all Chrome variants once when Option key is first pressed
-        if showVariants && !chromeVariantsScanned {
-            state.refreshChromeAvailability(scanAll: true)
+        let showVariants = isOptionKeyHeld
+        if showVariants && !chromeVariantsScanned && chromeScanTask == nil {
             chromeVariantsScanned = true
+            chromeScanTask = Task { [weak self] in
+                let options = await Task.detached(priority: .utility) {
+                    state.scanChromeAvailability(scanAll: true)
+                }.value
+                guard let self else { return }
+                self.menuChromeOptions = options
+                self.chromeScanTask = nil
+                guard !self.isPreparingForTermination else { return }
+                self.renderMenuLabels(refreshServiceState: false)
+            }
         }
-        let selected = state.selectedChrome()
-
-        // Only show variant selector when Option key is held
-        guard showVariants else { return }
-
-        let sep = NSMenuItem.separator()
-        submenu.addItem(sep)
-        chromeVariantSeparator = sep
-
-        for chrome in state.installedChromes where chrome.isInstalled && (chrome.version ?? 0) >= minVersion {
-            let versionStr = chrome.version.map { " (v\($0))" } ?? ""
-            let menuItem = NSMenuItem(title: "\(chrome.name)\(versionStr)", action: #selector(chromeVariantSelected(_:)), keyEquivalent: "")
-            menuItem.target = self
-            menuItem.representedObject = chrome.variant
-            menuItem.state = (chrome.variant == selected?.variant) ? .on : .off
-            submenu.addItem(menuItem)
-            chromeVariantItems.append(menuItem)
+        let selectedVariant = state.stringSetting("selected_chrome_variant") ?? "helium"
+        let options = (menuChromeOptions.isEmpty ? state.installedChromes : menuChromeOptions)
+            .filter { $0.isInstalled && ($0.version ?? 0) >= 145 }
+        if chromeVariantItems == nil {
+            let separator = NSMenuItem.separator()
+            submenu.addItem(separator)
+            chromeVariantSeparator = separator
+            chromeVariantItems = LiveMenuItems(menu: submenu)
         }
-
-        if chromeVariantItems.isEmpty {
-            let none = NSMenuItem(title: "No compatible Chrome found", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            submenu.addItem(none)
-            chromeVariantItems.append(none)
+        chromeVariantSeparator?.isHidden = !showVariants
+        let keys = options.isEmpty ? ["unavailable"] : options.map(\.variant)
+        chromeVariantItems?.update(keys: keys) { key, item in
+            item.isHidden = !showVariants
+            if let chrome = options.first(where: { $0.variant == key }) {
+                let version = chrome.version.map { " (v\($0))" } ?? ""
+                item.title = "\(chrome.name)\(version)"
+                item.action = #selector(chromeVariantSelected(_:))
+                item.target = self
+                item.representedObject = key
+                item.isEnabled = lastSelectedProfile == state.selectedProfileName()
+                item.state = key == selectedVariant ? .on : .off
+            } else {
+                item.title = chromeScanTask == nil ? "No compatible Chrome found" : "Looking for Chrome…"
+                item.action = nil
+                item.isEnabled = false
+            }
         }
     }
 
@@ -352,6 +1328,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if profiles == lastProfileList && selected == lastSelectedProfile && !profileMenuItems.isEmpty {
             return
         }
+        // Removing a parent row tears down any submenu AppKit is tracking.
+        // Apply profile-list/selection changes after the menu closes.
+        guard !isMenuTracking else { return }
         lastProfileList = profiles
         lastSelectedProfile = selected
 
@@ -364,6 +1343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         darcItem = nil; darcStartItem = nil; darcStopItem = nil
         chromeItem = nil; chromeStartItem = nil; chromeStopItem = nil
         chromeHeadlessItem = nil; chromeSubmenu = nil
+        chromeVariantItems = nil; chromeVariantSeparator = nil
         darcOverrideItem = nil; darcOverrideSeparator = nil
 
         var insertIdx = profileInsertionIndex
@@ -383,8 +1363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             profileSubmenu.addItem(selectItem)
             profileSubmenu.addItem(.separator())
 
-            // Darc submenu
-            let darcSub = NSMenuItem(title: "Darc", action: nil, keyEquivalent: "")
+            // Xe Computer submenu
+            let darcSub = NSMenuItem(title: "Xe Computer", action: nil, keyEquivalent: "")
             let darcMenu = NSMenu()
             darcMenu.autoenablesItems = false
             let dStart = NSMenuItem(title: "Start", action: #selector(darcStartAction), keyEquivalent: "")
@@ -543,15 +1523,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
         renderMenuLabels()
-        let optionHeld = NSEvent.modifierFlags.contains(.option)
+        isMenuTracking = true
+        guard !isPreparingForTermination else { return }
+        let optionHeld = isOptionKeyHeld
         lastOptionKeyState = optionHeld
         updateOptionOnlyMenuItems(optionHeld: optionHeld)
-        // Refresh state in background, then start polling while menu is open
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            ExternalState.shared.refreshRuntimeStateFromSystemTruth()
-            Task { @MainActor [weak self] in self?.renderMenuLabels() }
-        }
         startStateRefreshLoop()
         // Monitor Option key press/release while menu is open to toggle variant items.
         // NSMenu runs its own event tracking loop so neither addLocalMonitor nor
@@ -560,7 +1538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let optionHeld = NSEvent.modifierFlags.contains(.option)
+                let optionHeld = self.isOptionKeyHeld
                 if optionHeld != self.lastOptionKeyState {
                     self.lastOptionKeyState = optionHeld
                     if let chromeSubmenu = self.chromeSubmenu {
@@ -578,7 +1556,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        stopStateRefreshLoop()
+        guard menu === statusItem?.menu else { return }
+        isMenuTracking = false
         if let specialKeyCheck {
             NSEvent.removeMonitor(specialKeyCheck)
             self.specialKeyCheck = nil
@@ -588,13 +1567,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastOptionKeyState = false
         chromeVariantsScanned = false
         updateOptionOnlyMenuItems(optionHeld: false)
+        Task { @MainActor [weak self] in
+            // Wait until AppKit has unwound the menu tracking loop before
+            // applying deferred hierarchy changes or presenting a dialog.
+            await Task.yield()
+            guard let self, !self.isMenuTracking else { return }
+            self.renderMenuLabels()
+        }
     }
 
     private func updateOptionOnlyMenuItems(optionHeld: Bool) {
         darcOverrideItem?.isHidden = !optionHeld
         darcOverrideSeparator?.isHidden = !optionHeld
+        newProfileItem?.isHidden = !optionHeld
+        saveWindowPositionsItem?.isHidden = !optionHeld
+        restoreWindowPositionsItem?.isHidden = !optionHeld
+        systemLogsItem?.isHidden = !optionHeld
         openAppDataFolderItem?.isHidden = !optionHeld
         openAppDataFolderSeparator?.isHidden = !optionHeld
+        advancedItemsSeparator?.isHidden = !optionHeld
+        localAppPortsItem?.isHidden = !optionHeld
+        composeStorageFolderItem?.isHidden = !optionHeld
+        containerMemoryItem?.isHidden = !optionHeld
+        containerCPUItem?.isHidden = !optionHeld
+        containerDiskItem?.isHidden = !optionHeld
+        restartVMItem?.isHidden = !optionHeld
+        restartXeItem?.isHidden = !optionHeld
+        uninstallItem?.isHidden = !optionHeld
+        updateChannelItem?.isHidden = !optionHeld
         statusItem?.menu?.update()
     }
 
@@ -605,24 +1605,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return running ? "\(name) 🟢" : name
     }
 
-    private func renderMenuLabels() {
+    private func renderMenuLabels(refreshServiceState: Bool = true) {
+        if isPreparingForTermination {
+            updateShutdownStatus()
+            if let menu = statusItem?.menu {
+                disableMenuItemsForShutdown(in: menu)
+                menu.update()
+            }
+            return
+        }
+
         let state = ExternalState.shared
+        if refreshServiceState {
+            menuServiceState.refresh(sample: {
+                MenuServiceState.Snapshot(
+                    profile: state.selectedProfileName(),
+                    chromeRunning: state.chromeRunning, darcRunning: state.darcRunning
+                )
+            }, didRefresh: { [weak self] in
+                guard let self, !self.isPreparingForTermination else { return }
+                self.renderMenuLabels(refreshServiceState: false)
+            })
+        }
+        let serviceState = menuServiceState.snapshot
+        let sampledProfileMatches = serviceState.profile == state.selectedProfileName()
+        let chromeRunning = sampledProfileMatches && serviceState.chromeRunning
+        let darcRunning = sampledProfileMatches && serviceState.darcRunning
+        // Activation-policy changes must run after menu actions/tracking unwind.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isPreparingForTermination, !self.isMenuTracking else { return }
+            self.applyDockIconPreference()
+        }
+        renderLauncherIssues()
+        presentNextRuntimeWarning()
+        let configuredPorts = WorkerdPorts(settings: state.settings.rawData)
+        if settingsRestartRequired {
+            statusMessageItem?.title = "Status: Restart needed for settings"
+        } else if workerdServer.usesStandardPorts && !workerdServer.servingStandardPorts {
+            statusMessageItem?.title = "Status: Local ports 80/443 not ready"
+        } else {
+            statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
+        }
+        localAppPortsItem?.title = "Local App Ports: \(configuredPorts.http)/\(configuredPorts.https)…"
+        let vmResources = ContainerVMResources(settings: state.settings.rawData)
+        containerMemoryItem?.title = "Container VM Memory: \(vmResources.memoryGiBLabel) GiB…"
+        containerCPUItem?.title = "Container VM CPUs: \(vmResources.cpus)…"
+        containerDiskItem?.title = "Container VM Disk Size: \(vmResources.diskGiB(preserving: ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB)) GiB…"
+        restartVMItem?.isEnabled = containerVMSettingsTask == nil
 
         // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
         rebuildProfileItems()
+        let activeProfileMatches = lastSelectedProfile == state.selectedProfileName()
 
         // Update active profile title with status indicator
         // 🟢 = both darc + chrome running, 🔵 = chrome only, ⏳ = pending
         if let activeProfileItem {
-            let name = state.selectedProfileName()
+            let name = lastSelectedProfile
             let hasOverride = state.darcOverrideURL(forProfile: name) != nil
             let baseName = hasOverride ? "\(name) (dev proxy)" : name
             let anyPending = pendingServices.contains("chrome") || pendingServices.contains("darc")
             if anyPending {
                 activeProfileItem.title = "\(baseName) ⏳"
-            } else if state.chromeRunning && state.darcRunning {
+            } else if activeProfileMatches && chromeRunning && darcRunning {
                 activeProfileItem.title = "\(baseName) 🟢"
-            } else if state.chromeRunning {
+            } else if activeProfileMatches && chromeRunning {
                 activeProfileItem.title = "\(baseName) 🔵"
             } else {
                 activeProfileItem.title = baseName
@@ -630,43 +1676,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Update titles and enable states for active profile items
-        darcItem?.title = serviceTitle("Darc", key: "darc", running: state.darcRunning)
-        let chromeName = state.selectedChrome()?.name ?? "Chrome Engine"
-        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: state.chromeRunning)
+        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: activeProfileMatches && darcRunning)
+        let selectedVariant = state.stringSetting("selected_chrome_variant") ?? "helium"
+        let chromeName = state.selectedChrome()?.name ?? menuChromeOptions.first {
+            $0.variant == selectedVariant && $0.isInstalled && ($0.version ?? 0) >= 145
+        }?.name ?? "Chrome Engine"
+        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: activeProfileMatches && chromeRunning)
 
         let darcPending = pendingServices.contains("darc")
         let chromePending = pendingServices.contains("chrome")
 
-        darcStartItem?.isEnabled = !state.darcRunning && !darcPending
-        darcStopItem?.isEnabled = state.darcRunning && !darcPending
-        chromeStartItem?.isEnabled = !state.chromeRunning && !chromePending
-        chromeStopItem?.isEnabled = state.chromeRunning && !chromePending
-        chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: false) ? .on : .off
+        darcStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !darcRunning && !darcPending
+        darcStopItem?.isEnabled = activeProfileMatches && darcRunning && !darcPending
+        chromeStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !chromeRunning && !chromePending
+        chromeStopItem?.isEnabled = activeProfileMatches && chromeRunning && !chromePending
+        chromeHeadlessItem?.isEnabled = activeProfileMatches
+        chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: true) ? .on : .off
 
         // Refresh chrome variant options (only adds items when Option key is held)
         if let chromeSubmenu {
             refreshChromeMenuOptions(in: chromeSubmenu)
         }
 
-        // VM items
-        legacyVMItem?.title = serviceTitle("Legacy VM", key: "legacyVM", running: state.legacyVMRunning)
-        systemVMItem?.title = serviceTitle("System VM", key: "systemVM", running: state.systemVMRunning)
-        appVMItem?.title = serviceTitle("App VM", key: "appVM", running: state.appVMRunning)
-
-        let legacyPending = pendingServices.contains("legacyVM")
-        let systemPending = pendingServices.contains("systemVM")
-        let appPending = pendingServices.contains("appVM")
-
-        legacyVMStartItem?.isEnabled = !state.legacyVMRunning && !legacyPending
-        legacyVMStopItem?.isEnabled = state.legacyVMRunning && !legacyPending
-        systemVMStartItem?.isEnabled = !state.systemVMRunning && !systemPending
-        systemVMStopItem?.isEnabled = state.systemVMRunning && !systemPending
-        appVMStartItem?.isEnabled = !state.appVMRunning && !appPending
-        appVMStopItem?.isEnabled = state.appVMRunning && !appPending
-
-        runAtStartupItem?.state = state.boolSetting("run_at_startup", default: false) ? .on : .off
+        let loginItemStatus = LauncherLoginItem.main.status()
+        runAtStartupItem?.state = loginItemStatus == .enabled ? .on :
+            (loginItemStatus == .requiresApproval ? .mixed : .off)
+        runAtStartupItem?.title = loginItemStatus == .requiresApproval
+            ? "Start on System Startup (Approval Required)" : "Start on System Startup"
         bindCapslockItem?.state = state.boolSetting("bind_capslock", default: false) ? .on : .off
         hideDockIconItem?.state = state.boolSetting("hide_dock_icon", default: false) ? .on : .off
+        if canUseUpdater {
+            checkForUpdatesItem?.isEnabled = updaterController.updater.canCheckForUpdates
+        } else {
+            checkForUpdatesItem?.isEnabled = true
+        }
 
         // Force menu to notice title changes
         statusItem?.menu?.update()
@@ -687,16 +1730,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func darcStartAction() {
-        runServiceAction("darc") {
-            _ = ExternalState.shared.startDarc()
-            ExternalState.shared.setBoolSetting("darc_was_running", true)
-        }
+        requestOpenXeComputer()
     }
 
     @objc private func darcStopAction() {
         runServiceAction("darc") {
             ExternalState.shared.stopDarc()
-            ExternalState.shared.setBoolSetting("darc_was_running", false)
         }
     }
 
@@ -726,14 +1765,223 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func changeLocalAppPortsAction() {
+        guard LauncherSetup.changePortChoice() else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    @objc private func changeStorageFolderAction() {
+        guard LauncherSetup.changeStorageFolder() else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    @objc private func changeContainerMemoryAction() {
+        changeContainerVMResource(.memory)
+    }
+
+    @objc private func changeContainerCPUAction() {
+        changeContainerVMResource(.cpus)
+    }
+
+    @objc private func changeContainerDiskAction() {
+        changeContainerVMResource(.disk)
+    }
+
+    @objc private func restartVMAction() {
+        guard containerVMSettingsTask == nil, !isPreparingForTermination else { return }
+        containerVMSettingsTask = Task { @MainActor in
+            defer {
+                containerVMSettingsTask = nil
+                renderMenuLabels()
+            }
+            await restartContainerVM()
+        }
+        renderMenuLabels()
+    }
+
+    private func changeContainerVMResource(
+        _ resource: ContainerVMSettings.Resource, acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
+    ) {
+        guard containerVMSettingsTask == nil, !isPreparingForTermination else { return }
+        containerVMSettingsTask = Task { @MainActor in
+            defer {
+                containerVMSettingsTask = nil
+                renderMenuLabels()
+            }
+            do {
+                var diskGiB = ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB
+                if resource == .disk, diskGiB == nil {
+                    let machines = try await SmolVMClient.shared.listMachines()
+                    if machines.contains(where: { $0.name == SmolVMSetup.machineName }) {
+                        diskGiB = try await SmolVMClient.shared.machineStatus(named: SmolVMSetup.machineName).storageGiB
+                    }
+                }
+                await applyContainerVMSetting(resource, currentDiskGiB: diskGiB, acknowledging: warning)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Read VM Disk Size"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+        renderMenuLabels()
+    }
+
+    private func applyContainerVMSetting(
+        _ resource: ContainerVMSettings.Resource, currentDiskGiB: UInt64? = nil,
+        acknowledging warning: ContainerRuntimeWarnings.Warning? = nil
+    ) async {
+        guard !isPreparingForTermination else { return }
+        let previousMemoryMiB = ContainerVMResources(settings: ExternalState.shared.settings.rawData).memoryMiB
+        let changed = warning == nil
+            ? await ContainerVMSettings.change(resource, currentDiskGiB: currentDiskGiB)
+            : await ContainerVMSettings.increase(resource, currentDiskGiB: currentDiskGiB)
+        guard changed, !isPreparingForTermination else { return }
+        let savedMemoryMiB = ContainerVMResources(settings: ExternalState.shared.settings.rawData).memoryMiB
+        let increasedMemoryMiB = resource == .memory && savedMemoryMiB > previousMemoryMiB ? savedMemoryMiB : nil
+        await restartContainerVM(
+            afterMemoryIncreaseTo: increasedMemoryMiB, acknowledging: warning,
+            failureContext: "Your resource settings are saved. The VM must restart to apply them."
+        )
+    }
+
+    private func restartContainerVM(
+        afterMemoryIncreaseTo increasedMemoryMiB: UInt32? = nil,
+        acknowledging warning: ContainerRuntimeWarnings.Warning? = nil,
+        failureContext: String? = nil
+    ) async {
+        while !isPreparingForTermination {
+            do {
+                try await runtimeSupervisor.restart(afterMemoryIncreaseTo: increasedMemoryMiB)
+                guard !isPreparingForTermination else { return }
+                if let warning { runtimeWarnings.ignore(warning) }
+                renderMenuLabels()
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !isPreparingForTermination else { return }
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Could Not Restart Container VM"
+                alert.informativeText = [failureContext, error.localizedDescription].compactMap { $0 }.joined(separator: "\n\n")
+                alert.addButton(withTitle: "Retry VM Restart")
+                alert.addButton(withTitle: "Close")
+                if alert.runModal() != .alertFirstButtonReturn { return }
+            }
+        }
+    }
+
+    private func renderLauncherIssues() {
+        guard !isPreparingForTermination, let issuesItem else { return }
+        let pending = launcherIssues.pendingError(ExternalState.shared.logStore.latestError)
+        let hasIssues = pending != nil
+        let shouldHide = !hasIssues
+        if issuesItem.isHidden != shouldHide { issuesItem.isHidden = shouldHide }
+        if let button = statusItem?.button {
+            button.imagePosition = .imageLeft
+            button.attributedTitle = NSAttributedString(string: hasIssues ? " ⚠︎" : "", attributes: [
+                .foregroundColor: NSColor.systemRed,
+            ])
+            button.toolTip = hasIssues ? "Xe Launcher — Issues Detected" : "Xe Launcher"
+            button.setAccessibilityLabel(hasIssues ? "Xe Launcher, issues detected" : "Xe Launcher status menu")
+        }
+    }
+
+    @objc private func openIssueLogsAction() {
+        guard !isPreparingForTermination else { return }
+        if let pending = launcherIssues.pendingError(ExternalState.shared.logStore.latestError) {
+            launcherIssues.dismiss(pending)
+        }
+        logPanelController.present(showingIssues: true)
+        renderLauncherIssues()
+    }
+
+    private func updateRuntimeWarnings(_ snapshot: ContainerRuntimeSnapshot) {
+        guard !isPreparingForTermination else { return }
+        runtimeWarnings.update(snapshot)
+        presentNextRuntimeWarning()
+    }
+
+    private var canPresentRuntimeWarning: Bool {
+        !isPreparingForTermination && !isMenuTracking && containerVMSettingsTask == nil && NSApp.modalWindow == nil
+    }
+
+    private func presentNextRuntimeWarning() {
+        guard canPresentRuntimeWarning, !isShowingRuntimeWarning,
+              runtimeWarnings.nextAutomaticWarning != nil else { return }
+        isShowingRuntimeWarning = true
+        Task { @MainActor in
+            defer {
+                isShowingRuntimeWarning = false
+                presentNextRuntimeWarning()
+            }
+            let host = await HostResourceSampler.shared.snapshot(forceRefresh: true)
+            // A warning can recover or be superseded while host sampling is suspended.
+            guard canPresentRuntimeWarning, let warning = runtimeWarnings.nextAutomaticWarning else { return }
+            let vm = ContainerRuntimePresentation.shared.snapshot.vmResources
+            let limits = ContainerVMResources(settings: ExternalState.shared.settings.rawData)
+            let resource = warning.resource
+            var title: String?
+            var blocked: String?
+            if resource == .memory || vm?.diskCapacityGiB != nil {
+                let next = resource == .memory ? HostResourcePolicy.nextMemoryMiB(after: limits.memoryMiB)
+                    : HostResourcePolicy.nextDiskGiB(after: limits.diskGiB(preserving: vm?.diskCapacityGiB))
+                if let next {
+                    let size = resource == .memory ? String(format: "%g", Double(next) / 1024) : String(next)
+                    title = resource == .memory ? "Increase Memory to \(size) GiB" : "Increase Disk to \(size) GiB"
+                    let resident = vm?.processID.flatMap(VMResourceSampler.residentMemoryBytes) ?? 0
+                    let storage = VMResourceSampler.storageAllocatedBytes(in: VMResourceSampler.machineDirectory(
+                        named: SmolVMSetup.machineName, dataURL: SmolVMPaths.dataURL
+                    )) ?? 0
+                    do {
+                        try HostResourcePolicy.validate(memoryMiB: resource == .memory ? next : nil,
+                            diskGiB: resource == .disk ? UInt64(next) : nil, host: host,
+                            vmResidentBytes: min(resident, vm?.memoryLimitBytes ?? 0), storageAllocatedBytes: storage)
+                    } catch { blocked = error.localizedDescription }
+                } else {
+                    blocked = "The next increase exceeds the supported VM resource limit."
+                }
+            }
+            let alert = ContainerRuntimeWarnings.alert(for: warning, actionTitle: title, blockedReason: blocked,
+                hostWarnings: HostResourcePolicy.warnings(for: host))
+            runtimeWarnings.didPresent(warning)
+            NSApp.activate(ignoringOtherApps: true)
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                changeContainerVMResource(resource, acknowledging: warning)
+            case .alertSecondButtonReturn:
+                runtimeWarnings.ignore(warning)
+            case .alertThirdButtonReturn:
+                runtimeWarnings.dismiss(warning)
+            default:
+                break
+            }
+        }
+    }
+
+    private func showSettingsRestartAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Restart Xe Launcher to Apply Changes"
+        alert.informativeText = "Your launcher settings are saved. Changes apply when you quit and reopen Xe Launcher. Restarting interrupts all containers in the shared VM."
+        alert.addButton(withTitle: "Quit Now")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { ApplicationTermination.request() }
+    }
+
     @objc private func darcOverrideURLAction() {
         let state = ExternalState.shared
         let profileName = state.selectedProfileName()
         let currentURL = state.darcOverrideURL(forProfile: profileName) ?? ""
 
         let alert = NSAlert()
-        alert.messageText = "Override Darc URL"
-        alert.informativeText = "Enter the base URL for the Darc IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
+        alert.messageText = "Override Xe Computer URL"
+        alert.informativeText = "Enter the base URL for the Xe Computer IWA.\nLeave empty to use the default local bundle.\nThe URL will be validated by checking /.well-known/manifest.webmanifest"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -836,20 +2084,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func chromeStartAction() {
         runServiceAction("chrome") {
             _ = ExternalState.shared.startChrome()
-            ExternalState.shared.setBoolSetting("chrome_was_running", true)
         }
     }
 
     @objc private func chromeStopAction() {
         runServiceAction("chrome") {
-            ExternalState.shared.stopChrome()
-            ExternalState.shared.setBoolSetting("chrome_was_running", false)
-            ExternalState.shared.setBoolSetting("darc_was_running", false)
+            let state = ExternalState.shared
+            state.stopDarc()
+            state.stopChrome()
         }
     }
 
     @objc private func chromeHeadlessAction() {
-        let current = ExternalState.shared.boolSetting("chrome_headless", default: false)
+        let current = ExternalState.shared.boolSetting("chrome_headless", default: true)
         let next = !current
         ExternalState.shared.setBoolSetting("chrome_headless", next)
 
@@ -866,38 +2113,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func legacyVMStartAction() {
-        runServiceAction("legacyVM") { _ = ExternalState.shared.startLegacyVM() }
-    }
-
-    @objc private func legacyVMStopAction() {
-        runServiceAction("legacyVM") { _ = ExternalState.shared.stopLegacyVM() }
-    }
-
-    @objc private func systemVMStartAction() {
-        runServiceAction("systemVM") { _ = ExternalState.shared.startColimaVM(profileName: "system") }
-    }
-
-    @objc private func systemVMStopAction() {
-        runServiceAction("systemVM") { _ = ExternalState.shared.stopColimaVM(profileName: "system") }
-    }
-
-    @objc private func appVMStartAction() {
-        runServiceAction("appVM") { _ = ExternalState.shared.startColimaVM(profileName: "apps") }
-    }
-
-    @objc private func appVMStopAction() {
-        runServiceAction("appVM") { _ = ExternalState.shared.stopColimaVM(profileName: "apps") }
-    }
-
     @objc private func showLogsAction() {
         logPanelController.present()
     }
 
     @objc private func runAtStartupAction() {
-        let current = ExternalState.shared.boolSetting("run_at_startup", default: false)
-        ExternalState.shared.setBoolSetting("run_at_startup", !current)
+        let state = ExternalState.shared
+        let status = LauncherLoginItem.main.status()
+        let enabled = status != .enabled && status != .requiresApproval
+        do {
+            try LauncherLoginItem.main.apply(enabled: enabled)
+            state.setBoolSetting("run_at_startup", enabled)
+            if enabled && LauncherLoginItem.main.status() == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            }
+        } catch {
+            state.appendLog("launcher", "Could not change login item: \(error.localizedDescription)")
+            DispatchQueue.main.async { NSAlert(error: error).runModal() }
+        }
         renderMenuLabels()
+    }
+
+    private func configureLoginItem() {
+        // Service Management requires an app bundle. Do not register a SwiftPM
+        // executable (or a copy still running from an installer disk image).
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              !ApplicationInstaller.isRunningFromDiskImage() else { return }
+        let state = ExternalState.shared
+        do {
+            try LauncherLoginItem.main.apply(enabled: state.boolSetting("run_at_startup", default: true))
+        } catch {
+            state.appendLog("launcher", "Could not configure login item: \(error.localizedDescription)")
+        }
     }
 
     @objc private func bindCapslockAction() {
@@ -910,13 +2157,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let state = ExternalState.shared
         let isHidden = state.boolSetting("hide_dock_icon", default: false)
         state.setBoolSetting("hide_dock_icon", !isHidden)
-        applyDockIconPreference()
         renderMenuLabels()
+
+        // A Dock-menu action runs inside the Dock's menu tracking loop.
+        // Changing activation policy synchronously can leave a stale inactive
+        // tile behind, so apply it after the menu action has completed.
+        DispatchQueue.main.async { [weak self] in
+            self?.applyDockIconPreference()
+        }
     }
 
     private func configureApplicationIdentity() {
         let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-            ?? "Xe Computer"
+            ?? "Xe Launcher"
         ProcessInfo.processInfo.processName = displayName
 
         if let resourceURL = Bundle.main.resourceURL,
@@ -926,75 +2179,186 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func applyDockIconPreference() {
-        let shouldHide = ExternalState.shared.boolSetting("hide_dock_icon", default: false)
-        NSApp.setActivationPolicy(shouldHide ? .accessory : .regular)
-    }
-
-    @objc private func aboutAction() { NSApp.orderFrontStandardAboutPanel(nil) }
-    @objc private func quitAction() {
-        // Save running state before stopping so it can be restored on next launch
         let state = ExternalState.shared
-        state.setBoolSetting("darc_was_running", state.darcRunning)
-        state.setBoolSetting("chrome_was_running", state.chromeRunning)
-        state.stopChrome()  // stopChrome calls stopDarc internally
-        NSApp.terminate(nil)
+        let snapshot = menuServiceState.snapshot
+        let shouldHide = state.boolSetting("hide_dock_icon", default: false)
+            && snapshot.profile == state.selectedProfileName() && snapshot.darcRunning
+        let policy: NSApplication.ActivationPolicy = shouldHide ? .accessory : .regular
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }
 
-    // MARK: - Zombie process alert
+    @objc private func aboutAction() {
+        let profileName = ExternalState.shared.selectedProfileName()
+        let components = ComponentVersions.bundled(
+            resourceURL: Bundle.main.resourceURL,
+            contentsURL: Bundle.main.bundleURL.appendingPathComponent("Contents"),
+            heliumAppURL: ExternalState.resolveHelperApp(name: "Helium.app"),
+            darcActivation: activeConfiguredDarcBundleActivation(
+                dataURL: ExternalState.appDataURL,
+                profileName: profileName
+            )
+        )
+        let options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationVersion: releaseVersion,
+            .credits: NSAttributedString(
+                string: ComponentVersions.aboutText(for: components),
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]
+            )
+        ]
 
-    private func showColimaInstallationError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Colima Installation Required"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
         NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
+        NSApp.orderFrontStandardAboutPanel(options: options)
+
+        // The standard About panel is untitled. Promote the key window on the
+        // next run-loop turn, after status-menu tracking has finished.
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.keyWindow?.makeKeyAndOrderFront(nil)
+        }
     }
 
-    private func showZombieAlert(_ zombies: [ExternalState.ZombieProcess]) {
-        guard !zombies.isEmpty else { return }
+    @objc private func checkForUpdatesAction() {
+        guard isUpdaterConfigured else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Updates Are Not Configured"
+            alert.informativeText = "This development build does not contain a Sparkle update-signing public key."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
 
-        let descriptions = zombies.map { z in
-            var desc = "\(z.name) (pid \(z.pid))"
-            if let profile = z.profileDir {
-                // Show just the profile folder name for brevity
-                let profileName = (profile as NSString).lastPathComponent
-                desc += " — profile: \(profileName)"
+        guard !ApplicationInstaller.isRunningFromDiskImage() else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "Install Xe Launcher to Update"
+            alert.informativeText = "Updates can be installed after Xe Launcher has been copied to an Applications folder."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard updaterController.updater.canCheckForUpdates else {
+            ExternalState.shared.appendLog("launcher", "An update check is already in progress")
+            return
+        }
+        ExternalState.shared.appendLog(
+            "launcher",
+            "Checking for updates on \(updateChannel.displayName); feed=\(updateChannel.feedURLString)"
+        )
+        updaterController.checkForUpdates(nil)
+    }
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        guard var components = URLComponents(string: updateChannel.feedURLString) else {
+            return updateChannel.feedURLString
+        }
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "check", value: updateFeedCacheKey)
+        ]
+        return components.string
+    }
+
+    func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        // raw.githubusercontent.com serves the channel feed with a five-minute
+        // CDN lifetime. A unique URL for every Sparkle cycle prevents a newly
+        // published appcast from being hidden behind the previous CDN entry.
+        updateFeedCacheKey = UUID().uuidString
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        ExternalState.shared.appendLog(
+            "launcher",
+            "Sparkle update cycle ended on \(updateChannel.displayName): \(describeUpdateError(error))"
+        )
+    }
+
+    private func describeUpdateError(_ error: Error) -> String {
+        var descriptions: [String] = []
+        var currentError: NSError? = error as NSError
+        var depth = 0
+
+        while let errorToDescribe = currentError, depth < 8 {
+            var description = "[\(errorToDescribe.domain):\(errorToDescribe.code)] \(errorToDescribe.localizedDescription)"
+            if let failingURL = errorToDescribe.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
+                description += " (\(failingURL.absoluteString))"
             }
-            return desc
+            descriptions.append(description)
+            currentError = errorToDescribe.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
         }
 
+        return descriptions.joined(separator: " <- ")
+    }
+
+    @objc private func restartXeAction() {
+        guard !isPreparingForTermination, maintenanceHandoff == nil, maintenancePreparationTask == nil else { return }
+        do { prepareMaintenance(try ApplicationMaintenance.prepare(.restart)) }
+        catch { NSAlert(error: error).runModal(); return }
+    }
+
+    @objc private func uninstallAction() {
+        guard !isPreparingForTermination, maintenanceHandoff == nil, maintenancePreparationTask == nil else { return }
+        let request: ApplicationMaintenance.Request
+        do {
+            request = try ApplicationMaintenance.prepare(.uninstall)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            NSAlert(error: error).runModal()
+            return
+        }
         let alert = NSAlert()
-        alert.messageText = "Stale Browser Processes Found"
-        alert.informativeText = "The following Helium/Darc processes from a previous session are still running:\n\n"
-            + descriptions.joined(separator: "\n")
-            + "\n\nWould you like to terminate them before launching?"
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Kill All")
-        alert.addButton(withTitle: "Ignore")
-
+        alert.messageText = "Uninstall Xe Launcher?"
+        alert.informativeText = "Xe Launcher will shut down all components, move its app data (including settings) into a new archive/<current datetime> folder inside:\n\n\(ExternalState.appDataURL.path)\n\nand move this launcher app to Trash. Existing archives and Compose storage outside the app data folder will be kept."
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.addButton(withTitle: "Uninstall")
         NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            ExternalState.shared.killZombieProcesses(zombies)
-            // Wait briefly for processes to exit
-            Thread.sleep(forTimeInterval: 1.0)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        prepareMaintenance(request)
+    }
+
+    private func prepareMaintenance(_ request: ApplicationMaintenance.Request) {
+        // A helper failure at this stage leaves the live launcher untouched.
+        maintenancePreparationTask = Task {
+            defer { maintenancePreparationTask = nil }
+            do {
+                let handoff = try await ApplicationMaintenance.schedule(request)
+                guard !isPreparingForTermination else { handoff.cancel(); return }
+                maintenanceHandoff = handoff
+                ApplicationTermination.request()
+            } catch {
+                guard !Task.isCancelled, !isPreparingForTermination else { return }
+                NSAlert(error: error).runModal()
+            }
         }
+    }
+
+    @objc private func quitAction() {
+        NSApp.terminate(nil)
     }
 
     // MARK: - Background state refresh
 
+    @objc private func workspaceApplicationsChanged(_ notification: Notification) {
+        renderMenuLabels()
+    }
+
     private func startStateRefreshLoop() {
         guard stateRefreshTimer == nil else { return }
-        stateRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            // Re-render from cached/computed state + refresh colima in background
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            // Keep the Dock handoff current even while the menu is closed.
             Task { @MainActor [weak self] in self?.renderMenuLabels() }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                ExternalState.shared.refreshRuntimeStateFromSystemTruth()
-                Task { @MainActor [weak self] in self?.renderMenuLabels() }
-            }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        stateRefreshTimer = timer
     }
 
     private func stopStateRefreshLoop() {

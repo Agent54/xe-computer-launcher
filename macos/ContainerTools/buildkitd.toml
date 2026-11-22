@@ -1,0 +1,4 @@
+# The launcher collects old cache only while this builder is idle.
+[worker.oci]
+  gc = false
+  max-parallelism = 2
