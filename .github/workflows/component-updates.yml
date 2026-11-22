@@ -1,8 +1,9 @@
 name: Update launcher components
 
 on:
-  schedule:
-    - cron: '17,47 * * * *'
+  # Release workflows dispatch this updater after uploading their assets.
+  # schedule:
+  #   - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       component:
@@ -84,7 +85,7 @@ jobs:
 
     steps:
       - name: Check out integration branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: int
           fetch-depth: 0
@@ -95,7 +96,7 @@ jobs:
           GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN || github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
-        run: bash macos/Scripts/update-component-lock.sh '${{ matrix.component }}' "$RELEASE_TAG"
+        run: bash macos/Build/mac/update-component-lock.sh '${{ matrix.component }}' "$RELEASE_TAG"
 
       - name: Verify updated component
         if: steps.update.outputs.updated == 'true'

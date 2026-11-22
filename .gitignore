@@ -1,4 +1,7 @@
 .DS_Store
+node_modules/
+dist/
+.wrangler
 macos/.build
 macos/Packages
 xcuserdata/
@@ -7,5 +10,16 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 macos/Helpers
+macos/Helpers.zip
+# Temporary archives created by zip.
+macos/zi??????
 macos/.env
-macos/local-secrets
+macos/local-secrets/*
+!macos/local-secrets/README.md
+patches
+devtools/.cache/
+devtools/devtools-frontend/
+devtools/devtools-frontend.zip
+devtools/assets/
+devtools/__pycache__/
+workerd/capnp/miniflare.capnp
