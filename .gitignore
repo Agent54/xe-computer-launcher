@@ -1,8 +1,8 @@
 .DS_Store
+node_modules/
+dist/
+.wrangler
 macos/.build
-macos/Worker/node_modules/
-macos/Worker/dist/
-macos/dist/
 macos/Packages
 xcuserdata/
 DerivedData/
@@ -22,3 +22,4 @@ devtools/devtools-frontend/
 devtools/devtools-frontend.zip
 devtools/assets/
 devtools/__pycache__/
+workerd/capnp/miniflare.capnp
