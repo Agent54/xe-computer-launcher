@@ -6,11 +6,11 @@
         "label": "Helium browser engine"
     },
     "darc": {
-        "sha256": "fd7e794644b99668b0e3bd4b092fa84ce837e083c565dacce4e52de6ef991327",
+        "sha256": "51bdf924e2c840b1c5c369245efec8f2050a3adb3ce9d6c2240bea8d5c57bfe6",
         "version": {
             "major": 0,
             "minor": 4,
-            "patch": 11
+            "patch": 14
         },
         "unzip": false,
         "label": "Xe Computer app"
