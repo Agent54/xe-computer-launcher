@@ -182,9 +182,8 @@ folder. Inspect launcher logs and the final backend error when readiness fails.
 deno run --no-config --allow-read --allow-write --allow-env --allow-run macos/Tests/Integration/verify-system-dns.ts macos/.build/smol-runtime/SmolRuntime/smolvm-bin macos/.build/smol-runtime/SmolRuntime
 ```
 
-Build the executable against the staged runtime libraries and sign it with
-`macos/Sources/macos/SmolVMEntitlements.plist` first. The test uses a disposable
-VM and leaves the installed launcher's VM untouched. It checks system DNS,
+The test uses a disposable VM and leaves the installed launcher's VM untouched.
+It checks system DNS,
 an unreachable custom server without fallback, and clearing that override on
 the same machine. State stays in `macos/.build`; only a short socket-path
 symlink lives in `/tmp`. This requires virtualization on Apple Silicon.

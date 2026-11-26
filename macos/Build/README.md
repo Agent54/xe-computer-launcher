@@ -22,15 +22,6 @@ Mac. `Tests/run-tests.sh` runs the packaging fixtures and Swift tests.
 Deno is a build/test dependency. The installed launcher and its VM do not need
 a system Deno installation. Build and VM integration checks run on CI.
 
-`SmolVM.lock` selects the published runtime and verified asset checksums. The
-component updater stages that exact runtime and tests manual System/Custom DNS
-switching before opening its version-bump PR. PR and release builds repeat the
-same test using the pinned runtime. System is the default; changing modes is an
-explicit menu action. Startup does not probe runtime capabilities or detect VPNs.
-System DNS is a snapshot of the configured host IPv4 nameserver at VM startup,
-including loopback DNS servers. Restart Xe Launcher after connecting or
-disconnecting WireGuard to refresh it. Both modes use smol's raw DNS forwarding.
-
 These visible source directories do not replace platform-owned layouts:
 Swift application source remains under `Sources/macos`, and the app bundle uses
 `Contents/MacOS`, `Contents/Helpers`, `Contents/Frameworks`, and
