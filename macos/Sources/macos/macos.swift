@@ -1172,6 +1172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let dnsItem = NSMenuItem(title: "DNS: System", action: nil, keyEquivalent: "")
         let dnsMenu = NSMenu()
         systemDNSItem = dnsMenu.addItem(withTitle: "System", action: #selector(useSystemDNSAction), keyEquivalent: "")
+        systemDNSItem?.toolTip = "Uses the configured system DNS server when the VM starts. Restart Xe Launcher after connecting or disconnecting WireGuard to refresh it."
         customDNSItem = dnsMenu.addItem(withTitle: "Custom…", action: #selector(useCustomDNSAction), keyEquivalent: "")
         dnsItem.submenu = dnsMenu
         menu.addItem(dnsItem)

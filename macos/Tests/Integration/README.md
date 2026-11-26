@@ -188,6 +188,8 @@ VM and leaves the installed launcher's VM untouched. It checks system DNS,
 an unreachable custom server without fallback, and clearing that override on
 the same machine. State stays in `macos/.build`; only a short socket-path
 symlink lives in `/tmp`. This requires virtualization on Apple Silicon.
+System DNS is read when the VM starts. Connect WireGuard before running this
+test to exercise its configured DNS through the same raw forwarding path.
 
 ### Builder and upload integrity
 
