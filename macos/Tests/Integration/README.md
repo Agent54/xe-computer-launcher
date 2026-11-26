@@ -176,6 +176,18 @@ item at that alias must be resolved explicitly rather than replaced blindly.
 The Compose API socket is `~/.xe/run/compose.sock`, outside the shared project
 folder. Inspect launcher logs and the final backend error when readiness fails.
 
+### System DNS
+
+```sh
+deno run --allow-read --allow-write --allow-env --allow-run macos/Tests/Integration/verify-system-dns.ts macos/.build/smol-runtime/SmolRuntime/smolvm-bin macos/.build/smol-runtime/SmolRuntime
+```
+
+The test uses a disposable
+VM and leaves the installed launcher's VM untouched. It checks system DNS,
+an unreachable custom server without fallback, and clearing that override on
+the same machine. State stays in `macos/.build`; only a short socket-path
+symlink lives in `/tmp`. This requires virtualization on Apple Silicon.
+
 ### Builder and upload integrity
 
 Run `deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"`

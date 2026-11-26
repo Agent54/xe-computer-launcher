@@ -115,6 +115,7 @@ struct SmolVMMachineSpec: Sendable {
     var mountedSockets: [String] = []
     var labels: [String: String] = [:]
     var environment: [String] = []
+    var dns: DNSConfiguration? = nil
 }
 
 enum SmolVMPaths {
@@ -216,6 +217,7 @@ actor SmolVMClient {
         if let networkBackend = spec.networkBackend {
             arguments += ["--net-backend", networkBackend]
         }
+        if let server = spec.dns?.server { arguments += ["--dns", server] }
         for volume in spec.volumes {
             arguments += ["--volume", volume]
         }
@@ -237,7 +239,7 @@ actor SmolVMClient {
         _ = try await invoke(arguments)
     }
 
-    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String], environment: [String] = []) async throws {
+    func updateMachine(named name: String, memoryMiB: UInt32, cpus: UInt32, storageGiB: UInt64, volumes: [String], environment: [String] = [], dns: DNSConfiguration? = nil) async throws {
         var arguments = [
             "machine", "update", "--name", name,
             "--mem", String(memoryMiB), "--cpus", String(cpus),
@@ -249,6 +251,7 @@ actor SmolVMClient {
         for variable in environment {
             arguments += ["--env", variable]
         }
+        if let dns { arguments += dns.updateArguments }
         _ = try await invoke(arguments)
     }
 

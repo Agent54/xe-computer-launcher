@@ -330,6 +330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var advancedItemsSeparator: NSMenuItem?
     private var localAppPortsItem: NSMenuItem?
     private var composeStorageFolderItem: NSMenuItem?
+    private var dnsItem: NSMenuItem?
+    private var systemDNSItem: NSMenuItem?
+    private var customDNSItem: NSMenuItem?
     private var containerMemoryItem: NSMenuItem?
     private var containerCPUItem: NSMenuItem?
     private var containerDiskItem: NSMenuItem?
@@ -1166,6 +1169,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         portsItem.isHidden = true
         menu.addItem(portsItem)
         localAppPortsItem = portsItem
+        let dnsItem = NSMenuItem(title: "DNS: System", action: nil, keyEquivalent: "")
+        let dnsMenu = NSMenu()
+        systemDNSItem = dnsMenu.addItem(withTitle: "System", action: #selector(useSystemDNSAction), keyEquivalent: "")
+        customDNSItem = dnsMenu.addItem(withTitle: "Custom…", action: #selector(useCustomDNSAction), keyEquivalent: "")
+        dnsItem.submenu = dnsMenu
+        menu.addItem(dnsItem)
+        self.dnsItem = dnsItem
         let storageFolderItem = NSMenuItem(title: "Compose Storage Folder…", action: #selector(changeStorageFolderAction), keyEquivalent: "")
         storageFolderItem.isHidden = true
         menu.addItem(storageFolderItem)
@@ -1580,6 +1590,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             statusMessageItem?.title = "Status: \(ContainerRuntimePresentation.shared.snapshot.menuDescription)"
         }
         localAppPortsItem?.title = "Local App Ports: \(configuredPorts.http)/\(configuredPorts.https)…"
+        let dns = try? DNSConfiguration(settings: state.settings.rawData)
+        dnsItem?.title = dns.map { "DNS: \($0.server ?? "System")" } ?? "DNS: Invalid Settings"
+        systemDNSItem?.state = dns?.mode == .system ? .on : .off
+        customDNSItem?.state = dns?.mode == .custom ? .on : .off
         let vmResources = ContainerVMResources(settings: state.settings.rawData)
         containerMemoryItem?.title = "Container VM Memory: \(vmResources.memoryGiBLabel) GiB…"
         containerCPUItem?.title = "Container VM CPUs: \(vmResources.cpus)…"
@@ -1717,6 +1731,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func changeStorageFolderAction() {
         guard LauncherSetup.changeStorageFolder() else { return }
+        settingsRestartRequired = true
+        renderMenuLabels()
+        showSettingsRestartAlert()
+    }
+
+    @objc private func useSystemDNSAction() { changeDNSMode(.system) }
+    @objc private func useCustomDNSAction() { changeDNSMode(.custom) }
+
+    private func changeDNSMode(_ mode: DNSConfiguration.Mode) {
+        guard !isPreparingForTermination, DNSSettings.change(to: mode) else { return }
         settingsRestartRequired = true
         renderMenuLabels()
         showSettingsRestartAlert()

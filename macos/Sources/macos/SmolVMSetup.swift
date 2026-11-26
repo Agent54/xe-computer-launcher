@@ -39,6 +39,7 @@ enum SmolVMSetup {
         try Task.checkCancellation()
         guard virtualizationAvailable else { throw SmolVMSetupError.virtualizationUnavailable }
         let client = SmolVMClient.shared
+        let dns = try DNSConfiguration(settings: ExternalState.shared.settings.rawData)
         let configuredResources = resources
         let stacksVolume = "\((stacksURL ?? Self.stacksURL).path):\(guestStacksDirectory):rw"
         let machines = try await client.listMachines()
@@ -85,14 +86,15 @@ enum SmolVMSetup {
                     "dev.xe.computer.purpose": "runtime",
                     "dev.xe.computer.runtime-format": runtimeFormat,
                     "dev.xe.computer.runtime-image": bundledRevision,
-                ]
+                ],
+                dns: dns
             )
             try await client.createMachine(spec)
         } else {
             try await client.updateMachine(
                 named: machineName, memoryMiB: configuredResources.memoryMiB, cpus: configuredResources.cpus,
                 storageGiB: diskGiB,
-                volumes: [stacksVolume]
+                volumes: [stacksVolume], dns: dns
             )
         }
 

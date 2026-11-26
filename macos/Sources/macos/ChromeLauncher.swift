@@ -56,6 +56,10 @@ extension ExternalState {
         if !FileManager.default.fileExists(atPath: profileDir.path) {
             if let err = createProfile(name: profileName) { return err }
         }
+        if !chromeRunning {
+            do { try ChromeDNS.prepare(profileURL: profileDir) }
+            catch { return "Chrome system DNS configuration failed: \(error.localizedDescription)" }
+        }
 
         let overrideURL = darcOverrideURL(forEnvironment: selectedEnvironmentName())
         let isDevProxy = overrideURL != nil

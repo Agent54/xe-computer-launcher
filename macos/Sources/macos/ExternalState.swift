@@ -283,6 +283,16 @@ final class ExternalState: @unchecked Sendable {
         saveSettings()
     }
 
+    func setDNSConfiguration(_ configuration: DNSConfiguration) throws {
+        var updated = settings.rawData ?? [:]
+        updated[DNSConfiguration.modeKey] = configuration.mode.rawValue
+        updated[DNSConfiguration.serverKey] = configuration.customServer
+        let url = URL(fileURLWithPath: Self.settingsPath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: updated, options: [.prettyPrinted]).write(to: url, options: .atomic)
+        settings = Settings(rawData: updated)
+    }
+
     func setIntegerSetting(_ key: String, _ value: Int) {
         var dict = settings.rawData ?? [:]
         dict[key] = value
