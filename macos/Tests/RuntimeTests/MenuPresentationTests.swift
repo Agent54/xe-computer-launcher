@@ -74,7 +74,7 @@ struct MenuPresentationTests {
             #expect(!Thread.isMainThread)
             continuation.yield(1)
             #expect(gate.wait(timeout: .now() + 5) == .success)
-            return .init(profile: "work", chromeRunning: true, darcRunning: true)
+            return .init(profile: "work", chromeRunning: true, darcRunning: true, browserPreparing: true)
         }, didRefresh: {
             updates += 1
             continuation.yield(2)
@@ -92,11 +92,13 @@ struct MenuPresentationTests {
         #expect(state.snapshot.profile == "work")
         #expect(state.snapshot.chromeRunning)
         #expect(state.snapshot.darcRunning)
+        #expect(state.snapshot.browserPreparing)
         #expect(updates == 1)
 
         state.refresh(sample: { .init(profile: "work") }, didRefresh: { continuation.yield(3) })
         #expect(await iterator.next() == 3)
         #expect(!state.snapshot.chromeRunning)
         #expect(!state.snapshot.darcRunning)
+        #expect(!state.snapshot.browserPreparing)
     }
 }

@@ -323,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var hideDockIconItem: NSMenuItem?
     private var saveWindowPositionsItem: NSMenuItem?
     private var restoreWindowPositionsItem: NSMenuItem?
-    private var newProfileItem: NSMenuItem?
+    private var newEnvironmentItem: NSMenuItem?
     private var systemLogsItem: NSMenuItem?
     private var openAppDataFolderItem: NSMenuItem?
     private var openAppDataFolderSeparator: NSMenuItem?
@@ -820,7 +820,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         // A Dock click during setup/recovery must wait until cleanup has
         // finished, otherwise recovery can immediately stop the new browser.
         guard browserInitializationComplete, openXeComputerRequested,
-              !isPreparingForTermination, !pendingServices.contains("darc") else { return }
+              !isPreparingForTermination, pendingServices.isEmpty,
+              !ExternalState.shared.browserSetupInProgress else { return }
         openXeComputerRequested = false
         // Opening a running app shim sends it the macOS reopen event. Merely
         // activating a windowless shim does not create or restore a window.
@@ -1132,15 +1133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         self.issuesItem = issuesItem
         menu.addItem(.separator())
 
-        // Profile entries are inserted dynamically between here and the New Profile item
-        profileInsertionIndex = menu.numberOfItems
-        rebuildProfileItems()
-
-        let newProfileItem = NSMenuItem(title: "New Profile...", action: #selector(newProfileAction), keyEquivalent: "")
-        newProfileItem.target = self
-        newProfileItem.isHidden = true
-        menu.addItem(newProfileItem)
-        self.newProfileItem = newProfileItem
+        setupBrowserMenus(in: menu)
 
         let advancedSeparator = NSMenuItem.separator()
         advancedSeparator.isHidden = true
@@ -1292,7 +1285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 item.action = #selector(chromeVariantSelected(_:))
                 item.target = self
                 item.representedObject = key
-                item.isEnabled = lastSelectedProfile == state.selectedProfileName()
+                item.isEnabled = browserInitializationComplete && pendingServices.isEmpty && !menuServiceState.snapshot.browserPreparing
                 item.state = key == selectedVariant ? .on : .off
             } else {
                 item.title = chromeScanTask == nil ? "No compatible Chrome found" : "Looking for Chrome…"
@@ -1302,162 +1295,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
     }
 
-    // MARK: - Per-profile menu items
+    // MARK: - Browser and environment menu items
 
-    private var profileInsertionIndex: Int = 0
-    private var profileMenuItems: [NSMenuItem] = []
-    private var activeProfileItem: NSMenuItem?
-    private var lastProfileList: [String] = []
-    private var lastSelectedProfile: String = ""
+    private var environmentItem: NSMenuItem?
+    private var environmentItems: LiveMenuItems<String>?
     private var darcOverrideItem: NSMenuItem?
     private var darcOverrideSeparator: NSMenuItem?
 
-    private func rebuildProfileItems() {
-        guard let menu = statusItem?.menu else { return }
+    private func setupBrowserMenus(in menu: NSMenu) {
+        let darcSub = NSMenuItem(title: "Xe Computer", action: nil, keyEquivalent: "")
+        let darcMenu = NSMenu()
+        darcMenu.autoenablesItems = false
+        darcStartItem = darcMenu.addItem(withTitle: "Start", action: #selector(darcStartAction), keyEquivalent: "")
+        darcStopItem = darcMenu.addItem(withTitle: "Stop", action: #selector(darcStopAction), keyEquivalent: "")
 
+        // "Override URL..." stays hidden by default, shown when Option is held.
+        let overrideSep = NSMenuItem.separator()
+        overrideSep.isHidden = true
+        darcMenu.addItem(overrideSep)
+        darcOverrideSeparator = overrideSep
+        let overrideItem = darcMenu.addItem(withTitle: "Override URL...", action: #selector(darcOverrideURLAction), keyEquivalent: "")
+        overrideItem.isHidden = true
+        darcOverrideItem = overrideItem
+        darcSub.submenu = darcMenu
+        menu.addItem(darcSub)
+        darcItem = darcSub
+
+        let chromeSub = NSMenuItem(title: "Chrome Engine", action: nil, keyEquivalent: "")
+        let chromeMenu = NSMenu()
+        chromeMenu.autoenablesItems = false
+        chromeStartItem = chromeMenu.addItem(withTitle: "Start", action: #selector(chromeStartAction), keyEquivalent: "")
+        chromeStopItem = chromeMenu.addItem(withTitle: "Stop", action: #selector(chromeStopAction), keyEquivalent: "")
+        chromeHeadlessItem = chromeMenu.addItem(withTitle: "Headless", action: #selector(chromeHeadlessAction), keyEquivalent: "")
+        chromeSub.submenu = chromeMenu
+        menu.addItem(chromeSub)
+        chromeItem = chromeSub
+        chromeSubmenu = chromeMenu
+
+        let environment = NSMenuItem(title: "Environment", action: nil, keyEquivalent: "")
+        let environmentMenu = NSMenu()
+        environmentMenu.autoenablesItems = false
+        let newEnvironment = environmentMenu.addItem(withTitle: "New Environment...", action: #selector(newEnvironmentAction), keyEquivalent: "")
+        newEnvironment.isHidden = true
+        newEnvironmentItem = newEnvironment
+        environmentItems = LiveMenuItems(menu: environmentMenu)
+        environment.submenu = environmentMenu
+        menu.addItem(environment)
+        environmentItem = environment
+        refreshEnvironmentMenu()
+    }
+
+    private func refreshEnvironmentMenu() {
         let state = ExternalState.shared
-        let selected = state.selectedProfileName()
-        var profiles = state.chromeProfiles.map(\.name)
-
-        // Always show "default" even if the folder doesn't exist yet
-        if !profiles.contains("default") {
-            profiles.insert("default", at: 0)
-        }
-
-        // Skip full rebuild if profile list and selection haven't changed
-        if profiles == lastProfileList && selected == lastSelectedProfile && !profileMenuItems.isEmpty {
-            return
-        }
-        // Removing a parent row tears down any submenu AppKit is tracking.
-        // Apply profile-list/selection changes after the menu closes.
-        guard !isMenuTracking else { return }
-        lastProfileList = profiles
-        lastSelectedProfile = selected
-
-        // Remove old profile items
-        for old in profileMenuItems { menu.removeItem(old) }
-        profileMenuItems.removeAll()
-
-        // Clear active-profile references
-        activeProfileItem = nil
-        darcItem = nil; darcStartItem = nil; darcStopItem = nil
-        chromeItem = nil; chromeStartItem = nil; chromeStopItem = nil
-        chromeHeadlessItem = nil; chromeSubmenu = nil
-        chromeVariantItems = nil; chromeVariantSeparator = nil
-        darcOverrideItem = nil; darcOverrideSeparator = nil
-
-        var insertIdx = profileInsertionIndex
-        for name in profiles {
-            let isActive = (name == selected)
-            let hasOverride = state.darcOverrideURL(forProfile: name) != nil
-            let profileTitle = hasOverride ? "\(name) (dev proxy)" : name
-            let profileItem = NSMenuItem(title: profileTitle, action: nil, keyEquivalent: "")
-            let profileSubmenu = NSMenu()
-            profileSubmenu.autoenablesItems = false
-
-            // "Select" item with checkmark for active profile
-            let selectItem = NSMenuItem(title: "Select", action: #selector(profileSelected(_:)), keyEquivalent: "")
-            selectItem.target = self
-            selectItem.representedObject = name
-            selectItem.state = isActive ? .on : .off
-            profileSubmenu.addItem(selectItem)
-            profileSubmenu.addItem(.separator())
-
-            // Xe Computer submenu
-            let darcSub = NSMenuItem(title: "Xe Computer", action: nil, keyEquivalent: "")
-            let darcMenu = NSMenu()
-            darcMenu.autoenablesItems = false
-            let dStart = NSMenuItem(title: "Start", action: #selector(darcStartAction), keyEquivalent: "")
-            let dStop = NSMenuItem(title: "Stop", action: #selector(darcStopAction), keyEquivalent: "")
-            dStart.target = self; dStop.target = self
-            dStart.isEnabled = isActive; dStop.isEnabled = isActive
-            darcMenu.addItem(dStart)
-            darcMenu.addItem(dStop)
-
-            if isActive {
-                // "Override URL..." item — hidden by default, shown when Option is held
-                let overrideSep = NSMenuItem.separator()
-                overrideSep.isHidden = true
-                darcMenu.addItem(overrideSep)
-
-                let currentOverride = state.darcOverrideURL(forProfile: name)
-                let overrideTitle = currentOverride != nil ? "Override URL (\(currentOverride!))..." : "Override URL..."
-                let overrideItem = NSMenuItem(title: overrideTitle, action: #selector(darcOverrideURLAction), keyEquivalent: "")
-                overrideItem.target = self
-                overrideItem.isHidden = true
-                darcMenu.addItem(overrideItem)
-
-                darcOverrideSeparator = overrideSep
-                darcOverrideItem = overrideItem
-            }
-
-            darcSub.submenu = darcMenu
-            profileSubmenu.addItem(darcSub)
-
-            // Chrome Engine submenu
-            let chromeSub = NSMenuItem(title: "Chrome Engine", action: nil, keyEquivalent: "")
-            let chromeMenu = NSMenu()
-            chromeMenu.autoenablesItems = false
-            let cStart = NSMenuItem(title: "Start", action: #selector(chromeStartAction), keyEquivalent: "")
-            let cStop = NSMenuItem(title: "Stop", action: #selector(chromeStopAction), keyEquivalent: "")
-            let cHeadless = NSMenuItem(title: "Headless", action: #selector(chromeHeadlessAction), keyEquivalent: "")
-            cStart.target = self; cStop.target = self; cHeadless.target = self
-            cStart.isEnabled = isActive; cStop.isEnabled = isActive; cHeadless.isEnabled = isActive
-            chromeMenu.addItem(cStart)
-            chromeMenu.addItem(cStop)
-            chromeMenu.addItem(cHeadless)
-            chromeSub.submenu = chromeMenu
-            profileSubmenu.addItem(chromeSub)
-
-            profileItem.submenu = profileSubmenu
-            menu.insertItem(profileItem, at: insertIdx)
-            profileMenuItems.append(profileItem)
-            insertIdx += 1
-
-            // Store references for the active profile so renderMenuLabels can update them
-            if isActive {
-                activeProfileItem = profileItem
-                darcItem = darcSub
-                darcStartItem = dStart
-                darcStopItem = dStop
-                chromeItem = chromeSub
-                chromeStartItem = cStart
-                chromeStopItem = cStop
-                chromeHeadlessItem = cHeadless
-                chromeSubmenu = chromeMenu
-            }
+        let selected = state.selectedEnvironmentName()
+        environmentItems?.update(keys: state.environmentNames, deferStructuralChanges: isMenuTracking) { name, item in
+            item.title = state.darcOverrideURL(forEnvironment: name) == nil ? name : "\(name) (dev proxy)"
+            item.action = #selector(environmentSelected(_:))
+            item.target = self
+            item.representedObject = name
+            item.state = name == selected ? .on : .off
+            item.isEnabled = browserInitializationComplete && pendingServices.isEmpty && !menuServiceState.snapshot.browserPreparing
         }
     }
 
-    @objc private func profileSelected(_ sender: NSMenuItem) {
+    @objc private func environmentSelected(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         let state = ExternalState.shared
+        guard name != state.selectedEnvironmentName(), browserInitializationComplete,
+              pendingServices.isEmpty, !state.browserSetupInProgress else { return }
         let wasRunning = state.chromeRunning
         let darcWasRunning = state.darcRunning
-
-        state.selectProfile(name)
 
         if wasRunning {
             runServiceAction("chrome") {
                 if darcWasRunning { ExternalState.shared.stopDarc() }
                 ExternalState.shared.stopChrome()
+                ExternalState.shared.selectEnvironment(name)
                 _ = ExternalState.shared.startChrome()
                 if darcWasRunning { _ = ExternalState.shared.startDarc() }
             }
         } else {
+            state.selectEnvironment(name)
             renderMenuLabels()
         }
     }
 
-    @objc private func newProfileAction() {
+    @objc private func newEnvironmentAction() {
+        guard browserInitializationComplete, pendingServices.isEmpty,
+              !ExternalState.shared.browserSetupInProgress else { return }
         let alert = NSAlert()
-        alert.messageText = "New Profile"
-        alert.informativeText = "Enter a name for the new profile:"
+        alert.messageText = "New Environment"
+        alert.informativeText = "Enter a name for the new environment. Environments using the same browser engine share browser data."
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "profile-name"
+        input.placeholderString = "environment-name"
         alert.accessoryView = input
 
         let response = alert.runModal()
@@ -1467,7 +1400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard !name.isEmpty else { return }
 
         let state = ExternalState.shared
-        if let err = state.createProfile(name: name) {
+        if let err = state.createEnvironment(name: name) {
             let errAlert = NSAlert()
             errAlert.messageText = "Error"
             errAlert.informativeText = err
@@ -1475,40 +1408,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             return
         }
 
-        // Select and start with the new profile
+        // Select and start with the new environment, reusing the engine's profile.
         let wasRunning = state.chromeRunning
         let darcWasRunning = state.darcRunning
-        state.selectProfile(name)
 
-        if wasRunning {
-            runServiceAction("chrome") {
+        runServiceAction("chrome") {
+            if wasRunning {
                 if darcWasRunning { ExternalState.shared.stopDarc() }
                 ExternalState.shared.stopChrome()
-                _ = ExternalState.shared.startChrome()
-                if darcWasRunning { _ = ExternalState.shared.startDarc() }
             }
-        } else {
-            _ = state.startChrome()
-            renderMenuLabels()
+            ExternalState.shared.selectEnvironment(name)
+            _ = ExternalState.shared.startChrome()
+            if darcWasRunning { _ = ExternalState.shared.startDarc() }
         }
     }
 
     @objc private func chromeVariantSelected(_ sender: NSMenuItem) {
         guard let variant = sender.representedObject as? String else { return }
         let state = ExternalState.shared
+        guard browserInitializationComplete, pendingServices.isEmpty, !state.browserSetupInProgress else { return }
         let wasRunning = state.chromeRunning
         let darcWasRunning = state.darcRunning
-
-        state.selectChromeVariant(variant)
 
         if wasRunning {
             runServiceAction("chrome") {
                 if darcWasRunning { ExternalState.shared.stopDarc() }
                 ExternalState.shared.stopChrome()
+                ExternalState.shared.selectChromeVariant(variant)
                 _ = ExternalState.shared.startChrome()
                 if darcWasRunning { _ = ExternalState.shared.startDarc() }
             }
         } else {
+            state.selectChromeVariant(variant)
             renderMenuLabels()
         }
     }
@@ -1579,7 +1510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func updateOptionOnlyMenuItems(optionHeld: Bool) {
         darcOverrideItem?.isHidden = !optionHeld
         darcOverrideSeparator?.isHidden = !optionHeld
-        newProfileItem?.isHidden = !optionHeld
+        newEnvironmentItem?.isHidden = !optionHeld
         saveWindowPositionsItem?.isHidden = !optionHeld
         restoreWindowPositionsItem?.isHidden = !optionHeld
         systemLogsItem?.isHidden = !optionHeld
@@ -1619,16 +1550,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         if refreshServiceState {
             menuServiceState.refresh(sample: {
                 MenuServiceState.Snapshot(
-                    profile: state.selectedProfileName(),
-                    chromeRunning: state.chromeRunning, darcRunning: state.darcRunning
+                    profile: state.selectedEnvironmentName(),
+                    chromeRunning: state.chromeRunning, darcRunning: state.darcRunning,
+                    browserPreparing: state.browserSetupInProgress
                 )
             }, didRefresh: { [weak self] in
                 guard let self, !self.isPreparingForTermination else { return }
                 self.renderMenuLabels(refreshServiceState: false)
+                self.openXeComputerIfRequested()
             })
         }
         let serviceState = menuServiceState.snapshot
-        let sampledProfileMatches = serviceState.profile == state.selectedProfileName()
+        let sampledProfileMatches = serviceState.profile == state.selectedEnvironmentName()
         let chromeRunning = sampledProfileMatches && serviceState.chromeRunning
         let darcRunning = sampledProfileMatches && serviceState.darcRunning
         // Activation-policy changes must run after menu actions/tracking unwind.
@@ -1653,45 +1586,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         containerDiskItem?.title = "Container VM Disk Size: \(vmResources.diskGiB(preserving: ContainerRuntimePresentation.shared.snapshot.vmResources?.diskCapacityGiB)) GiB…"
         restartVMItem?.isEnabled = containerVMSettingsTask == nil
 
-        // Rebuild per-profile menu items (sets darcItem, chromeItem, etc.)
-        rebuildProfileItems()
-        let activeProfileMatches = lastSelectedProfile == state.selectedProfileName()
+        refreshEnvironmentMenu()
 
-        // Update active profile title with status indicator
+        // Update selected environment title with status indicator
         // 🟢 = both darc + chrome running, 🔵 = chrome only, ⏳ = pending
-        if let activeProfileItem {
-            let name = lastSelectedProfile
-            let hasOverride = state.darcOverrideURL(forProfile: name) != nil
-            let baseName = hasOverride ? "\(name) (dev proxy)" : name
-            let anyPending = pendingServices.contains("chrome") || pendingServices.contains("darc")
+        if let environmentItem {
+            let name = state.selectedEnvironmentName()
+            let hasOverride = state.darcOverrideURL(forEnvironment: name) != nil
+            let baseName = "Environment: \(name)" + (hasOverride ? " (dev proxy)" : "")
+            let anyPending = pendingServices.contains("chrome") || pendingServices.contains("darc") || serviceState.browserPreparing
             if anyPending {
-                activeProfileItem.title = "\(baseName) ⏳"
-            } else if activeProfileMatches && chromeRunning && darcRunning {
-                activeProfileItem.title = "\(baseName) 🟢"
-            } else if activeProfileMatches && chromeRunning {
-                activeProfileItem.title = "\(baseName) 🔵"
+                environmentItem.title = "\(baseName) ⏳"
+            } else if chromeRunning && darcRunning {
+                environmentItem.title = "\(baseName) 🟢"
+            } else if chromeRunning {
+                environmentItem.title = "\(baseName) 🔵"
             } else {
-                activeProfileItem.title = baseName
+                environmentItem.title = baseName
             }
         }
 
-        // Update titles and enable states for active profile items
-        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: activeProfileMatches && darcRunning)
+        // Update titles and enable states without replacing the service submenus.
+        darcItem?.title = serviceTitle("Xe Computer", key: "darc", running: darcRunning)
         let selectedVariant = state.stringSetting("selected_chrome_variant") ?? "helium"
         let chromeName = state.selectedChrome()?.name ?? menuChromeOptions.first {
             $0.variant == selectedVariant && $0.isInstalled && ($0.version ?? 0) >= 145
         }?.name ?? "Chrome Engine"
-        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: activeProfileMatches && chromeRunning)
+        chromeItem?.title = serviceTitle(chromeName, key: "chrome", running: chromeRunning)
 
-        let darcPending = pendingServices.contains("darc")
-        let chromePending = pendingServices.contains("chrome")
+        let darcPending = pendingServices.contains("darc") || serviceState.browserPreparing
+        let chromePending = pendingServices.contains("chrome") || serviceState.browserPreparing
+        if serviceState.browserPreparing {
+            darcItem?.title = "Xe Computer ⏳"
+            chromeItem?.title = "\(chromeName) ⏳"
+        }
 
-        darcStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !darcRunning && !darcPending
-        darcStopItem?.isEnabled = activeProfileMatches && darcRunning && !darcPending
-        chromeStartItem?.isEnabled = activeProfileMatches && sampledProfileMatches && !chromeRunning && !chromePending
-        chromeStopItem?.isEnabled = activeProfileMatches && chromeRunning && !chromePending
-        chromeHeadlessItem?.isEnabled = activeProfileMatches
+        let browserAvailable = browserInitializationComplete && !darcPending && !chromePending
+        darcStartItem?.isEnabled = browserAvailable && sampledProfileMatches && !darcRunning
+        darcStopItem?.isEnabled = browserAvailable && darcRunning
+        chromeStartItem?.isEnabled = browserAvailable && sampledProfileMatches && !chromeRunning
+        chromeStopItem?.isEnabled = browserAvailable && chromeRunning
+        chromeHeadlessItem?.isEnabled = browserAvailable
         chromeHeadlessItem?.state = state.boolSetting("chrome_headless", default: true) ? .on : .off
+        let currentOverride = state.darcOverrideURL(forEnvironment: state.selectedEnvironmentName())
+        darcOverrideItem?.title = currentOverride.map { "Override URL (\($0))..." } ?? "Override URL..."
+        darcOverrideItem?.isEnabled = browserAvailable
+        newEnvironmentItem?.isEnabled = browserAvailable
 
         // Refresh chrome variant options (only adds items when Option key is held)
         if let chromeSubmenu {
@@ -1716,6 +1656,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func runServiceAction(_ key: String, action: @escaping @Sendable () -> Void) {
+        guard browserInitializationComplete, pendingServices.isEmpty,
+              !ExternalState.shared.browserSetupInProgress else { return }
         pendingServices.insert(key)
         renderMenuLabels()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1723,6 +1665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             Task { @MainActor [weak self] in
                 self?.pendingServices.remove(key)
                 self?.renderMenuLabels()
+                self?.openXeComputerIfRequested()
             }
         }
     }
@@ -1976,8 +1919,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func darcOverrideURLAction() {
         let state = ExternalState.shared
-        let profileName = state.selectedProfileName()
-        let currentURL = state.darcOverrideURL(forProfile: profileName) ?? ""
+        let environmentName = state.selectedEnvironmentName()
+        let currentURL = state.darcOverrideURL(forEnvironment: environmentName) ?? ""
 
         let alert = NSAlert()
         alert.messageText = "Override Xe Computer URL"
@@ -2003,8 +1946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         // Clear (second button) — remove the override
         if response == .alertSecondButtonReturn {
-            state.setDarcOverrideURL(forProfile: profileName, url: nil)
-            lastProfileList = [] // Force menu rebuild
+            state.setDarcOverrideURL(forEnvironment: environmentName, url: nil)
             renderMenuLabels()
             return
         }
@@ -2013,8 +1955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         // If empty, clear the override
         if url.isEmpty {
-            state.setDarcOverrideURL(forProfile: profileName, url: nil)
-            lastProfileList = [] // Force menu rebuild
+            state.setDarcOverrideURL(forEnvironment: environmentName, url: nil)
             renderMenuLabels()
             return
         }
@@ -2065,8 +2006,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     }
 
                     // Validation passed — save the override
-                    state.setDarcOverrideURL(forProfile: profileName, url: url)
-                    self.lastProfileList = [] // Force menu rebuild to update title
+                    state.setDarcOverrideURL(forEnvironment: environmentName, url: url)
                     self.renderMenuLabels()
                 }
             } catch {
@@ -2096,6 +2036,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func chromeHeadlessAction() {
+        guard browserInitializationComplete, pendingServices.isEmpty,
+              !ExternalState.shared.browserSetupInProgress else { return }
         let current = ExternalState.shared.boolSetting("chrome_headless", default: true)
         let next = !current
         ExternalState.shared.setBoolSetting("chrome_headless", next)
@@ -2182,7 +2124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let state = ExternalState.shared
         let snapshot = menuServiceState.snapshot
         let shouldHide = state.boolSetting("hide_dock_icon", default: false)
-            && snapshot.profile == state.selectedProfileName() && snapshot.darcRunning
+            && snapshot.profile == state.selectedEnvironmentName() && snapshot.darcRunning
         let policy: NSApplication.ActivationPolicy = shouldHide ? .accessory : .regular
         if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }

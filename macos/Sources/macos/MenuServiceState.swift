@@ -8,6 +8,7 @@ final class MenuServiceState {
         var profile = ""
         var chromeRunning = false
         var darcRunning = false
+        var browserPreparing = false
     }
 
     private(set) var snapshot = Snapshot()

@@ -64,6 +64,14 @@ Changing the Compose folder does not migrate existing projects. VM disks can
 grow but cannot shrink. Uninstall archives launcher data under that directory's
 `archive/` folder; external Compose projects are preserved.
 
+The tray has separate Xe Computer and Chrome Engine menus above the Environment
+selector. Environments choose the released IWA or a development URL and share
+browser data when they use the same engine. Helium uses `profiles/default`;
+other engine variants use their own profile folders. Hold Option for New
+Environment, Override URL, browser variants and the existing advanced controls.
+Older environment-specific profile folders are retained without automatic
+migration into the shared browser profile.
+
 Hold Option when opening the tray menu for **Restart Xe** and **Uninstall…**.
 Both require verified shutdown of every component. Uninstall retains earlier
 archives and moves the approved launcher bundle to Trash. A shared lifecycle

@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 
 final class ExternalState: @unchecked Sendable {
     static let appSupportIdentifier = "dev.xe.computer"
@@ -81,6 +82,7 @@ final class ExternalState: @unchecked Sendable {
     var _browserPid: pid_t = 0
     private let browserLifecycleLock = NSLock()
     private var _browserStackStopRequested = false
+    private var _browserSetupInProgress = false
     private var darcApp: NSRunningApplication?
 
     /// Check if a named subprocess is currently running
@@ -103,11 +105,24 @@ final class ExternalState: @unchecked Sendable {
         return true
     }
 
-    private func darcShimAppURL() -> URL {
-        let profileName = selectedProfileName()
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
-        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
-        return Self.appDataURL.appendingPathComponent("shims/\(profileName)/\(shimAppName)")
+    func darcShimAppURL() -> URL {
+        Self.darcShimAppURL(
+            dataURL: Self.appDataURL,
+            profileName: selectedProfileName(),
+            overrideURL: darcOverrideURL(forEnvironment: selectedEnvironmentName())
+        )
+    }
+
+    static func darcShimAppURL(dataURL: URL, profileName: String, overrideURL: String?) -> URL {
+        let shimDirectory = dataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
+        // The same source reuses its shim across environments. Different dev
+        // URLs must not open a shim installed for another source.
+        if let overrideURL {
+            let sourceID = SHA256.hash(data: Data(overrideURL.utf8)).map { String(format: "%02x", $0) }.joined()
+            return shimDirectory.appendingPathComponent(sourceID, isDirectory: true)
+                .appendingPathComponent(Self.xeComputerDevelopmentShimAppName)
+        }
+        return shimDirectory.appendingPathComponent(Self.xeComputerShimAppName)
     }
 
     private func isManagedDarcApplication(_ app: NSRunningApplication, at appURL: URL) -> Bool {
@@ -141,11 +156,7 @@ final class ExternalState: @unchecked Sendable {
         ensureAppDataFolderExists()
         updateSettings()
         updateChromeProfiles()
-        let localBundleProfiles = Set(
-            chromeProfiles.lazy
-                .map(\.name)
-                .filter { self.darcOverrideURL(forProfile: $0) == nil }
-        )
+        let localBundleProfiles: Set<String> = [selectedProfileName()]
         activateConfiguredDarcBundle(
             dataURL: Self.appDataURL,
             profileNames: localBundleProfiles,
@@ -322,6 +333,18 @@ final class ExternalState: @unchecked Sendable {
         browserLifecycleLock.lock()
         defer { browserLifecycleLock.unlock() }
         return _browserStackStopRequested
+    }
+
+    var browserSetupInProgress: Bool {
+        browserLifecycleLock.lock()
+        defer { browserLifecycleLock.unlock() }
+        return _browserSetupInProgress
+    }
+
+    func setBrowserSetupInProgress(_ value: Bool) {
+        browserLifecycleLock.lock()
+        _browserSetupInProgress = value
+        browserLifecycleLock.unlock()
     }
 
     func getLogs(source: String? = nil) -> [LogEntry] {
@@ -799,22 +822,22 @@ final class ExternalState: @unchecked Sendable {
         }
     }
 
-    // MARK: - Per-profile overrides
+    // MARK: - Environments and browser profiles
 
-    /// Returns the override URL for the given profile's Darc IWA, or nil if not set.
-    func darcOverrideURL(forProfile profileName: String) -> String? {
+    /// Returns the override URL for the environment's Darc IWA, or nil if not set.
+    func darcOverrideURL(forEnvironment environmentName: String) -> String? {
         guard let overrides = settings.rawData?["overrides"] as? [String: Any],
-              let profileOverrides = overrides[profileName] as? [String: Any],
+              let profileOverrides = overrides[environmentName] as? [String: Any],
               let darc = profileOverrides["darc"] as? [String: Any],
               let url = darc["url"] as? String, !url.isEmpty else { return nil }
         return url
     }
 
-    /// Sets or clears the override URL for the given profile's Darc IWA.
-    func setDarcOverrideURL(forProfile profileName: String, url: String?) {
+    /// Sets or clears the override URL for the environment's Darc IWA.
+    func setDarcOverrideURL(forEnvironment environmentName: String, url: String?) {
         var dict = settings.rawData ?? [:]
         var overrides = dict["overrides"] as? [String: Any] ?? [:]
-        var profileOverrides = overrides[profileName] as? [String: Any] ?? [:]
+        var profileOverrides = overrides[environmentName] as? [String: Any] ?? [:]
         var darc = profileOverrides["darc"] as? [String: Any] ?? [:]
 
         if let url, !url.isEmpty {
@@ -824,23 +847,61 @@ final class ExternalState: @unchecked Sendable {
         }
 
         profileOverrides["darc"] = darc.isEmpty ? nil : darc
-        overrides[profileName] = profileOverrides.isEmpty ? nil : profileOverrides
+        overrides[environmentName] = profileOverrides.isEmpty ? nil : profileOverrides
         dict["overrides"] = overrides.isEmpty ? nil : overrides
         settings = Settings(rawData: dict)
         saveSettings()
     }
 
-    /// Returns the currently selected profile name, defaulting to "default".
-    func selectedProfileName() -> String {
+    /// Environment selection retains the existing settings key; it no longer
+    /// selects a separate browser user-data directory.
+    func selectedEnvironmentName() -> String {
         (settings.rawData?["selected_profile"] as? String) ?? "default"
     }
 
-    /// Select a profile by name. If Chrome is running it must be restarted externally.
-    func selectProfile(_ name: String) {
+    var environmentNames: [String] {
+        Self.environmentNames(settings: settings.rawData ?? [:])
+    }
+
+    static func environmentNames(settings: [String: Any]) -> [String] {
+        var names = Set(settings["environment_names"] as? [String] ?? [])
+        names.formUnion((settings["overrides"] as? [String: Any] ?? [:]).keys)
+        names.insert((settings["selected_profile"] as? String) ?? "default")
+        names.remove("default")
+        return ["default"] + names.sorted()
+    }
+
+    func selectEnvironment(_ name: String) {
         var dict = settings.rawData ?? [:]
+        dict["environment_names"] = Array(Set(environmentNames + [name])).sorted()
         dict["selected_profile"] = name
         settings = Settings(rawData: dict)
         saveSettings()
+    }
+
+    func createEnvironment(name: String) -> String? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return "Environment name cannot be empty" }
+        guard name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+            return "Environment name must be a single folder name"
+        }
+        guard !environmentNames.contains(name) else { return "Environment '\(name)' already exists" }
+        var dict = settings.rawData ?? [:]
+        dict["environment_names"] = environmentNames + [name]
+        settings = Settings(rawData: dict)
+        saveSettings()
+        return nil
+    }
+
+    /// All environments using an engine share its profile. Helium keeps the
+    /// existing default directory; other engine variants own distinct folders.
+    static func browserProfileName(settings: [String: Any]) -> String {
+        let variant = settings["selected_chrome_variant"] as? String ?? "helium"
+        return variant == "helium" ? "default" : variant
+    }
+
+    func selectedProfileName() -> String {
+        Self.browserProfileName(settings: settings.rawData ?? [:])
     }
 
     /// Create a new profile folder from the bootstrap template (if available) and return an error string on failure.

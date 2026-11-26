@@ -57,7 +57,8 @@ extension ExternalState {
             if let err = createProfile(name: profileName) { return err }
         }
 
-        let isDevProxy = darcOverrideURL(forProfile: profileName) != nil
+        let overrideURL = darcOverrideURL(forEnvironment: selectedEnvironmentName())
+        let isDevProxy = overrideURL != nil
         if !isDevProxy {
             activateConfiguredDarcBundle(
                 dataURL: Self.appDataURL,
@@ -89,14 +90,12 @@ extension ExternalState {
             args.append("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/\(majorVersion).0.0.0 Safari/537.36")
         }
 
-        // Install the IWA: use override URL if set for this profile, otherwise use local file.
+        // Install the IWA: use the environment's override URL, otherwise use the local file.
         // --install-isolated-web-app-from-url is only needed for the initial install (shim not yet present).
-        let shimDir = Self.appDataURL.appendingPathComponent("shims/\(profileName)", isDirectory: true)
-        let shimAppName = Self.xeComputerShimAppName(isDevelopment: isDevProxy)
-        let shimApp = shimDir.appendingPathComponent(shimAppName)
+        let shimApp = darcShimAppURL()
         let shimExists = FileManager.default.fileExists(atPath: shimApp.path)
 
-        if let overrideURL = darcOverrideURL(forProfile: profileName),
+        if let overrideURL,
            (overrideURL.hasPrefix("http://") || overrideURL.hasPrefix("https://")),
            !shimExists {
             args.append("--install-isolated-web-app-from-url=\(overrideURL)")
@@ -198,8 +197,10 @@ extension ExternalState {
     /// on first IWA install. We wait for it, move it to our shims dir, restart Chrome
     /// with a fresh Preferences.json.
     private func provisionAppShim(profileName: String, profileDir: URL, shimApp: URL, chrome: InstalledChrome) {
+        setBrowserSetupInProgress(true)
         DispatchQueue.global().async { [weak self] in
             guard let self else { return }
+            defer { self.setBrowserSetupInProgress(false) }
             let fm = FileManager.default
             let appsFolder = chrome.variant == "canary" ? "Chrome Canary Apps.localized" : "Chromium Apps.localized"
             let systemShimPath = NSHomeDirectory() + "/Applications/\(appsFolder)/\(Self.xeComputerShimAppName)"
