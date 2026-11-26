@@ -331,6 +331,13 @@ jobs:
             exit 1
           fi
 
+      - name: Verify manual DNS selection
+        run: >-
+          deno run --no-config --allow-read --allow-write --allow-env --allow-run
+          macos/Tests/Integration/verify-system-dns.ts
+          macos/.build/smol-runtime/SmolRuntime/smolvm-bin
+          macos/.build/smol-runtime/SmolRuntime
+
       - name: Verify packaged VM routing and builds
         run: deno run --no-config --allow-read --allow-write --allow-net --allow-run macos/Tests/Integration/verify-builder-runtime.ts "macos/dist/Xe Launcher.app"
 

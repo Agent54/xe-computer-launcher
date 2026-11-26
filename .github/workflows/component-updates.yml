@@ -104,6 +104,14 @@ jobs:
           GH_TOKEN: ${{ secrets.SMOLVM_GITHUB_TOKEN || github.token }}
         run: make -C macos '${{ steps.update.outputs.build_target }}'
 
+      - name: Verify manual DNS selection in updated SmolVM
+        if: steps.update.outputs.updated == 'true' && matrix.component == 'smolvm'
+        run: >-
+          deno run --no-config --allow-read --allow-write --allow-env --allow-run
+          macos/Tests/Integration/verify-system-dns.ts
+          macos/.build/smol-runtime/SmolRuntime/smolvm-bin
+          macos/.build/smol-runtime/SmolRuntime
+
       - name: Create or update component pull request
         if: steps.update.outputs.updated == 'true'
         env:
